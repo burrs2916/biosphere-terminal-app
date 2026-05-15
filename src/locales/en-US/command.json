@@ -1,0 +1,22 @@
+{
+  "palette": {
+    "title": "Command Palette",
+    "placeholder": "Search commands, snippets, or type a new command...",
+    "search_commands_snippets": "Type to search commands and snippets",
+    "press_enter_execute": "Press Enter to execute",
+    "execute": "Execute",
+    "cancel": "Cancel"
+  },
+  "tags": {
+    "dangerous": "Dangerous",
+    "pipe": "pipe",
+    "redirect": "redirect",
+    "background": "background"
+  },
+  "danger_dialog": {
+    "title": "Dangerous Command",
+    "warning": "This command may cause irreversible damage to your system:",
+    "confirm": "Are you sure you want to execute this command?",
+    "execute_anyway": "Execute Anyway"
+  }
+}

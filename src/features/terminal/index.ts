@@ -1,0 +1,5 @@
+export { TerminalEmulator } from './components/TerminalEmulator';
+export { TerminalToolbar } from './components/TerminalToolbar';
+export { TerminalStatusBar } from './components/TerminalStatusBar';
+export { ConnectionPicker } from './components/ConnectionPicker';
+export type { ConnectionPickerResult } from './components/ConnectionPicker';

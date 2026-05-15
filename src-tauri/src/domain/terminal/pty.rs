@@ -1,0 +1,170 @@
+#![allow(dead_code)]
+
+use crate::core::error::Result;
+use crate::core::types::{PtyConfig, SshConnectionInfo};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
+
+pub struct Pty {
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
+}
+
+impl Pty {
+    pub fn spawn(config: &PtyConfig) -> Result<Self> {
+        let pty_system = native_pty_system();
+
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: config.rows,
+                cols: config.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| crate::core::error::Error::Terminal(format!("openpty failed: {}", e)))?;
+
+        let cmd = Self::build_command(config);
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| crate::core::error::Error::Terminal(format!("spawn failed: {}", e)))?;
+
+        drop(pair.slave);
+
+        let _reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| crate::core::error::Error::Terminal(format!("clone reader failed: {}", e)))?;
+
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| crate::core::error::Error::Terminal(format!("take writer failed: {}", e)))?;
+
+        Ok(Pty {
+            master: Arc::new(Mutex::new(pair.master)),
+            writer: Arc::new(Mutex::new(writer)),
+            child: Arc::new(Mutex::new(child)),
+        })
+    }
+
+    fn build_command(config: &PtyConfig) -> CommandBuilder {
+        let conn_type = config.connection_type.as_deref().unwrap_or("local");
+
+        if conn_type == "ssh" {
+            if let Some(ssh) = &config.ssh {
+                return Self::build_ssh_command(ssh);
+            }
+        }
+
+        Self::build_local_command(config)
+    }
+
+    fn build_local_command(config: &PtyConfig) -> CommandBuilder {
+        let shell = config.shell.as_deref().unwrap_or("/bin/zsh");
+        let mut cmd = CommandBuilder::new(shell);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+
+        if let Some(cwd) = &config.cwd {
+            cmd.cwd(cwd);
+        }
+
+        if let Some(env) = &config.env {
+            for (key, value) in env {
+                cmd.env(key, value);
+            }
+        }
+
+        cmd
+    }
+
+    fn build_ssh_command(ssh: &SshConnectionInfo) -> CommandBuilder {
+        let mut args: Vec<String> = Vec::new();
+
+        args.push("-o".to_string());
+        args.push("StrictHostKeyChecking=accept-new".to_string());
+
+        if ssh.port != 22 {
+            args.push("-p".to_string());
+            args.push(ssh.port.to_string());
+        }
+
+        if ssh.auth_method == "private_key" {
+            if let Some(key_path) = &ssh.private_key_path {
+                args.push("-i".to_string());
+                args.push(key_path.clone());
+            }
+        }
+
+        args.push(format!("{}@{}", ssh.username, ssh.host));
+
+        let mut cmd = CommandBuilder::new("ssh");
+        cmd.args(&args);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd
+    }
+
+    pub fn reader(&self) -> Arc<Mutex<Box<dyn Read + Send>>> {
+        let master = self.master.lock().unwrap();
+        match master.try_clone_reader() {
+            Ok(reader) => Arc::new(Mutex::new(reader)),
+            Err(_) => {
+                let pty_system = native_pty_system();
+                let _ = pty_system.openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
+                Arc::new(Mutex::new(Box::new(std::io::empty())))
+            }
+        }
+    }
+
+    pub fn writer_clone(&self) -> Arc<Mutex<Box<dyn Write + Send>>> {
+        Arc::clone(&self.writer)
+    }
+
+    pub fn write(&self, data: &[u8]) -> Result<usize> {
+        let mut writer = self.writer.lock().unwrap();
+        writer
+            .write(data)
+            .map_err(|e| crate::core::error::Error::Terminal(format!("write failed: {}", e)))
+    }
+
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        let master = self.master.lock().unwrap();
+        master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| crate::core::error::Error::Terminal(format!("resize failed: {}", e)))
+    }
+
+    pub fn kill(&self) -> Result<()> {
+        let mut child = self.child.lock().unwrap();
+        child
+            .kill()
+            .map_err(|e| crate::core::error::Error::Terminal(format!("kill failed: {}", e)))
+    }
+
+    pub fn try_wait(&self) -> Result<Option<i32>> {
+        let mut child = self.child.lock().unwrap();
+        match child.try_wait() {
+            Ok(Some(status)) => Ok(Some(status.exit_code() as i32)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(crate::core::error::Error::Terminal(format!(
+                "wait failed: {}",
+                e
+            ))),
+        }
+    }
+}

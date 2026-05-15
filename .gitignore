@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Rust build artifacts
+src-tauri/target/
+
+# Database files (users get clean DB on first launch)
+src-tauri/.data/
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+
+# AI tool configs (personal)
+.codebuddy/
+.workbuddy/
+
+# Tauri generated schemas (auto-generated on build)
+src-tauri/gen/
+
+# Notes data (runtime generated)
+src-tauri/notes/
+
+# Dev scripts
+dev.sh
+start.sh

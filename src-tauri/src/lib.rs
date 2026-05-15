@@ -1,0 +1,187 @@
+mod core;
+mod domain;
+mod infra;
+mod app;
+mod interface;
+mod plugins;
+
+use std::sync::Arc;
+use tauri::Manager;
+
+use infra::storage::database::Database;
+use app::terminal_service::TerminalService;
+use app::notebook_service::NotebookService;
+use app::agent_service::AgentService;
+use app::linker_service::LinkerService;
+use app::icon_service::IconService;
+use domain::command::executor::CommandExecutor;
+
+fn get_data_dir() -> std::path::PathBuf {
+    if cfg!(debug_assertions) {
+        let project_root = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        project_root.join(".data").join("dev")
+    } else {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        exe_dir.join("data")
+    }
+}
+
+fn get_log_dir() -> std::path::PathBuf {
+    if cfg!(debug_assertions) {
+        let project_root = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        project_root.join("logs")
+    } else {
+        get_data_dir().join("logs")
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let data_dir = get_data_dir();
+    let log_dir = get_log_dir();
+
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!("Warning: could not create data dir {:?}: {}", data_dir, e);
+    }
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!("Warning: could not create log dir {:?}: {}", log_dir, e);
+    }
+
+    infra::logging::init(&log_dir);
+
+    tracing::info!("[app] data directory: {:?}", data_dir);
+    tracing::info!("[app] log directory: {:?}", log_dir);
+
+    let terminal_service = Arc::new(TerminalService::new());
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .manage(terminal_service.clone())
+        .setup(move |app| {
+            let app_handle = app.handle();
+
+            terminal_service.set_app_handle(app_handle.clone());
+
+            let db_path = data_dir.join("biosphere.db");
+            let notes_dir = data_dir.join("notes");
+
+            let _ = std::fs::create_dir_all(&notes_dir);
+
+            let db = match Database::open(&db_path) {
+                Ok(db) => db,
+                Err(e) => {
+                    tracing::error!("[app] failed to open database: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let db_arc = Arc::new(db);
+
+            let notebook_service = Arc::new(NotebookService::new(notes_dir, db_arc.clone()));
+            let agent_service = Arc::new(AgentService::new(db_arc.clone(), notebook_service.clone(), terminal_service.clone()));
+            let linker_service = Arc::new(LinkerService::new(
+                notebook_service.clone(),
+                db_arc.clone(),
+            ));
+            let command_executor = Arc::new(CommandExecutor::new(db_arc.clone()));
+            let icons_dir = data_dir.join("icons");
+            let icon_service = Arc::new(IconService::new(db_arc.clone(), icons_dir));
+
+            app_handle.manage(db_arc);
+            app_handle.manage(notebook_service);
+            app_handle.manage(agent_service);
+            app_handle.manage(linker_service);
+            app_handle.manage(command_executor);
+            app_handle.manage(icon_service);
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            interface::commands::terminal::spawn_terminal,
+            interface::commands::terminal::write_to_terminal,
+            interface::commands::terminal::kill_terminal,
+            interface::commands::terminal::resize_terminal,
+            interface::commands::terminal::relay_execute_command,
+            interface::commands::session::list_sessions,
+            interface::commands::session::create_session,
+            interface::commands::session::delete_session,
+            interface::commands::command::get_command_history,
+            interface::commands::command::save_command_history,
+            interface::commands::command::search_command_history,
+            interface::commands::command::list_snippets,
+            interface::commands::command::save_snippet,
+            interface::commands::command::delete_snippet,
+            interface::commands::command::parse_command,
+            interface::commands::command::record_exit_code,
+            interface::commands::command::delete_command_history,
+            interface::commands::command::clear_command_history,
+            interface::commands::profile::list_profiles,
+            interface::commands::profile::save_profile,
+            interface::commands::profile::delete_profile,
+            interface::commands::connection::list_connections,
+            interface::commands::connection::save_connection,
+            interface::commands::connection::delete_connection,
+            interface::commands::connection::test_connection,
+            interface::commands::plugin::list_plugins,
+            interface::commands::plugin::load_plugin,
+            interface::commands::plugin::unload_plugin,
+            interface::commands::notebook::list_notes,
+            interface::commands::notebook::get_note,
+            interface::commands::notebook::create_note,
+            interface::commands::notebook::update_note,
+            interface::commands::notebook::delete_note,
+            interface::commands::notebook::toggle_pin_note,
+            interface::commands::notebook::search_notes,
+            interface::commands::notebook::list_note_categories,
+            interface::commands::notebook::link_command_to_note,
+            interface::commands::notebook::get_linked_commands,
+            interface::commands::notebook::get_linked_notes,
+            interface::commands::notebook::get_notes_for_command_text,
+            interface::commands::notebook::list_note_groups,
+            interface::commands::notebook::create_note_group,
+            interface::commands::notebook::update_note_group,
+            interface::commands::notebook::delete_note_group,
+            interface::commands::notebook::list_note_categories_by_group,
+            interface::commands::notebook::create_note_category,
+            interface::commands::notebook::update_note_category,
+            interface::commands::notebook::delete_note_category,
+            interface::commands::agent::list_providers,
+            interface::commands::agent::save_provider,
+            interface::commands::agent::delete_provider,
+            interface::commands::agent::list_endpoints,
+            interface::commands::agent::list_endpoints_by_provider,
+            interface::commands::agent::save_endpoint,
+            interface::commands::agent::delete_endpoint,
+            interface::commands::agent::list_models,
+            interface::commands::agent::list_models_by_endpoint,
+            interface::commands::agent::save_model,
+            interface::commands::agent::delete_model,
+            interface::commands::agent::test_endpoint_connection,
+            interface::commands::agent::test_model_chat,
+            interface::commands::agent::list_agents,
+            interface::commands::agent::save_agent,
+            interface::commands::agent::delete_agent,
+            interface::commands::agent::list_conversations,
+            interface::commands::agent::create_conversation,
+            interface::commands::agent::delete_conversation,
+            interface::commands::agent::list_messages,
+            interface::commands::agent::save_message,
+            interface::commands::agent::run_agent,
+            interface::commands::environment::get_environment,
+            interface::commands::icon::list_icon_groups,
+            interface::commands::icon::create_icon_group,
+            interface::commands::icon::update_icon_group,
+            interface::commands::icon::delete_icon_group,
+            interface::commands::icon::list_custom_icons,
+            interface::commands::icon::upload_custom_icon,
+            interface::commands::icon::delete_custom_icon,
+            interface::commands::icon::get_custom_icon_urls,
+            interface::commands::notebook::unlink_command_note,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
