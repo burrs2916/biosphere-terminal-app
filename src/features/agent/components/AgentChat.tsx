@@ -13,6 +13,7 @@ import { useAgentStore } from '../store/agentStore';
 import { usePluginStore } from '../store/pluginStore';
 import type { MessageDto } from '../../../proto/agent';
 import { useTranslation } from 'react-i18next';
+import { useNotify } from '../../../core/notification';
 import { listen } from '@tauri-apps/api/event';
 import { runAgent, saveMessage, stopAgent, respondPermission } from '../../../core/services/agent.service';
 import { useTheme } from '@mui/material/styles';
@@ -47,6 +48,7 @@ export function AgentChat() {
     loadMessages, addMessage, updateMessage, createConversation, deleteConversation,
     updateConversationTitle, loadConversations, loadAgents, loadModels, deleteMessagesAfter,
   } = useAgentStore();
+  const notify = useNotify().notify;
   const { loadPluginTools } = usePluginStore();
   const { t } = useTranslation('agent');
   const theme = useTheme();
@@ -122,7 +124,7 @@ export function AgentChat() {
               if (firstUserMsg) {
                 const autoTitle = firstUserMsg.content.replace(/\[附件:.*?\]\s*/g, '').trim().slice(0, 40);
                 if (autoTitle) {
-                  updateConversationTitle(activeConversationId, autoTitle).catch(() => {});
+                  updateConversationTitle(activeConversationId, autoTitle).catch((e) => notify(String(e)));
                 }
               }
             }

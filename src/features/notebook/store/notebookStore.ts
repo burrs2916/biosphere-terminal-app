@@ -81,7 +81,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const note = await notebookService.createNote(input);
       const notes = [note, ...get().notes];
       set({ notes, loading: false });
-      emit('auto-trigger-agent', { triggerType: 'auto_save', noteId: note.id, noteTitle: note.title, action: 'create' }).catch(() => {});
+      emit('auto-trigger-agent', { triggerType: 'auto_save', noteId: note.id, noteTitle: note.title, action: 'create' }).catch((e) => console.error('Auto-trigger agent failed:', e));
       return note;
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -95,7 +95,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const note = await notebookService.updateNote(input);
       const notes = get().notes.map((n) => (n.id === note.id ? note : n));
       set({ notes, loading: false });
-      emit('auto-trigger-agent', { triggerType: 'auto_save', noteId: note.id, noteTitle: note.title, action: 'update' }).catch(() => {});
+      emit('auto-trigger-agent', { triggerType: 'auto_save', noteId: note.id, noteTitle: note.title, action: 'update' }).catch((e) => console.error('Auto-trigger agent failed:', e));
       return note;
     } catch (e) {
       set({ error: String(e), loading: false });

@@ -11,6 +11,7 @@ import { writeToTerminal, resizeTerminal } from '../../../core/services/terminal
 import { parseCommand, recordExitCode } from '../../../core/services/command.service';
 import { getDefaultProfile } from '../../../core/services/profile.service';
 import { useSettingsStore, getThemeAppearance } from '../../../engine';
+import { useNotify } from '../../../core/notification';
 import { useTranslation } from 'react-i18next';
 import type { AppearanceConfig } from '../../../proto';
 import '@xterm/xterm/css/xterm.css';
@@ -90,6 +91,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
     const copyOnSelect = useSettingsStore((s) => s.settings.copyOnSelect);
     const pasteOnMiddleClick = useSettingsStore((s) => s.settings.pasteOnMiddleClick);
     const webglRenderer = useSettingsStore((s) => s.settings.webglRenderer);
+    const notify = useNotify().notify;
 
     useEffect(() => {
       if (profileId) {
@@ -101,16 +103,16 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
                 setProfileAppearance(JSON.parse(profile.config_json));
               } catch {}
             }
-          }).catch(() => {});
-        }).catch(() => {});
+          }).catch((e) => notify(String(e)));
+        }).catch((e) => notify(String(e)));
       } else {
-        getDefaultProfile().then((profile) => {
+          getDefaultProfile().then((profile) => {
           if (profile) {
             try {
               setProfileAppearance(JSON.parse(profile.config_json));
             } catch {}
           }
-        }).catch(() => {});
+        }).catch((e) => notify(String(e)));
       }
     }, [profileId]);
 
@@ -248,14 +250,14 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         if (mod && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
           const selection = terminal.getSelection();
           if (selection) {
-            navigator.clipboard.writeText(selection).catch(() => {});
+            navigator.clipboard.writeText(selection).catch((e) => notify(String(e)));
           }
           return false;
         }
         if (mod && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
           navigator.clipboard.readText().then((text) => {
             if (text) terminal.paste(text);
-          }).catch(() => {});
+          }).catch((e) => notify(String(e)));
           return false;
         }
         return true;
@@ -269,7 +271,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
               fitAddon.fit();
               const cols = terminal.cols;
               const rows = terminal.rows;
-              resizeTerminal(sessionId, rows, cols).catch(() => {});
+              resizeTerminal(sessionId, rows, cols).catch((e) => notify(String(e)));
             } catch {}
           }
         }
@@ -280,7 +282,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         selectionChangeOffRef.current = terminal.onSelectionChange(() => {
           const selection = terminal.getSelection();
           if (selection) {
-            navigator.clipboard.writeText(selection).catch(() => {});
+            navigator.clipboard.writeText(selection).catch((e) => notify(String(e)));
           }
         });
       }
@@ -293,7 +295,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
               if (text) {
                 terminal.paste(text);
               }
-            }).catch(() => {});
+            }).catch((e) => notify(String(e)));
           }
         };
         containerRef.current.addEventListener('mousedown', handler);
@@ -312,11 +314,11 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         }
       }).then((unlisten) => {
         dragDropUnlistenRef.current = unlisten;
-      }).catch(() => {});
+      }).catch((e) => notify(String(e)));
 
       terminal.onData((data) => {
         const bytes = textEncoderRef.current.encode(data);
-        writeToTerminal(sessionId, Array.from(bytes)).catch(() => {});
+        writeToTerminal(sessionId, Array.from(bytes)).catch((e) => notify(String(e)));
 
         if (data === '\r') {
           const cmd = lineBufferRef.current.trim();
@@ -324,7 +326,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
             lastCommandRef.current = cmd;
             parseCommand(cmd, sessionId).then((result) => {
               lastEntryIdRef.current = result.entryId;
-            }).catch(() => {});
+            }).catch((e) => notify(String(e)));
           }
           lineBufferRef.current = '';
         } else if (data === '\x7f') {
@@ -357,7 +359,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       });
 
       resizeOffRef.current = terminal.onResize(({ cols, rows }) => {
-        resizeTerminal(sessionId, rows, cols).catch(() => {});
+        resizeTerminal(sessionId, rows, cols).catch((e) => notify(String(e)));
       });
 
       terminal.onTitleChange((title) => {
@@ -381,7 +383,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       listen<{ session_id: string; exit_code: number | null }>('terminal-closed', (event) => {
         if (event.payload.session_id === sessionId) {
           if (lastEntryIdRef.current && event.payload.exit_code != null) {
-            recordExitCode(lastEntryIdRef.current, event.payload.exit_code).catch(() => {});
+            recordExitCode(lastEntryIdRef.current, event.payload.exit_code).catch((e) => notify(String(e)));
           }
           if (event.payload.exit_code != null && event.payload.exit_code !== 0 && lastCommandRef.current) {
             emit('auto-trigger-agent', {
@@ -389,7 +391,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
               command: lastCommandRef.current,
               exitCode: event.payload.exit_code,
               sessionId,
-            }).catch(() => {});
+            }).catch((e) => notify(String(e)));
           }
           terminal.write(`\r\n\x1b[90m${t('output.process_exited')}\x1b[0m\r\n`);
           onExit?.(sessionId);
@@ -464,7 +466,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         selectionChangeOffRef.current = terminalRef.current.onSelectionChange(() => {
           const selection = terminalRef.current?.getSelection();
           if (selection) {
-            navigator.clipboard.writeText(selection).catch(() => {});
+            navigator.clipboard.writeText(selection).catch((e) => notify(String(e)));
           }
         });
       }
@@ -484,7 +486,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
               if (text) {
                 terminalRef.current?.paste(text);
               }
-            }).catch(() => {});
+            }).catch((e) => notify(String(e)));
           }
         };
         containerRef.current.addEventListener('mousedown', handler);

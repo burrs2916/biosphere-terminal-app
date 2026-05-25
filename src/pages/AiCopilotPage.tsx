@@ -11,6 +11,7 @@ import type { MessageDto } from '../proto/agent';
 import { listen } from '@tauri-apps/api/event';
 import { useTheme } from '@mui/material/styles';
 import { useTranslation } from 'react-i18next';
+import { useNotify } from '../core/notification';
 import { ChatMessagesArea, ChatInputArea, type FileAttachment } from '../components/chat/ChatComponents';
 import type { ToolCallDisplay } from '../components/chat/ChatComponents';
 
@@ -63,6 +64,7 @@ export function AiCopilotPage() {
   const boundAgentId = getTerminalCopilotAgentId();
   const boundAgent = agents.find((a) => a.id === boundAgentId);
   const boundModel = boundAgent ? models.find((m) => m.id === boundAgent.modelId) : null;
+  const notify = useNotify().notify;
 
   useEffect(() => {
     loadAgents();
@@ -112,7 +114,7 @@ export function AiCopilotPage() {
           if (firstUserMsg) {
             const autoTitle = firstUserMsg.content.replace(/\[附件:.*?\]\s*/g, '').trim().slice(0, 40);
             if (autoTitle) {
-              updateConversationTitle(conversationId, autoTitle).catch(() => {});
+              updateConversationTitle(conversationId, autoTitle).catch((e) => notify(String(e)));
             }
           }
         } catch {}

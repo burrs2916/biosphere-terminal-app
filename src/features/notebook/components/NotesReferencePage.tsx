@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNotify } from '../../../core/notification';
 import {
   Box, Typography, List, ListItemButton, ListItemText, ListItemIcon,
   IconButton, TextField, InputAdornment, Tooltip, Divider,
@@ -194,6 +195,7 @@ function getMarkdownStyles(isDark: boolean) {
 
 export function NotesReferencePage() {
   const { t } = useTranslation('notebook');
+  const notify = useNotify().notify;
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
   const primaryColor = isDark ? '#6C63FF' : '#5B54E0';
@@ -211,8 +213,8 @@ export function NotesReferencePage() {
   const [loadingContent, setLoadingContent] = useState(false);
 
   useEffect(() => {
-    listNoteGroups().then(setGroups).catch(console.error);
-    listNotes().then(setNotes).catch(console.error);
+    listNoteGroups().then(setGroups).catch((e) => { console.error(e); notify(String(e)); });
+    listNotes().then(setNotes).catch((e) => { console.error(e); notify(String(e)); });
   }, []);
 
   const loadGroupData = useCallback(async (groupId: string) => {

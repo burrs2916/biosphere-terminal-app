@@ -41,6 +41,7 @@ pub struct PermissionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionResponse {
     pub conversation_id: String,

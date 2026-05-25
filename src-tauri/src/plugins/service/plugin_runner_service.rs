@@ -80,6 +80,7 @@ impl PluginRunnerService {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_plugin_tools(&self, plugin_id: &str) -> Result<Vec<PluginTool>, String> {
         let plugin = self.plugin_service.get_plugin(plugin_id)?
             .ok_or_else(|| format!("Plugin '{}' not found", plugin_id))?;

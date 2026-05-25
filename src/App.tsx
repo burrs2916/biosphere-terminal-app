@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { useEffect } from 'react';
 import { AppTheme } from './theme';
 import { AppShell, Sidebar, Header, StatusBar } from './components/layout';
+import { NotificationProvider } from './core/notification';
 import { useLayoutStore, useSettingsStore } from './engine';
 import i18n from './core/i18n';
 import { TerminalPage } from './pages/TerminalPage';
@@ -12,6 +13,8 @@ import { PluginPage } from './pages/PluginPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { NotebookPage } from './pages/NotebookPage';
 import { AgentPage } from './pages/AgentPage';
+import { ProfilePage } from './pages/ProfilePage';
+import { NotFoundPage } from './pages/NotFoundPage';
 import { CategoryNotesPage } from './features/notebook/components/CategoryNotesPage';
 import { NotesReferencePage } from './features/notebook/components/NotesReferencePage';
 import { AiCopilotPage } from './pages/AiCopilotPage';
@@ -76,6 +79,8 @@ function AppLayout() {
               <Route path="/connections" element={<ConnectionPage />} />
               <Route path="/plugins" element={<PluginPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/profile" element={<ProfilePage />} />
+              <Route path="*" element={<NotFoundPage />} />
             </Routes>
           </Box>
         </Box>
@@ -93,6 +98,7 @@ function StandaloneLayout() {
       <Route path="/ai-copilot" element={<AiCopilotPage />} />
       <Route path="/plugin-workshop" element={<PluginWorkshopPage />} />
       <Route path="/plugin-script-viewer" element={<PluginScriptViewerPage />} />
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
   );
 }
@@ -121,7 +127,9 @@ export default function App() {
   return (
     <BrowserRouter>
       <AppTheme>
-        <RootRouter />
+        <NotificationProvider>
+          <RootRouter />
+        </NotificationProvider>
       </AppTheme>
     </BrowserRouter>
   );

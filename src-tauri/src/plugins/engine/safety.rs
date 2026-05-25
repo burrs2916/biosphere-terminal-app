@@ -18,6 +18,7 @@ pub fn is_dangerous_command(command: &str) -> Option<&'static str> {
     None
 }
 
+#[allow(dead_code)]
 pub fn is_path_traversal(path: &str) -> bool {
     let normalized = std::path::Path::new(path);
     for component in normalized.components() {

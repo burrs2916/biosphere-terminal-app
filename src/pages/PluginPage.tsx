@@ -903,7 +903,7 @@ function PluginSidebar({ plugins, onToggle, onDelete, accentColor, successColor,
       <Box sx={{ px: 1, py: 1 }}>
         <Paper
           variant="outlined"
-          onClick={() => openPluginWorkshopWindow().catch(console.error)}
+          onClick={() => openPluginWorkshopWindow().catch((e) => console.error('Failed to open plugin workshop:', e))}
           sx={{
             p: 1, borderRadius: 1.5, cursor: 'pointer',
             borderColor: `${accentColor}30`,

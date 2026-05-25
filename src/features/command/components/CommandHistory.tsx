@@ -51,6 +51,7 @@ import {
 import { getCommandHistory, searchCommandHistory, deleteCommandHistoryEntry, clearCommandHistory } from '../../../core/services/command.service';
 import { createNote, linkCommandToNote, unlinkCommandNote, listNoteGroups, listNoteCategoriesByGroup, searchNotes } from '../../../core/services/notebook.service';
 import { openNoteEditorWindow } from '../../../core/services/window.service';
+import { useNotify } from '../../../core/notification';
 import { IconRenderer } from '../../notebook/components/IconRenderer';
 import type { CommandHistoryEntry, LinkedNoteInfo } from '../../../proto/command';
 import type { NoteGroupDto, NoteDto } from '../../../proto/notebook';
@@ -88,6 +89,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [expandedCommands, setExpandedCommands] = useState<Set<string>>(new Set());
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' });
+  const notify = useNotify().notify;
 
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [savingGroup, setSavingGroup] = useState<CommandGroup | null>(null);
@@ -243,7 +245,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
     setSaveMode('new');
     setSelectedExistingNoteId('');
     setMatchedNotes([]);
-    listNoteGroups().then(setGroups).catch(() => {});
+    listNoteGroups().then(setGroups).catch((e) => notify(String(e)));
     setSaveDialogOpen(true);
 
     try {
@@ -259,7 +261,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
     setNewNoteGroupId(gid);
     setNewNoteCategory('command');
     if (gid) {
-      listNoteCategoriesByGroup(gid).then(setCategories).catch(() => {});
+      listNoteCategoriesByGroup(gid).then(setCategories).catch((e) => notify(String(e)));
     } else {
       setCategories([]);
     }

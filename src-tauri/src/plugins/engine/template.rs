@@ -118,6 +118,7 @@ fn shell_quote_if_needed(s: &str) -> String {
     format!("\"{}\"", escaped)
 }
 
+#[allow(dead_code)]
 pub fn sanitize_path(path: &str) -> Option<String> {
     let p = std::path::Path::new(path);
 

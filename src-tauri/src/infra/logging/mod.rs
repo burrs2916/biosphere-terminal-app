@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::io::{self, Seek, Write};
+use std::io::{self, Seek};
 
 const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
 

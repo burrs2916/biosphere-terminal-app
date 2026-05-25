@@ -5,16 +5,18 @@ import Typography from '@mui/material/Typography';
 import { CommandHistory } from '../features/command';
 import { writeToTerminal } from '../core/services/terminal.service';
 import { useTerminalStore } from '../engine';
+import { useNotify } from '../core/notification';
 
 export function CommandPage() {
   const { t } = useTranslation('terminal');
   const activeSessionId = useTerminalStore((s) => s.activeSessionId);
+  const notify = useNotify().notify;
 
   const handleExecute = useCallback(
     (command: string) => {
       if (!activeSessionId) return;
       const bytes = new TextEncoder().encode(command + '\n');
-      writeToTerminal(activeSessionId, Array.from(bytes)).catch(console.error);
+      writeToTerminal(activeSessionId, Array.from(bytes)).catch((e) => { console.error(e); notify(String(e)); });
     },
     [activeSessionId],
   );

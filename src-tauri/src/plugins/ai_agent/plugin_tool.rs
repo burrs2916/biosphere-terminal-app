@@ -7,7 +7,7 @@ use crate::app::plugin_service::PluginService;
 use crate::plugins::domain::plugin::PluginTool as PluginToolDef;
 use crate::plugins::domain::usage_log::UsageLogEntry;
 use crate::plugins::engine::executor::{execute_script, ExecutionContext, ExecutionSource};
-use crate::plugins::service::plugin_runner_service::{summarize_params, truncate_str};
+use crate::plugins::service::plugin_runner_service::summarize_params;
 use super::engine::{AgentTool, ToolOutput};
 
 pub struct PluginAgentTool {

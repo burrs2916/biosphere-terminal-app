@@ -17,8 +17,9 @@ impl SshConnection {
     }
 
     pub fn connect(&mut self) -> Result<()> {
-        self.connected = true;
-        Ok(())
+        Err(crate::core::error::Error::Terminal(
+            "SSH connections are not yet implemented".into(),
+        ))
     }
 
     pub fn disconnect(&mut self) -> Result<()> {

@@ -24,6 +24,7 @@ import {
   searchCommandHistory,
   parseCommand,
 } from '../../../core/services/command.service';
+import { useNotify } from '../../../core/notification';
 import type { CommandHistoryEntry, ParsedCommandResult } from '../../../proto';
 
 interface CommandPaletteProps {
@@ -39,6 +40,7 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
   const [parsed, setParsed] = useState<ParsedCommandResult | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dangerConfirm, setDangerConfirm] = useState<string | null>(null);
+  const notify = useNotify().notify;
 
   useEffect(() => {
     if (open) {
@@ -57,7 +59,7 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
       return;
     }
     const timer = setTimeout(() => {
-      searchCommandHistory(query).then(setHistory).catch(() => {});
+      searchCommandHistory(query).then(setHistory).catch((e) => notify(String(e)));
       parseCommand(query).then(setParsed).catch(() => setParsed(null));
     }, 200);
     return () => clearTimeout(timer);

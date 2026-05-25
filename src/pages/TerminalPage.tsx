@@ -35,6 +35,7 @@ import type { PtyConfig } from '../proto';
 import { openNotesReferenceWindow, openAiCopilotWindow, openPluginWorkshopWindow } from '../core/services/window.service';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '../engine';
+import { useNotify } from '../core/notification';
 import { useTranslation } from 'react-i18next';
 
 interface Tab {
@@ -69,6 +70,7 @@ export function TerminalPage() {
 
   const shell = useSettingsStore((s) => s.settings.shell);
   const confirmBeforeClose = useSettingsStore((s) => s.settings.confirmBeforeClose);
+  const notify = useNotify().notify;
 
   useEffect(() => {
     const activeTab = tabsRef.current.find((t) => t.isActive);
@@ -79,11 +81,11 @@ export function TerminalPage() {
     const interval = setInterval(() => {
       getTerminalCwd(activeTab.id).then((cwd) => {
         if (cwd) setActiveCwd(cwd);
-      }).catch(() => {});
+      }).catch((e) => notify(String(e)));
     }, 5000);
     getTerminalCwd(activeTab.id).then((cwd) => {
       if (cwd) setActiveCwd(cwd);
-    }).catch(() => {});
+    }).catch((e) => notify(String(e)));
     return () => clearInterval(interval);
   }, [tabs]);
 
@@ -134,7 +136,7 @@ export function TerminalPage() {
         ? `${result.ssh.username}@${result.ssh.host}`
         : `Terminal ${count}`;
 
-    spawnTerminal(id, config).catch(console.error);
+    spawnTerminal(id, config).catch((e) => { console.error(e); notify(String(e)); });
 
     setTabs((prev) => [
       ...prev.map((t) => ({ ...t, isActive: false })),
@@ -161,7 +163,7 @@ export function TerminalPage() {
         setConfirmCloseId(id);
         return;
       }
-      killTerminal(id).catch(console.error);
+      killTerminal(id).catch((e) => { console.error(e); notify(String(e)); });
       terminalRefs.current.delete(id);
       setTabs((prev) => {
         const filtered = prev.filter((t) => t.id !== id);
@@ -176,7 +178,7 @@ export function TerminalPage() {
 
   const handleConfirmClose = useCallback(() => {
     if (!confirmCloseId) return;
-    killTerminal(confirmCloseId).catch(console.error);
+    killTerminal(confirmCloseId).catch((e) => { console.error(e); notify(String(e)); });
     terminalRefs.current.delete(confirmCloseId);
     setTabs((prev) => {
       const filtered = prev.filter((t) => t.id !== confirmCloseId);
@@ -213,7 +215,7 @@ export function TerminalPage() {
   const handleReconnect = useCallback(
     (tab: Tab) => {
       if (!tab.ssh) return;
-      killTerminal(tab.id).catch(() => {});
+      killTerminal(tab.id).catch((e) => notify(String(e)));
       terminalRefs.current.delete(tab.id);
       const newId = generateId();
       const size = estimateTerminalSize();
@@ -230,7 +232,7 @@ export function TerminalPage() {
           private_key_path: tab.ssh.privateKeyPath,
         },
       };
-      spawnTerminal(newId, config).catch(console.error);
+      spawnTerminal(newId, config).catch((e) => { console.error(e); notify(String(e)); });
       setTabs((prev) =>
         prev.map((t) => (t.id === tab.id ? { ...t, id: newId, disconnected: false } : t)),
       );
@@ -243,8 +245,8 @@ export function TerminalPage() {
       const activeTab = tabs.find((t) => t.isActive);
       if (activeTab) {
         const bytes = new TextEncoder().encode(command + '\n');
-        writeToTerminal(activeTab.id, Array.from(bytes)).catch(console.error);
-        parseCommand(command, activeTab.id).catch(() => {});
+        writeToTerminal(activeTab.id, Array.from(bytes)).catch((e) => { console.error(e); notify(String(e)); });
+        parseCommand(command, activeTab.id).catch((e) => notify(String(e)));
       }
       setPaletteOpen(false);
     },
@@ -252,15 +254,15 @@ export function TerminalPage() {
   );
 
   const handleOpenNotes = useCallback(() => {
-    openNotesReferenceWindow().catch(console.error);
+    openNotesReferenceWindow().catch((e) => { console.error(e); notify(String(e)); });
   }, []);
 
   const handleOpenAiCopilot = useCallback(() => {
-    openAiCopilotWindow().catch(console.error);
+    openAiCopilotWindow().catch((e) => { console.error(e); notify(String(e)); });
   }, []);
 
   const handleOpenWorkshop = useCallback(() => {
-    openPluginWorkshopWindow().catch(console.error);
+    openPluginWorkshopWindow().catch((e) => { console.error(e); notify(String(e)); });
   }, []);
 
   const handleClearBuffer = useCallback(() => {
@@ -278,7 +280,7 @@ export function TerminalPage() {
     if (!terminal) return;
     const selection = terminal.getSelection();
     if (selection) {
-      navigator.clipboard.writeText(selection).catch(() => {});
+      navigator.clipboard.writeText(selection).catch((e) => notify(String(e)));
     }
   }, [getActiveTerminal]);
 
@@ -287,7 +289,7 @@ export function TerminalPage() {
     if (!terminal) return;
     navigator.clipboard.readText().then((text) => {
       if (text) terminal.paste(text);
-    }).catch(() => {});
+    }).catch((e) => notify(String(e)));
   }, [getActiveTerminal]);
 
   const handleFind = useCallback(() => {
@@ -398,13 +400,13 @@ export function TerminalPage() {
         const lines = command.split('\n').filter((l: string) => l.trim());
         for (const line of lines) {
           const bytes = new TextEncoder().encode(line + '\n');
-          writeToTerminal(activeTab.id, Array.from(bytes)).catch(console.error);
-          parseCommand(line, activeTab.id).catch(() => {});
+          writeToTerminal(activeTab.id, Array.from(bytes)).catch((e) => { console.error(e); notify(String(e)); });
+          parseCommand(line, activeTab.id).catch((e) => notify(String(e)));
         }
       }
     }).then((fn) => {
       unlisten = fn;
-    }).catch(console.error);
+    }).catch((e) => { console.error(e); notify(String(e)); });
 
     return () => {
       if (unlisten) unlisten();

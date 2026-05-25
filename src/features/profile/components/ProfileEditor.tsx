@@ -24,6 +24,7 @@ import {
   FloppyDiskIcon,
 } from '@phosphor-icons/react';
 import { listProfiles, saveProfile, deleteProfile } from '../../../core/services/profile.service';
+import { useNotify } from '../../../core/notification';
 import type { TerminalProfile, AppearanceConfig } from '../../../proto';
 import { generateId } from '../../../core/utils';
 import { DEFAULT_APPEARANCE } from '../../../engine';
@@ -36,9 +37,10 @@ export function ProfileEditor() {
   const [name, setName] = useState('');
   const [appearance, setAppearance] = useState<AppearanceConfig>(DEFAULT_APPEARANCE);
   const [isDefault, setIsDefault] = useState(false);
+  const notify = useNotify().notify;
 
   const load = () => {
-    listProfiles().then(setProfiles).catch(() => {});
+    listProfiles().then(setProfiles).catch((e) => notify(String(e)));
   };
 
   useEffect(() => { load(); }, []);

@@ -33,6 +33,7 @@ import {
 } from '@phosphor-icons/react';
 import { useNavigate } from 'react-router-dom';
 import { listConnections, saveConnection, testConnection } from '../../../core/services/connection.service';
+import { useNotify } from '../../../core/notification';
 import type { ConnectionConfig, SshConnectionInfo } from '../../../proto';
 import { generateId } from '../../../core/utils';
 
@@ -70,10 +71,11 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
   const sshColor = isDark ? '#FFD740' : '#E65100';
   const primaryColor = isDark ? '#6C63FF' : '#5B54E0';
   const mutedColor = isDark ? '#8B949E' : '#6B7280';
+  const notify = useNotify().notify;
 
   useEffect(() => {
     if (open) {
-      listConnections().then(setConnections).catch(() => {});
+      listConnections().then(setConnections).catch((e) => notify(String(e)));
       setMode('main');
       setTestState('idle');
       setTestMsg('');

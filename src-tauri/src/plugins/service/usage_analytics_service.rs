@@ -93,7 +93,7 @@ impl UsageAnalyticsService {
         let mut error_type_counts: std::collections::HashMap<FixErrorType, Vec<(String, String)>> = std::collections::HashMap::new();
 
         for err in &common_errors {
-            let (error_type, tool_hint) = classify_error_detailed(err);
+            let (error_type, _tool_hint) = classify_error_detailed(err);
             let tools_affected = if let Some(ref p) = plugin {
                 find_affected_tools(p, err)
             } else {

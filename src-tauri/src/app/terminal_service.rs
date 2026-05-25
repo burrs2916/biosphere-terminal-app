@@ -11,7 +11,7 @@ const OUTPUT_BUFFER_MAX_LINES: usize = 500;
 
 struct SessionState {
     pty: Pty,
-    output_buffer: Vec<String>,
+    output_buffer: std::sync::Arc<Mutex<Vec<String>>>,
 }
 
 pub struct TerminalService {
@@ -42,16 +42,16 @@ impl TerminalService {
             .and_then(|s| s.password.clone())
             .filter(|p| !p.is_empty());
 
+        let buffer = std::sync::Arc::new(Mutex::new(Vec::with_capacity(OUTPUT_BUFFER_MAX_LINES)));
+
         self.sessions.lock().unwrap().insert(session_id.to_string(), SessionState {
             pty,
-            output_buffer: Vec::with_capacity(OUTPUT_BUFFER_MAX_LINES),
+            output_buffer: buffer.clone(),
         });
+        let buffer_clone = buffer.clone();
 
         let sid = session_id.to_string();
         let handle = self.app_handle.lock().unwrap().clone();
-
-        let buffer: std::sync::Arc<Mutex<Vec<String>>> = std::sync::Arc::new(Mutex::new(Vec::with_capacity(OUTPUT_BUFFER_MAX_LINES)));
-        let buffer_clone = buffer.clone();
 
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -164,7 +164,7 @@ impl TerminalService {
             .get(session_id)
             .ok_or_else(|| crate::core::error::Error::Terminal("session not found".into()))?;
 
-        let buffer = &state.output_buffer;
+        let buffer = state.output_buffer.lock().unwrap();
         let start = if buffer.len() > max_lines {
             buffer.len() - max_lines
         } else {

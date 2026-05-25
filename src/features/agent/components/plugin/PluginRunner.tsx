@@ -35,6 +35,7 @@ import {
 import type { PluginManifest, PluginTool, UiSchema, UsageLogEntry, InteractionStep, ResultAction } from '../../../../proto/plugin';
 import { UiSchemaRenderer } from './UiSchemaRenderer';
 import { PluginUsageInsights } from './PluginUsageInsights';
+import { useNotify } from '../../../../core/notification';
 import { ResultViewRenderer } from './ResultViewRenderer';
 
 interface PluginRunnerProps {
@@ -117,6 +118,7 @@ export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, on
   const [activeTab, setActiveTab] = useState(0);
   const [toolTabs, setToolTabs] = useState<ToolTab[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const notify = useNotify().notify;
 
   useEffect(() => {
     const tabs: ToolTab[] = plugin.tools.map((tool) => {
@@ -241,7 +243,7 @@ export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, on
   }, []);
 
   const handleCopyResult = useCallback((output: string) => {
-    navigator.clipboard.writeText(output).catch(() => {});
+    navigator.clipboard.writeText(output).catch((e) => notify(String(e)));
   }, []);
 
   const handleExportResult = useCallback((output: string, toolName: string) => {

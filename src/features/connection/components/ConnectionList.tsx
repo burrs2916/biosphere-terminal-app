@@ -34,6 +34,7 @@ import {
   WarningIcon,
 } from '@phosphor-icons/react';
 import { listConnections, saveConnection, deleteConnection, testConnection } from '../../../core/services/connection.service';
+import { useNotify } from '../../../core/notification';
 import type { ConnectionConfig, SshConnectionInfo } from '../../../proto';
 import { generateId } from '../../../core/utils';
 import { useTranslation } from 'react-i18next';
@@ -58,9 +59,10 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
   const [testState, setTestState] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMsg, setTestMsg] = useState('');
   const [testResults, setTestResults] = useState<Record<string, { state: 'testing' | 'success' | 'error'; msg?: string }>>({});
+  const notify = useNotify().notify;
 
   const load = () => {
-    listConnections().then(setConnections).catch(() => {});
+    listConnections().then(setConnections).catch((e) => notify(String(e)));
   };
 
   useEffect(() => { load(); }, []);
