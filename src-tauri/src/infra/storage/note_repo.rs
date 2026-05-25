@@ -158,14 +158,89 @@ impl NoteRepo {
         Ok(())
     }
 
+    pub fn list_by_group(db: &Database, group_id: &str) -> Result<Vec<NoteRow>, String> {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, file_path, group_id, category, tags, word_count, is_pinned, created_at, updated_at FROM notes WHERE group_id = ?1 ORDER BY updated_at DESC"
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt
+            .query_map(params![group_id], |row| {
+                let tags_str: String = row.get(5)?;
+                let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+                let pinned: i32 = row.get(7)?;
+                Ok(NoteRow {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    group_id: row.get(3)?,
+                    category: row.get(4)?,
+                    tags,
+                    word_count: row.get(6)?,
+                    is_pinned: pinned != 0,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn list_by_category(db: &Database, category: &str) -> Result<Vec<NoteRow>, String> {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, title, file_path, group_id, category, tags, word_count, is_pinned, created_at, updated_at FROM notes WHERE category = ?1 ORDER BY updated_at DESC"
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt
+            .query_map(params![category], |row| {
+                let tags_str: String = row.get(5)?;
+                let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+                let pinned: i32 = row.get(7)?;
+                Ok(NoteRow {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    file_path: row.get(2)?,
+                    group_id: row.get(3)?,
+                    category: row.get(4)?,
+                    tags,
+                    word_count: row.get(6)?,
+                    is_pinned: pinned != 0,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
     pub fn list_categories(db: &Database) -> Result<Vec<String>, String> {
         let conn = db.conn();
         let mut stmt = conn
-            .prepare("SELECT DISTINCT category FROM notes ORDER BY category")
+            .prepare("SELECT DISTINCT category FROM notes WHERE category != '' ORDER BY category")
             .map_err(|e| e.to_string())?;
 
         let rows = stmt
             .query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn list_categories_by_group(db: &Database, group_id: &str) -> Result<Vec<String>, String> {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT category FROM notes WHERE group_id = ?1 AND category != '' ORDER BY category")
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt
+            .query_map(params![group_id], |row| row.get(0))
             .map_err(|e| e.to_string())?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
@@ -183,24 +258,22 @@ impl NoteRepo {
         Ok(count)
     }
 
-    pub fn reset_category(db: &Database, category: &str) -> Result<usize, String> {
+    pub fn delete_by_group(db: &Database, group_id: &str) -> Result<(), String> {
         let conn = db.conn();
-        let updated = conn.execute(
-            "UPDATE notes SET category = '', updated_at = ?1 WHERE category = ?2",
-            params![crate::app::notebook_service::now_ms(), category],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(updated)
+        conn.execute("DELETE FROM command_note_links WHERE note_id IN (SELECT id FROM notes WHERE group_id = ?1)", params![group_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM notes WHERE group_id = ?1", params![group_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
-    pub fn reset_group(db: &Database, group_id: &str) -> Result<usize, String> {
+    pub fn delete_by_category(db: &Database, category: &str) -> Result<(), String> {
         let conn = db.conn();
-        let updated = conn.execute(
-            "UPDATE notes SET group_id = '', category = '', updated_at = ?1 WHERE group_id = ?2",
-            params![crate::app::notebook_service::now_ms(), group_id],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(updated)
+        conn.execute("DELETE FROM command_note_links WHERE note_id IN (SELECT id FROM notes WHERE category = ?1)", params![category])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM notes WHERE category = ?1", params![category])
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 }
 

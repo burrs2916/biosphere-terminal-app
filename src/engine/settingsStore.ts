@@ -20,7 +20,7 @@ export interface AppSettings {
   shell: string;
 }
 
-export const DEFAULT_APPEARANCE: AppearanceConfig = {
+export const DARK_APPEARANCE: AppearanceConfig = {
   fontFamily: '"JetBrains Mono", "Fira Code", Menlo, Monaco, monospace',
   fontSize: 14,
   lineHeight: 1.2,
@@ -38,6 +38,27 @@ export const DEFAULT_APPEARANCE: AppearanceConfig = {
     '#80D8FF', '#EA80FC', '#84FFFF', '#FFFFFF',
   ],
 };
+
+export const LIGHT_APPEARANCE: AppearanceConfig = {
+  fontFamily: '"JetBrains Mono", "Fira Code", Menlo, Monaco, monospace',
+  fontSize: 14,
+  lineHeight: 1.2,
+  cursorStyle: 'block',
+  cursorBlink: true,
+  cursorColor: '#5B54E0',
+  foreground: '#1A1A2E',
+  background: '#FFFFFF',
+  selectionForeground: '#FFFFFF',
+  selectionBackground: 'rgba(91, 84, 224, 0.25)',
+  colors: [
+    '#1A1A2E', '#D32F2F', '#2E7D32', '#E65100',
+    '#1565C0', '#7B1FA2', '#00838F', '#424242',
+    '#9E9E9E', '#EF5350', '#66BB6A', '#FFA726',
+    '#42A5F5', '#AB47BC', '#26C6DA', '#FAFAFA',
+  ],
+};
+
+export const DEFAULT_APPEARANCE = DARK_APPEARANCE;
 
 const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
@@ -72,6 +93,13 @@ function loadFromStorage(): AppSettings {
 
 function saveToStorage(settings: AppSettings) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+}
+
+export function getThemeAppearance(theme: ThemeMode): AppearanceConfig {
+  if (theme === 'light') return LIGHT_APPEARANCE;
+  if (theme === 'dark') return DARK_APPEARANCE;
+  const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  return isDark ? DARK_APPEARANCE : LIGHT_APPEARANCE;
 }
 
 interface SettingsState {

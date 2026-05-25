@@ -172,4 +172,41 @@ impl TerminalService {
         };
         Ok(buffer[start..].join("\n"))
     }
+
+    pub fn get_cwd(&self, session_id: &str) -> Result<Option<String>> {
+        let sessions = self.sessions.lock().unwrap();
+        let state = sessions
+            .get(session_id)
+            .ok_or_else(|| crate::core::error::Error::Terminal("session not found".into()))?;
+
+        if let Some(pid) = state.pty.process_id() {
+            let cwd_path = std::path::PathBuf::from(format!("/proc/{}/cwd", pid));
+            if cwd_path.exists() {
+                return Ok(std::fs::read_link(cwd_path)
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string()));
+            }
+            let lsof = std::process::Command::new("lsof")
+                .args(["-Ffn", "-p", &pid.to_string()])
+                .output();
+            if let Ok(output) = lsof {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut found_cwd: Option<String> = None;
+                let mut current_fd: Option<String> = None;
+                for line in stdout.lines() {
+                    let line = line.trim();
+                    if line.starts_with('f') {
+                        current_fd = Some(line[1..].to_string());
+                    } else if line.starts_with('n') && current_fd.as_deref() == Some("cwd") {
+                        found_cwd = Some(line[1..].to_string());
+                        break;
+                    }
+                }
+                if let Some(cwd) = found_cwd {
+                    return Ok(Some(cwd));
+                }
+            }
+        }
+        Ok(None)
+    }
 }

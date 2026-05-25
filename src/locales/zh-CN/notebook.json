@@ -85,9 +85,12 @@
     "add_tag": "添加标签",
     "add_tag_hint": "标签名称",
     "ai_optimize": "AI 优化",
+    "open_folder": "打开文件夹",
     "ai_no_agent": "请先在「笔记助手」标签页中选择一个智能体",
     "ai_no_content": "笔记内容为空，无法优化",
     "ai_optimizing": "AI 正在优化笔记...",
+    "ai_thinking": "AI 正在思考...",
+    "ai_cancel": "取消",
     "ai_optimize_done": "笔记优化完成",
     "ai_optimize_error": "AI 优化失败",
     "toolbar": {

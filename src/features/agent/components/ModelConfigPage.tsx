@@ -21,6 +21,7 @@ import {
 import { useAgentStore, genId } from '../store/agentStore';
 import type { ProviderDto, EndpointDto, ModelDto } from '../../../proto/agent';
 import { useTranslation } from 'react-i18next';
+import { useTheme } from '@mui/material/styles';
 
 const API_TYPE_KEYS: { value: string; labelKey: string }[] = [
   { value: 'openai-completions', labelKey: 'api.type_openai_completions' },
@@ -335,6 +336,17 @@ function ConfirmDialog({
 
 export function ModelConfigPage() {
   const { t } = useTranslation('agent');
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+  const primaryColor = isDark ? '#6C63FF' : '#5B54E0';
+  const cardBorder = isDark ? 'rgba(48,54,61,0.6)' : 'rgba(0,0,0,0.08)';
+  const cardBg = isDark ? 'rgba(22,27,34,0.6)' : 'rgba(255,255,255,0.8)';
+  const innerCardBg = isDark ? 'rgba(13,17,23,0.6)' : 'rgba(245,245,245,0.6)';
+  const hoverBg = isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)';
+  const hoverBg2 = isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)';
+  const errorColor = isDark ? '#FF5252' : '#D32F2F';
+  const successColor = isDark ? '#00E676' : '#2E7D32';
+  const disabledColor = isDark ? '#555' : '#9E9E9E';
   const {
     providers,
     endpoints,
@@ -350,6 +362,7 @@ export function ModelConfigPage() {
     deleteModel,
     testEndpointConnection,
     testModelChat,
+    agents,
   } = useAgentStore();
 
   useEffect(() => {
@@ -489,7 +502,7 @@ export function ModelConfigPage() {
             variant="contained"
             startIcon={<PlusIcon size={14} weight="bold" />}
             onClick={() => setProviderDialog({ open: true, data: null })}
-            sx={{ borderRadius: 2, fontSize: 11, background: 'linear-gradient(135deg, #6C63FF 0%, #8B83FF 100%)' }}
+            sx={{ borderRadius: 2, fontSize: 11, background: `linear-gradient(135deg, ${primaryColor} 0%, ${isDark ? '#8B83FF' : '#7B75FF'} 100%)` }}
           >
             {t('provider.add')}
           </Button>
@@ -529,7 +542,7 @@ export function ModelConfigPage() {
             const isExpanded = expandedProviders.has(provider.id);
 
             return (
-              <Card key={provider.id} sx={{ border: 1, borderColor: 'rgba(48,54,61,0.6)', borderRadius: 2, bgcolor: 'rgba(22,27,34,0.6)', overflow: 'visible' }}>
+              <Card key={provider.id} sx={{ border: 1, borderColor: cardBorder, borderRadius: 2, bgcolor: cardBg, overflow: 'visible' }}>
                 <Box
                   sx={{
                     p: 1.5,
@@ -537,7 +550,7 @@ export function ModelConfigPage() {
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     cursor: 'pointer',
-                    '&:hover': { bgcolor: 'rgba(255,255,255,0.03)' },
+                    '&:hover': { bgcolor: hoverBg },
                   }}
                   onClick={() => toggleProvider(provider.id)}
                 >
@@ -563,16 +576,32 @@ export function ModelConfigPage() {
                       </IconButton>
                     </Tooltip>
                     <Tooltip title={t('provider.delete')}>
-                      <IconButton size="small" onClick={() => setDeleteConfirm({
-                        open: true,
-                        title: t('provider.delete'),
-                        message: t('provider.delete_confirm', { name: provider.name }),
-                        onConfirm: () => {
-                          deleteProvider(provider.id);
-                          setDeleteConfirm({ open: false, title: '', message: '', onConfirm: () => {} });
-                        },
-                      })}>
-                        <DeleteIcon size={14} color="#FF5252" />
+                      <IconButton size="small" onClick={() => {
+                        const providerModels = models.filter(m =>
+                          endpoints.some(e => e.providerId === provider.id && e.id === m.endpointId)
+                        ).map(m => m.id);
+                        const affectedAgents = agents.filter(a =>
+                          providerModels.includes(a.modelId) || providerModels.includes(a.fallbackModelId)
+                        );
+                        let msg = t('provider.delete_confirm', { name: provider.name });
+                        if (affectedAgents.length > 0) {
+                          msg += '\n\n' + t('provider.delete_affected_agents', {
+                            count: affectedAgents.length,
+                            names: affectedAgents.map(a => a.name).join(', '),
+                            defaultValue: `This will affect ${affectedAgents.length} agent(s): ${affectedAgents.map(a => a.name).join(', ')}`,
+                          });
+                        }
+                        setDeleteConfirm({
+                          open: true,
+                          title: t('provider.delete'),
+                          message: msg,
+                          onConfirm: () => {
+                            deleteProvider(provider.id);
+                            setDeleteConfirm({ open: false, title: '', message: '', onConfirm: () => {} });
+                          },
+                        });
+                      }}>
+                        <DeleteIcon size={14} color={errorColor} />
                       </IconButton>
                     </Tooltip>
                     <IconButton size="small" onClick={() => toggleProvider(provider.id)}>
@@ -582,7 +611,7 @@ export function ModelConfigPage() {
                 </Box>
 
                 <Collapse in={isExpanded}>
-                  <Divider sx={{ borderColor: 'rgba(48,54,61,0.6)' }} />
+                  <Divider sx={{ borderColor: cardBorder }} />
                   <Box sx={{ p: 1.5 }}>
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
                       <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>
@@ -611,7 +640,7 @@ export function ModelConfigPage() {
                           const isTesting = testingId === endpoint.id;
 
                           return (
-                            <Card key={endpoint.id} variant="outlined" sx={{ borderRadius: 1.5, borderColor: 'rgba(48,54,61,0.6)', bgcolor: 'rgba(13,17,23,0.6)' }}>
+                            <Card key={endpoint.id} variant="outlined" sx={{ borderRadius: 1.5, borderColor: cardBorder, bgcolor: innerCardBg }}>
                               <Box
                                 sx={{
                                   p: 1,
@@ -619,7 +648,7 @@ export function ModelConfigPage() {
                                   alignItems: 'center',
                                   justifyContent: 'space-between',
                                   cursor: 'pointer',
-                                  '&:hover': { bgcolor: 'rgba(255,255,255,0.02)' },
+                                  '&:hover': { bgcolor: hoverBg2 },
                                 }}
                                 onClick={() => toggleEndpoint(endpoint.id)}
                               >
@@ -635,8 +664,8 @@ export function ModelConfigPage() {
                                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }} onClick={(e) => e.stopPropagation()}>
                                   {testResult && (
                                     testResult.success
-                                      ? <CheckCircleIcon size={12} color="#00E676" weight="fill" />
-                                      : <ErrorIcon size={12} color="#FF5252" weight="fill" />
+                                      ? <CheckCircleIcon size={12} color={successColor} weight="fill" />
+                                      : <ErrorIcon size={12} color={errorColor} weight="fill" />
                                   )}
                                   {isTesting && <CircularProgress size={12} />}
                                   <Tooltip title={t('endpoint.test_connection')}>
@@ -659,7 +688,7 @@ export function ModelConfigPage() {
                                         setDeleteConfirm({ open: false, title: '', message: '', onConfirm: () => {} });
                                       },
                                     })}>
-                                      <DeleteIcon size={12} color="#FF5252" />
+                                      <DeleteIcon size={12} color={errorColor} />
                                     </IconButton>
                                   </Tooltip>
                                   <IconButton size="small" sx={{ p: 0.25 }} onClick={() => toggleEndpoint(endpoint.id)}>
@@ -669,7 +698,7 @@ export function ModelConfigPage() {
                               </Box>
 
                               <Collapse in={isEndpointExpanded}>
-                                <Divider sx={{ borderColor: 'rgba(48,54,61,0.6)' }} />
+                                <Divider sx={{ borderColor: cardBorder }} />
                                 <Box sx={{ p: 1 }}>
                                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.75 }}>
                                     <Typography variant="caption" color="text.secondary">
@@ -701,16 +730,16 @@ export function ModelConfigPage() {
                                             sx={{
                                               p: 0.75,
                                               border: 1,
-                                              borderColor: 'rgba(48,54,61,0.6)',
+                                              borderColor: cardBorder,
                                               borderRadius: 1,
                                               display: 'flex',
                                               alignItems: 'center',
                                               justifyContent: 'space-between',
-                                              '&:hover': { borderColor: 'rgba(108,99,255,0.5)' },
+                                              '&:hover': { borderColor: `${primaryColor}80` },
                                             }}
                                           >
                                             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0, flex: 1 }}>
-                                              <SmartToyIcon size={12} color={model.enabled ? '#6C63FF' : '#555'} weight="fill" />
+                                              <SmartToyIcon size={12} color={model.enabled ? primaryColor : disabledColor} weight="fill" />
                                               <Box sx={{ minWidth: 0, flex: 1 }}>
                                                 <Typography variant="caption" sx={{ fontWeight: 600, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                                   {model.name}
@@ -725,8 +754,8 @@ export function ModelConfigPage() {
                                               {model.inputTypes.includes('image') && <Chip label={t('model.image_badge')} size="small" color="info" sx={{ fontSize: 7, height: 12, minWidth: 12 }} />}
                                               {modelTestResult && (
                                                 modelTestResult.success
-                                                  ? <CheckCircleIcon size={10} color="#00E676" weight="fill" />
-                                                  : <ErrorIcon size={10} color="#FF5252" weight="fill" />
+                                                  ? <CheckCircleIcon size={10} color={successColor} weight="fill" />
+                                                  : <ErrorIcon size={10} color={errorColor} weight="fill" />
                                               )}
                                               {isModelTesting && <CircularProgress size={10} />}
                                               <Tooltip title={t('model.test')}>
@@ -746,7 +775,7 @@ export function ModelConfigPage() {
                                                   setDeleteConfirm({ open: false, title: '', message: '', onConfirm: () => {} });
                                                 },
                                               })}>
-                                                <DeleteIcon size={10} color="#FF5252" />
+                                                <DeleteIcon size={10} color={errorColor} />
                                               </IconButton>
                                             </Box>
                                           </Box>

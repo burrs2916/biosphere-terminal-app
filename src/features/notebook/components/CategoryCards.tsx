@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Box, Typography, IconButton, TextField, Card, CardActionArea,
+  Box, Typography, IconButton, TextField, Card,
   CardContent, Tooltip, Button, Dialog, DialogTitle, DialogContent,
   DialogContentText, DialogActions,
 } from '@mui/material';
@@ -13,9 +13,14 @@ import { useNotebookStore } from '../store/notebookStore';
 import { IconRenderer } from './IconRenderer';
 import { openCategoryNotesWindow, openAllNotesWindow } from '../../../core/services/window.service';
 import type { NoteCategoryDto } from '../../../proto/notebook';
+import { useTheme } from '@mui/material/styles';
 
 export function CategoryCards() {
   const { t } = useTranslation('notebook');
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+  const primaryColor = isDark ? '#6C63FF' : '#5B54E0';
+  const mutedColor = isDark ? '#8B949E' : '#6B7280';
 
   const {
     activeGroupId, groups, categories, loadCategoriesByGroup,
@@ -96,7 +101,7 @@ export function CategoryCards() {
   if (!activeGroupId) {
     return (
       <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', p: 4 }}>
-        <FolderOpenIcon size={48} color="#8B949E" style={{ opacity: 0.3 }} />
+        <FolderOpenIcon size={48} color={mutedColor} style={{ opacity: 0.3 }} />
         <Typography variant="body1" color="text.secondary" sx={{ mt: 2 }}>
           {t('category.select_group_hint')}
         </Typography>
@@ -146,8 +151,8 @@ export function CategoryCards() {
             size="small"
             onClick={() => { setAddingCategory(true); setNewCatName(''); }}
             sx={{
-              background: 'rgba(108,99,255,0.1)',
-              '&:hover': { background: 'rgba(108,99,255,0.2)' },
+              background: `${primaryColor}15`,
+              '&:hover': { background: `${primaryColor}25` },
             }}
           >
             <PlusIcon size={16} weight="bold" color="#6C63FF" />
@@ -170,10 +175,10 @@ export function CategoryCards() {
             sx={{ flex: 1, '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
           />
           <IconButton size="small" onClick={handleAddCategory} disabled={!newCatName.trim()}>
-            <CheckIcon size={16} color={newCatName.trim() ? '#6C63FF' : '#8B949E'} />
+            <CheckIcon size={16} color={newCatName.trim() ? primaryColor : mutedColor} />
           </IconButton>
           <IconButton size="small" onClick={() => { setAddingCategory(false); setNewCatName(''); }}>
-            <XIcon size={16} color="#8B949E" />
+            <XIcon size={16} color={mutedColor} />
           </IconButton>
         </Box>
       )}
@@ -192,7 +197,7 @@ export function CategoryCards() {
                   borderRadius: 3,
                   border: '2px solid',
                   borderColor: '#6C63FF',
-                  bgcolor: 'rgba(108,99,255,0.04)',
+                  bgcolor: `${primaryColor}08`,
                 }}
               >
                 <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
@@ -213,10 +218,10 @@ export function CategoryCards() {
                   </Box>
                   <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 0.5 }}>
                     <IconButton size="small" onClick={() => handleUpdateCategory(cat)} disabled={!editingCatName.trim()}>
-                      <CheckIcon size={14} color={editingCatName.trim() ? '#6C63FF' : '#8B949E'} />
+                      <CheckIcon size={14} color={editingCatName.trim() ? primaryColor : mutedColor} />
                     </IconButton>
                     <IconButton size="small" onClick={cancelEditCategory}>
-                      <XIcon size={14} color="#8B949E" />
+                      <XIcon size={14} color={mutedColor} />
                     </IconButton>
                   </Box>
                 </CardContent>
@@ -227,25 +232,26 @@ export function CategoryCards() {
           return (
             <Card
               key={cat.id}
+              onClick={() => handleOpenCategory(cat.name)}
               sx={{
                 width: 180,
                 borderRadius: 3,
                 border: '1px solid',
                 borderColor: 'divider',
-                bgcolor: 'rgba(255,255,255,0.02)',
+                bgcolor: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)',
                 transition: 'all 0.2s',
+                cursor: 'pointer',
                 '&:hover': {
                   borderColor: '#6C63FF',
-                  boxShadow: '0 4px 20px rgba(108,99,255,0.15)',
+                  boxShadow: isDark ? '0 4px 20px rgba(108,99,255,0.15)' : '0 4px 20px rgba(91,84,224,0.1)',
                   transform: 'translateY(-2px)',
                   '& .cat-actions': { opacity: 1 },
                 },
               }}
             >
-              <CardActionArea onClick={() => handleOpenCategory(cat.name)} sx={{ p: 0 }}>
                 <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
-                    <TagIcon size={20} color={cat.isDefault ? '#6C63FF' : '#8B949E'} />
+                    <TagIcon size={20} color={cat.isDefault ? primaryColor : mutedColor} />
                     <Typography variant="subtitle2" sx={{ fontSize: 14, fontWeight: 600, flex: 1 }} noWrap>
                       {cat.name}
                     </Typography>
@@ -256,9 +262,9 @@ export function CategoryCards() {
                         <IconButton
                           size="small"
                           onClick={(e) => { e.stopPropagation(); startEditCategory(cat); }}
-                          sx={{ '&:hover': { bgcolor: 'rgba(108,99,255,0.15)' }, p: 0.25 }}
+                          sx={{ '&:hover': { bgcolor: `${primaryColor}20` }, p: 0.25 }}
                         >
-                          <PencilSimpleIcon size={12} color="#8B949E" />
+                          <PencilSimpleIcon size={12} color={mutedColor} />
                         </IconButton>
                       </Tooltip>
                       <Tooltip title={t('category.delete') || 'Delete'}>
@@ -273,82 +279,78 @@ export function CategoryCards() {
                     </Box>
                   </Box>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                    <NoteIcon size={12} color="#8B949E" />
+                    <NoteIcon size={12} color={mutedColor} />
                     <Typography variant="caption" color="text.secondary">
                       {count} {t('notebook.notes') || 'notes'}
                     </Typography>
                   </Box>
                 </CardContent>
-              </CardActionArea>
             </Card>
           );
         })}
 
         {uncategorizedCount > 0 && (
           <Card
+            onClick={() => handleOpenCategory('')}
             sx={{
               width: 180,
               borderRadius: 3,
               border: '1px dashed',
               borderColor: 'divider',
-              bgcolor: 'rgba(255,255,255,0.01)',
+              bgcolor: isDark ? 'rgba(255,255,255,0.01)' : 'rgba(0,0,0,0.01)',
               transition: 'all 0.2s',
+              cursor: 'pointer',
               '&:hover': {
-                borderColor: '#8B949E',
+                borderColor: mutedColor,
                 transform: 'translateY(-2px)',
               },
             }}
           >
-            <CardActionArea onClick={() => handleOpenCategory('')} sx={{ p: 0 }}>
               <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
-                  <NoteIcon size={20} color="#8B949E" />
+                  <NoteIcon size={20} color={mutedColor} />
                   <Typography variant="subtitle2" sx={{ fontSize: 14, fontWeight: 600 }} noWrap>
                     {t('category.uncategorized')}
                   </Typography>
                 </Box>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                  <NoteIcon size={12} color="#8B949E" />
+                  <NoteIcon size={12} color={mutedColor} />
                   <Typography variant="caption" color="text.secondary">
                     {uncategorizedCount} {t('notebook.notes') || 'notes'}
                   </Typography>
                 </Box>
               </CardContent>
-            </CardActionArea>
           </Card>
         )}
 
         <Card
+          onClick={() => { setAddingCategory(true); setNewCatName(''); }}
           sx={{
             width: 180,
             borderRadius: 3,
             border: '1px dashed',
-            borderColor: 'rgba(108,99,255,0.3)',
-            bgcolor: 'rgba(108,99,255,0.02)',
+            borderColor: `${primaryColor}40`,
+            bgcolor: `${primaryColor}05`,
             transition: 'all 0.2s',
+            cursor: 'pointer',
             '&:hover': {
-              borderColor: '#6C63FF',
-              bgcolor: 'rgba(108,99,255,0.06)',
+              borderColor: primaryColor,
+              bgcolor: `${primaryColor}10`,
             },
           }}
         >
-          <CardActionArea
-            onClick={() => { setAddingCategory(true); setNewCatName(''); }}
-            sx={{ p: 0, height: '100%', minHeight: 90 }}
-          >
-            <CardContent sx={{ p: 2, '&:last-child': { pb: 2 }, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-              <PlusIcon size={24} color="#6C63FF" />
-              <Typography variant="caption" color="#6C63FF" sx={{ mt: 0.5 }}>
-                {t('category.add')}
-              </Typography>
-            </CardContent>
-          </CardActionArea>
+              <CardContent sx={{ p: 2, '&:last-child': { pb: 2 }, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                <PlusIcon size={24} color={primaryColor} />
+                <Typography variant="caption" color={primaryColor} sx={{ mt: 0.5 }}>
+                  {t('category.add')}
+                </Typography>
+              </CardContent>
         </Card>
       </Box>
 
       {categories.length === 0 && uncategorizedCount === 0 && !addingCategory && (
         <Box sx={{ textAlign: 'center', mt: 6 }}>
-          <TagIcon size={40} color="#8B949E" style={{ opacity: 0.3 }} />
+          <TagIcon size={40} color={mutedColor} style={{ opacity: 0.3 }} />
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
             {t('category.empty_hint')}
           </Typography>

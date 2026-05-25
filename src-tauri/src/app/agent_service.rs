@@ -211,12 +211,18 @@ impl AgentService {
     }
 
     pub fn create_conversation(&self, agent_id: &str, title: &str) -> Result<AiConversationRow, String> {
+        self.create_conversation_with_metadata(agent_id, title, "{}")
+    }
+
+    pub fn create_conversation_with_metadata(&self, agent_id: &str, title: &str, metadata: &str) -> Result<AiConversationRow, String> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_ms();
         let conv = AiConversationRow {
             id,
             agent_id: agent_id.to_string(),
             title: title.to_string(),
+            metadata: metadata.to_string(),
+            compaction_summary: String::new(),
             created_at: now,
             updated_at: now,
         };
@@ -236,13 +242,32 @@ impl AgentService {
         AiMessageRepo::save(&self.db, &msg)
     }
 
+    pub fn delete_messages_after(&self, conversation_id: &str, after_message_id: &str) -> Result<(), String> {
+        AiMessageRepo::delete_after(&self.db, conversation_id, after_message_id)
+    }
+
+    pub fn find_conversation(&self, id: &str) -> Result<Option<AiConversationRow>, String> {
+        AiConversationRepo::find_by_id(&self.db, id)
+    }
+
     pub fn update_conversation_title(&self, id: &str, title: &str) -> Result<(), String> {
-        let mut convs = AiConversationRepo::list_by_agent(&self.db, "")?;
-        if let Some(conv) = convs.iter_mut().find(|c| c.id == id) {
+        if let Some(mut conv) = AiConversationRepo::find_by_id(&self.db, id)? {
             conv.title = title.to_string();
             conv.updated_at = now_ms();
-            AiConversationRepo::save(&self.db, conv)?;
+            AiConversationRepo::save(&self.db, &conv)?;
         }
         Ok(())
+    }
+
+    pub fn touch_conversation(&self, id: &str) -> Result<(), String> {
+        if let Some(mut conv) = AiConversationRepo::find_by_id(&self.db, id)? {
+            conv.updated_at = now_ms();
+            AiConversationRepo::save(&self.db, &conv)?;
+        }
+        Ok(())
+    }
+
+    pub fn update_compaction_summary(&self, id: &str, summary: &str) -> Result<(), String> {
+        AiConversationRepo::update_compaction_summary(&self.db, id, summary)
     }
 }

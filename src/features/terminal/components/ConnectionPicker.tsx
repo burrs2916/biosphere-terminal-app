@@ -20,6 +20,7 @@ import InputLabel from '@mui/material/InputLabel';
 import FormControl from '@mui/material/FormControl';
 import CircularProgress from '@mui/material/CircularProgress';
 import Alert from '@mui/material/Alert';
+import { useTheme } from '@mui/material/styles';
 import {
   DesktopIcon,
   LightningIcon,
@@ -49,6 +50,8 @@ interface ConnectionPickerProps {
 
 export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerProps) {
   const { t } = useTranslation('terminal');
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
   const navigate = useNavigate();
   const [connections, setConnections] = useState<ConnectionConfig[]>([]);
   const [mode, setMode] = useState<'main' | 'new-ssh'>('main');
@@ -62,6 +65,11 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
   const [testState, setTestState] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMsg, setTestMsg] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
+
+  const localColor = isDark ? '#4FC3F7' : '#1565C0';
+  const sshColor = isDark ? '#FFD740' : '#E65100';
+  const primaryColor = isDark ? '#6C63FF' : '#5B54E0';
+  const mutedColor = isDark ? '#8B949E' : '#6B7280';
 
   useEffect(() => {
     if (open) {
@@ -135,15 +143,16 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
       sx={{
         '& .MuiDialog-paper': {
           borderRadius: 3,
-          bgcolor: '#161B22',
-          border: '1px solid rgba(48,54,61,0.6)',
+          bgcolor: 'background.paper',
+          border: '1px solid',
+          borderColor: 'divider',
         },
       }}
     >
       {mode === 'new-ssh' ? (
         <>
           <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-            <LightningIcon size={22} color="#FFD740" weight="fill" />
+            <LightningIcon size={22} color={sshColor} weight="fill" />
             {t('picker.new_ssh')}
           </DialogTitle>
           <DialogContent>
@@ -254,12 +263,12 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
       ) : (
         <>
           <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-            <PlugsConnectedIcon size={22} color="#4FC3F7" weight="fill" />
-            New Terminal
+            <PlugsConnectedIcon size={22} color={localColor} weight="fill" />
+            {t('picker.new_terminal')}
           </DialogTitle>
           <DialogContent>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Choose how you want to connect
+              {t('picker.choose_connection')}
             </Typography>
 
             <Box sx={{ display: 'flex', gap: 1.5, mb: 2 }}>
@@ -269,25 +278,26 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
                   flex: 1,
                   p: 2,
                   borderRadius: 2,
-                  border: '1px solid rgba(79,195,247,0.3)',
-                  bgcolor: 'rgba(79,195,247,0.06)',
+                  border: '1px solid',
+                  borderColor: isDark ? 'rgba(79,195,247,0.3)' : 'rgba(21,101,192,0.2)',
+                  bgcolor: isDark ? 'rgba(79,195,247,0.06)' : 'rgba(21,101,192,0.04)',
                   cursor: 'pointer',
                   transition: 'all 0.2s',
                   '&:hover': {
-                    bgcolor: 'rgba(79,195,247,0.12)',
-                    borderColor: 'rgba(79,195,247,0.5)',
+                    bgcolor: isDark ? 'rgba(79,195,247,0.12)' : 'rgba(21,101,192,0.08)',
+                    borderColor: isDark ? 'rgba(79,195,247,0.5)' : 'rgba(21,101,192,0.35)',
                     transform: 'translateY(-1px)',
                   },
                 }}
               >
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                  <DesktopIcon size={20} color="#4FC3F7" weight="fill" />
-                  <Typography variant="subtitle2" sx={{ fontWeight: 600, color: '#4FC3F7' }}>
-                    Local
+                  <DesktopIcon size={20} color={localColor} weight="fill" />
+                  <Typography variant="subtitle2" sx={{ fontWeight: 600, color: localColor }}>
+                    {t('picker.local')}
                   </Typography>
                 </Box>
                 <Typography variant="caption" color="text.secondary">
-                  Open a local shell
+                  {t('picker.local_desc')}
                 </Typography>
               </Box>
 
@@ -303,27 +313,28 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
                   flex: 1,
                   p: 2,
                   borderRadius: 2,
-                  border: '1px solid rgba(255,215,64,0.3)',
-                  bgcolor: 'rgba(255,215,64,0.06)',
+                  border: '1px solid',
+                  borderColor: isDark ? 'rgba(255,215,64,0.3)' : 'rgba(230,81,0,0.2)',
+                  bgcolor: isDark ? 'rgba(255,215,64,0.06)' : 'rgba(230,81,0,0.04)',
                   cursor: 'pointer',
                   transition: 'all 0.2s',
                   '&:hover': {
-                    bgcolor: 'rgba(255,215,64,0.12)',
-                    borderColor: 'rgba(255,215,64,0.5)',
+                    bgcolor: isDark ? 'rgba(255,215,64,0.12)' : 'rgba(230,81,0,0.08)',
+                    borderColor: isDark ? 'rgba(255,215,64,0.5)' : 'rgba(230,81,0,0.35)',
                     transform: 'translateY(-1px)',
                   },
                 }}
               >
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                  <LightningIcon size={20} color="#FFD740" weight="fill" />
-                  <Typography variant="subtitle2" sx={{ fontWeight: 600, color: '#FFD740' }}>
-                    SSH Remote
+                  <LightningIcon size={20} color={sshColor} weight="fill" />
+                  <Typography variant="subtitle2" sx={{ fontWeight: 600, color: sshColor }}>
+                    {t('picker.ssh_remote')}
                   </Typography>
                 </Box>
                 <Typography variant="caption" color="text.secondary">
                   {savedSshConnections.length > 0
-                    ? `${savedSshConnections.length} saved connection(s)`
-                    : 'Configure & connect'}
+                    ? t('picker.ssh_saved_count', { count: savedSshConnections.length })
+                    : t('picker.ssh_configure')}
                 </Typography>
               </Box>
             </Box>
@@ -333,7 +344,7 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
                 <Box ref={listRef}>
                   <Divider sx={{ mb: 1.5 }}>
                     <Typography variant="caption" color="text.secondary">
-                      Saved SSH Connections
+                      {t('picker.saved_ssh')}
                     </Typography>
                   </Divider>
                 </Box>
@@ -354,13 +365,13 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
                           mb: 0.5,
                           border: '1px solid transparent',
                           '&:hover': {
-                            borderColor: 'rgba(108,99,255,0.3)',
-                            bgcolor: 'rgba(108,99,255,0.06)',
+                            borderColor: isDark ? 'rgba(108,99,255,0.3)' : 'rgba(91,84,224,0.2)',
+                            bgcolor: isDark ? 'rgba(108,99,255,0.06)' : 'rgba(91,84,224,0.04)',
                           },
                         }}
                       >
                         <ListItemIcon sx={{ minWidth: 36 }}>
-                          <LightningIcon size={18} color="#FFD740" />
+                          <LightningIcon size={18} color={sshColor} />
                         </ListItemIcon>
                         <ListItemText
                           primary={conn.name}
@@ -370,7 +381,7 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
                             secondary: { variant: 'caption', sx: { fontFamily: 'monospace' } },
                           }}
                         />
-                        <ArrowRightIcon size={16} color="#8B949E" />
+                        <ArrowRightIcon size={16} color={mutedColor} />
                       </ListItemButton>
                     );
                   })}
@@ -387,13 +398,13 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
                     py: 1,
                     borderRadius: 1.5,
                     cursor: 'pointer',
-                    color: '#6C63FF',
-                    '&:hover': { bgcolor: 'rgba(108,99,255,0.06)' },
+                    color: primaryColor,
+                    '&:hover': { bgcolor: isDark ? 'rgba(108,99,255,0.06)' : 'rgba(91,84,224,0.04)' },
                   }}
                 >
                   <PlusIcon size={16} />
                   <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                    New SSH Connection
+                    {t('picker.new_ssh')}
                   </Typography>
                 </Box>
               </>
@@ -402,14 +413,15 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
                 sx={{
                   p: 2.5,
                   borderRadius: 2,
-                  border: '1px dashed rgba(255,215,64,0.3)',
-                  bgcolor: 'rgba(255,215,64,0.04)',
+                  border: '1px dashed',
+                  borderColor: isDark ? 'rgba(255,215,64,0.3)' : 'rgba(230,81,0,0.2)',
+                  bgcolor: isDark ? 'rgba(255,215,64,0.04)' : 'rgba(230,81,0,0.02)',
                   textAlign: 'center',
                 }}
               >
-                <LightningIcon size={28} color="#8B949E" />
+                <LightningIcon size={28} color={mutedColor} />
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 1.5 }}>
-                  No saved SSH connections
+                  {t('picker.no_saved_ssh')}
                 </Typography>
                 <Box sx={{ display: 'flex', justifyContent: 'center', gap: 1 }}>
                   <Button
@@ -418,7 +430,7 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
                     onClick={() => setMode('new-ssh')}
                     startIcon={<PlusIcon size={14} />}
                   >
-                    Quick Add
+                    {t('picker.quick_add')}
                   </Button>
                   <Button
                     size="small"
@@ -426,14 +438,14 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
                     onClick={handleGoToConnections}
                     endIcon={<ArrowSquareOutIcon size={14} />}
                   >
-                    Connection Manager
+                    {t('picker.connection_manager')}
                   </Button>
                 </Box>
               </Box>
             )}
           </DialogContent>
           <DialogActions sx={{ px: 3, pb: 2 }}>
-            <Button onClick={onClose} size="small">Cancel</Button>
+            <Button onClick={onClose} size="small">{t('picker.back')}</Button>
           </DialogActions>
         </>
       )}

@@ -1,8 +1,8 @@
 {
   "palette": {
     "title": "命令面板",
-    "placeholder": "搜索命令、代码片段，或输入新命令...",
-    "search_commands_snippets": "输入以搜索命令和代码片段",
+    "placeholder": "搜索命令或输入新命令...",
+    "search_commands": "输入以搜索命令历史",
     "press_enter_execute": "按 Enter 执行",
     "execute": "执行",
     "cancel": "取消"

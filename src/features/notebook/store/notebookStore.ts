@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { NoteDto, NoteDetailDto, CreateNoteInput, UpdateNoteInput, CommandNoteLinkDto, NoteGroupDto, CreateGroupInput, UpdateGroupInput, NoteCategoryDto, CreateCategoryInput, UpdateCategoryInput } from '../../../proto/notebook';
 import * as notebookService from '../../../core/services/notebook.service';
+import { emit } from '@tauri-apps/api/event';
 
 interface NotebookState {
   notes: NoteDto[];
@@ -23,6 +24,7 @@ interface NotebookState {
   togglePin: (id: string) => Promise<void>;
   searchNotes: (query: string) => Promise<void>;
   loadCategoriesByGroup: (groupId: string) => Promise<void>;
+  loadAllCategories: () => Promise<void>;
   createCategory: (input: CreateCategoryInput) => Promise<NoteCategoryDto | null>;
   updateCategory: (input: UpdateCategoryInput) => Promise<NoteCategoryDto | null>;
   deleteCategory: (id: string) => Promise<void>;
@@ -79,6 +81,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const note = await notebookService.createNote(input);
       const notes = [note, ...get().notes];
       set({ notes, loading: false });
+      emit('auto-trigger-agent', { triggerType: 'auto_save', noteId: note.id, noteTitle: note.title, action: 'create' }).catch(() => {});
       return note;
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -92,6 +95,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const note = await notebookService.updateNote(input);
       const notes = get().notes.map((n) => (n.id === note.id ? note : n));
       set({ notes, loading: false });
+      emit('auto-trigger-agent', { triggerType: 'auto_save', noteId: note.id, noteTitle: note.title, action: 'update' }).catch(() => {});
       return note;
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -135,6 +139,24 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     try {
       const categories = await notebookService.listNoteCategoriesByGroup(groupId);
       set({ categories: categories || [] });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  loadAllCategories: async () => {
+    try {
+      const names = await notebookService.listNoteCategories();
+      const categories: NoteCategoryDto[] = names.map((name, idx) => ({
+        id: `cat-${name}`,
+        name,
+        groupId: '',
+        isDefault: false,
+        sortOrder: idx,
+        createdAt: 0,
+        updatedAt: 0,
+      }));
+      set({ categories });
     } catch (e) {
       set({ error: String(e) });
     }

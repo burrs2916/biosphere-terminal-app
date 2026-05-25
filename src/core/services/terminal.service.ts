@@ -16,3 +16,7 @@ export async function killTerminal(sessionId: string): Promise<void> {
 export async function resizeTerminal(sessionId: string, rows: number, cols: number): Promise<void> {
   return invoke('resize_terminal', { sessionId, rows, cols });
 }
+
+export async function getTerminalCwd(sessionId: string): Promise<string | null> {
+  return invoke('get_terminal_cwd', { sessionId });
+}

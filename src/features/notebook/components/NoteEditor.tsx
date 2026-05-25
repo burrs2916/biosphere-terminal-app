@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  Box, TextField, Button, Typography, Chip, IconButton, CircularProgress, Tooltip, Snackbar, Alert,
+  Box, TextField, Button, Typography, Chip, IconButton, CircularProgress, Tooltip,
   List, ListItem, ListItemText, ListItemIcon, Select, MenuItem, FormControl, InputLabel,
 } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import {
-  FloppyDiskIcon, XIcon, LinkIcon, PlusIcon, TagIcon, CheckIcon, CodeIcon, Sparkle,
+  FloppyDiskIcon, XIcon, LinkIcon, PlusIcon, TagIcon, CheckIcon, CodeIcon, Sparkle, ArrowsClockwiseIcon, FolderOpenIcon,
 } from '@phosphor-icons/react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
@@ -34,8 +35,10 @@ import { IconRenderer } from './IconRenderer';
 import { EditorToolbar } from './EditorToolbar';
 import { CalloutExtension, LatexExtension, BookmarkExtension } from '../extensions';
 import { getNoteAssistantAgentId } from '../../agent/components/NoteAssistantTab';
-import { runAgent, createConversation } from '../../../core/services/agent.service';
+import { runAgent, createConversation, stopAgent } from '../../../core/services/agent.service';
 import { listen } from '@tauri-apps/api/event';
+import { revealItemInDir } from '@tauri-apps/plugin-opener';
+import { AiOptimizeDialog } from './AiOptimizeDialog';
 import type { NoteDto } from '../../../proto/notebook';
 
 const lowlight = createLowlight(common);
@@ -51,6 +54,12 @@ interface NoteEditorProps {
 export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCategory }: NoteEditorProps) {
   const { t } = useTranslation('notebook');
   const { t: tCommon } = useTranslation('common');
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+  const primaryColor = isDark ? '#6C63FF' : '#5B54E0';
+  const agentColor = isDark ? '#CE93D8' : '#7B1FA2';
+  const mutedColor = isDark ? '#8B949E' : '#6B7280';
+  const codeBorder = isDark ? 'rgba(48,54,61,0.6)' : 'rgba(0,0,0,0.08)';
 
   const {
     selectedNote, loadNote, createNote, updateNote, loadLinkedCommands,
@@ -72,8 +81,14 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
   const [showTagInput, setShowTagInput] = useState(false);
   const [initialContent, setInitialContent] = useState('');
   const [aiOptimizing, setAiOptimizing] = useState(false);
-  const [aiSnackbar, setAiSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' | 'info' }>({ open: false, message: '', severity: 'info' });
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dirtyRef = useRef(false);
   const aiConvIdRef = useRef<string | null>(null);
+  const [aiDialogOpen, setAiDialogOpen] = useState(false);
+  const [aiChunks, setAiChunks] = useState<string[]>([]);
+  const [aiStatus, setAiStatus] = useState<'running' | 'done' | 'error'>('running');
+  const [aiError, setAiError] = useState('');
 
   useEffect(() => {
     loadGroups();
@@ -157,6 +172,12 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
     },
     onUpdate: ({ editor: ed }) => {
       setInitialContent(ed.getMarkdown());
+      dirtyRef.current = true;
+      setSaveStatus('unsaved');
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = setTimeout(() => {
+        handleAutoSave();
+      }, 2000);
     },
   });
 
@@ -170,18 +191,44 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
     }
   }, [editor, initialContent]);
 
-  const handleSave = useCallback(async () => {
+  const handleAutoSave = useCallback(async () => {
+    if (!dirtyRef.current || isNew) return;
     const content = editor?.getMarkdown() || initialContent;
+    if (!content.trim()) return;
+    setSaveStatus('saving');
+    try {
+      if (note) {
+        await updateNote({ id: note.id, title: title || t('notebook.note_title'), content, groupId: groupId || '', category, tags });
+      }
+      dirtyRef.current = false;
+      setSaveStatus('saved');
+    } catch {
+      setSaveStatus('unsaved');
+    }
+  }, [editor, initialContent, isNew, note, title, groupId, category, tags, updateNote, t]);
+
+  const handleSave = useCallback(async () => {
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    const content = editor?.getMarkdown() || initialContent;
+    setSaveStatus('saving');
     if (isNew) {
       const result = await createNote({ title: title || t('notebook.note_title'), content, groupId: groupId || '', category, tags });
       if (result) {
         onSaved?.();
         setIsNew(false);
+        dirtyRef.current = false;
+        setSaveStatus('saved');
+      } else {
+        setSaveStatus('unsaved');
       }
     } else if (note) {
       const result = await updateNote({ id: note.id, title: title || t('notebook.note_title'), content, groupId: groupId || '', category, tags });
       if (result) {
         onSaved?.();
+        dirtyRef.current = false;
+        setSaveStatus('saved');
+      } else {
+        setSaveStatus('unsaved');
       }
     }
   }, [isNew, title, groupId, category, tags, note, createNote, updateNote, onSaved, t, editor, initialContent]);
@@ -229,58 +276,99 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
   const handleAiOptimize = useCallback(async () => {
     const agentId = getNoteAssistantAgentId();
     if (!agentId) {
-      setAiSnackbar({ open: true, message: t('editor.ai_no_agent'), severity: 'error' });
+      setAiStatus('error');
+      setAiError(t('editor.ai_no_agent'));
+      setAiDialogOpen(true);
       return;
     }
 
     const content = editor?.getMarkdown() || initialContent;
     if (!content.trim()) {
-      setAiSnackbar({ open: true, message: t('editor.ai_no_content'), severity: 'error' });
+      setAiStatus('error');
+      setAiError(t('editor.ai_no_content'));
+      setAiDialogOpen(true);
       return;
     }
 
     setAiOptimizing(true);
-    setAiSnackbar({ open: true, message: t('editor.ai_optimizing'), severity: 'info' });
+    setAiChunks([]);
+    setAiStatus('running');
+    setAiError('');
+    setAiDialogOpen(true);
 
     try {
       const conv = await createConversation(agentId, `Optimize: ${title || 'Note'}`);
       aiConvIdRef.current = conv.id;
 
+      const unlistenChunk = listen<{ conversationId: string; chunk: string }>('agent-chunk', (event) => {
+        if (event.payload.conversationId === aiConvIdRef.current) {
+          setAiChunks((prev) => [...prev, event.payload.chunk]);
+        }
+      });
+
       const unlistenDone = listen<{ conversationId: string; response: string }>('agent-done', (event) => {
         if (event.payload.conversationId === aiConvIdRef.current) {
           const response = event.payload.response;
-          if (editor && response) {
+          if (editor && response && response !== 'No response') {
             const json = editor.markdown?.parse(response);
             if (json) {
               editor.commands.setContent(json);
               setInitialContent(response);
+              dirtyRef.current = true;
+              setSaveStatus('unsaved');
             }
+          } else if (response === 'No response' || !response) {
+            setAiStatus('error');
+            setAiError(t('editor.ai_optimize_error') || 'AI optimization failed');
           }
           setAiOptimizing(false);
+          setAiStatus('done');
           aiConvIdRef.current = null;
-          setAiSnackbar({ open: true, message: t('editor.ai_optimize_done'), severity: 'success' });
           unlistenDone.then((fn) => fn());
+          unlistenChunk.then((fn) => fn());
         }
       });
 
       const unlistenError = listen<{ conversationId: string; error: string }>('agent-error', (event) => {
         if (event.payload.conversationId === aiConvIdRef.current) {
           setAiOptimizing(false);
+          setAiStatus('error');
+          setAiError(event.payload.error);
           aiConvIdRef.current = null;
-          setAiSnackbar({ open: true, message: `${t('editor.ai_optimize_error')}: ${event.payload.error}`, severity: 'error' });
           unlistenError.then((fn) => fn());
+          unlistenChunk.then((fn) => fn());
         }
       });
 
-      const prompt = `You are optimizing a note stored in a Markdown file with YAML front matter. The file format is:\n\n---\nid: <uuid>\ntitle: <title>\ncategory: <category>\ntags: [<tag1>, <tag2>]\ncreated_at: <timestamp>\nupdated_at: <timestamp>\nlinked_commands: []\n---\n\n<Markdown body content>\n\nIMPORTANT RULES:\n1. You MUST ONLY modify the Markdown body content. Do NOT modify, add, or remove any YAML front matter fields (id, title, category, tags, created_at, updated_at, linked_commands).\n2. Return ONLY the optimized Markdown body content, without the front matter block and without any explanation.\n3. Keep the original language of the content.\n4. Fix grammar, improve clarity and structure, add missing information if possible.\n\nTitle: ${title || 'Untitled'}\n\nContent to optimize:\n${content}`;
+      let prompt: string;
+      if (category === 'command') {
+        prompt = `You are optimizing a command note. Return ONLY the optimized Markdown content without any explanation.\n\nIMPORTANT RULES:\n1. Keep the original language of the content.\n2. For commands, provide a complete reference document including:\n   - Brief description of what the command does\n   - Explanation of key flags and options\n   - Common usage examples with code blocks\n   - Related commands or tips if applicable\n3. Preserve the original command in a code block.\n4. Do NOT include metadata like working directory, save time, or exit status.\n5. Do NOT wrap the entire output in code fences.\n\nTitle: ${title || 'Untitled'}\n\nContent to optimize:\n${content}`;
+      } else {
+        prompt = `You are optimizing a note. Return ONLY the optimized Markdown content without any explanation.\n\nIMPORTANT RULES:\n1. Keep the original language of the content.\n2. Fix grammar, improve clarity and structure.\n3. Preserve all Markdown formatting, code blocks, tables, and links.\n4. Do NOT wrap the output in code fences.\n\nTitle: ${title || 'Untitled'}\n\nContent to optimize:\n${content}`;
+      }
 
-      await runAgent(agentId, prompt, conv.id);
+      await runAgent(agentId, prompt, conv.id, true);
     } catch (e) {
       setAiOptimizing(false);
+      setAiStatus('error');
+      setAiError(String(e));
       aiConvIdRef.current = null;
-      setAiSnackbar({ open: true, message: `${t('editor.ai_optimize_error')}: ${String(e)}`, severity: 'error' });
     }
-  }, [editor, initialContent, title, t]);
+  }, [editor, initialContent, title, category, t]);
+
+  const handleAiCancel = useCallback(async () => {
+    if (aiConvIdRef.current) {
+      try { await stopAgent(aiConvIdRef.current); } catch {}
+      aiConvIdRef.current = null;
+    }
+    setAiOptimizing(false);
+    setAiStatus('error');
+    setAiError(t('editor.ai_optimize_cancelled') || 'AI optimization cancelled');
+  }, [t]);
+
+  const handleAiDialogClose = useCallback(() => {
+    setAiDialogOpen(false);
+  }, []);
 
   const charCount = editor?.storage.characterCount;
 
@@ -290,35 +378,72 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
         <Typography variant="h6" sx={{ flex: 1, fontSize: 16 }}>
           {isNew ? t('editor.create_title') : t('editor.edit_title')}
         </Typography>
+        {saveStatus === 'unsaved' && (
+          <Typography variant="caption" sx={{ color: 'warning.main', fontSize: 10 }}>
+            {t('editor.unsaved') || '未保存'}
+          </Typography>
+        )}
+        {saveStatus === 'saving' && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <ArrowsClockwiseIcon size={10} className="spin" />
+            <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
+              {t('editor.saving') || '保存中...'}
+            </Typography>
+          </Box>
+        )}
+        {saveStatus === 'saved' && !isNew && (
+          <Typography variant="caption" sx={{ color: 'success.main', fontSize: 10 }}>
+            {t('editor.saved') || '已保存'}
+          </Typography>
+        )}
         <Button
           variant="contained"
           size="small"
-          startIcon={<FloppyDiskIcon size={14} weight="bold" />}
+          startIcon={saveStatus === 'saving' ? <CircularProgress size={14} sx={{ color: '#fff' }} /> : <FloppyDiskIcon size={14} weight="bold" />}
           onClick={handleSave}
+          disabled={saveStatus === 'saving'}
           sx={{
-            background: 'linear-gradient(135deg, #6C63FF 0%, #8B83FF 100%)',
+            background: `linear-gradient(135deg, ${primaryColor} 0%, ${isDark ? '#8B83FF' : '#7B75FF'} 100%)`,
             borderRadius: 2,
           }}
         >
           {tCommon('action.save')}
         </Button>
-        <Tooltip title={t('editor.ai_optimize')} arrow>
+        {!isNew && selectedNote?.note.filePath && (
+          <Tooltip title={t('editor.open_folder') || '打开文件夹'} arrow>
+            <IconButton
+              size="small"
+              onClick={() => {
+                try { revealItemInDir(selectedNote!.note.filePath); } catch {}
+              }}
+              sx={{
+                borderRadius: 2,
+                border: '1px solid rgba(144,202,249,0.3)',
+                bgcolor: 'rgba(144,202,249,0.06)',
+                '&:hover': { bgcolor: 'rgba(144,202,249,0.15)', borderColor: 'rgba(144,202,249,0.5)' },
+              }}
+            >
+              <FolderOpenIcon size={16} color={isDark ? '#90CAF9' : '#1976d2'} />
+            </IconButton>
+          </Tooltip>
+        )}
+        <Tooltip title={aiOptimizing ? (t('editor.ai_cancel') || '取消 AI 优化') : t('editor.ai_optimize')} arrow>
           <IconButton
             size="small"
-            onClick={handleAiOptimize}
-            disabled={aiOptimizing || isNew}
+            onClick={aiOptimizing ? handleAiCancel : handleAiOptimize}
             sx={{
               borderRadius: 2,
-              border: '1px solid rgba(206,147,216,0.3)',
-              bgcolor: 'rgba(206,147,216,0.06)',
-              '&:hover': { bgcolor: 'rgba(206,147,216,0.15)', borderColor: 'rgba(206,147,216,0.5)' },
-              '&.Mui-disabled': { opacity: 0.3 },
+              border: aiOptimizing ? '1px solid rgba(255,82,82,0.3)' : '1px solid rgba(206,147,216,0.3)',
+              bgcolor: aiOptimizing ? 'rgba(255,82,82,0.06)' : 'rgba(206,147,216,0.06)',
+              '&:hover': aiOptimizing
+                ? { bgcolor: 'rgba(255,82,82,0.15)', borderColor: 'rgba(255,82,82,0.5)' }
+                : { bgcolor: 'rgba(206,147,216,0.15)', borderColor: 'rgba(206,147,216,0.5)' },
             }}
           >
             {aiOptimizing ? (
-              <CircularProgress size={16} sx={{ color: '#CE93D8' }} />
+              <XIcon size={16} color="#FF5252" />
             ) : (
-              <Sparkle size={16} weight="fill" color="#CE93D8" />
+              <Sparkle size={16} weight="fill" color={agentColor} />
             )}
           </IconButton>
         </Tooltip>
@@ -342,7 +467,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             icon={<IconRenderer value={groups.find((g) => g.id === defaultGroupId)?.icon || ''} size={14} />}
             label={groups.find((g) => g.id === defaultGroupId)?.name || t('group.uncategorized')}
             size="small"
-            sx={{ borderRadius: 2, bgcolor: 'rgba(108,99,255,0.1)', color: '#6C63FF', fontWeight: 600 }}
+            sx={{ borderRadius: 2, bgcolor: `${primaryColor}18`, color: primaryColor, fontWeight: 600 }}
           />
           {defaultCategory && (
             <Chip
@@ -416,7 +541,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             {categories.map((cat) => (
               <MenuItem key={cat.id} value={cat.name} selected={category === cat.name}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <TagIcon size={14} color={cat.isDefault ? '#6C63FF' : '#8B949E'} />
+                  <TagIcon size={14} color={cat.isDefault ? primaryColor : mutedColor} />
                   <Typography variant="body2">{cat.name}</Typography>
                   {cat.isDefault && (
                     <Chip label={t('category.default_badge')} size="small" sx={{ height: 16, fontSize: 10, ml: 'auto' }} />
@@ -439,7 +564,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             ) : null}
             {groupId ? (
               <MenuItem value="__add_category__" onClick={() => { setShowNewCategoryInput(true); setNewCategoryName(''); }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, color: '#6C63FF' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, color: primaryColor }}>
                   <PlusIcon size={14} /> {t('category.add')}
                 </Box>
               </MenuItem>
@@ -459,12 +584,12 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             />
             <Tooltip title={tCommon('action.create')}>
               <IconButton size="small" onClick={handleCreateCategory} disabled={!newCategoryName.trim()}>
-                <PlusIcon size={16} color={newCategoryName.trim() ? '#6C63FF' : '#8B949E'} />
+                <PlusIcon size={16} color={newCategoryName.trim() ? primaryColor : mutedColor} />
               </IconButton>
             </Tooltip>
             <Tooltip title={tCommon('action.cancel')}>
               <IconButton size="small" onClick={() => { setShowNewCategoryInput(false); setNewCategoryName(''); }}>
-                <XIcon size={16} color="#8B949E" />
+                <XIcon size={16} color={mutedColor} />
               </IconButton>
             </Tooltip>
           </Box>
@@ -494,10 +619,10 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
               sx={{ width: 120, '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
             />
             <IconButton size="small" onClick={handleAddTag} disabled={!tagInput.trim()}>
-              <CheckIcon size={14} color={tagInput.trim() ? '#6C63FF' : '#8B949E'} />
+              <CheckIcon size={14} color={tagInput.trim() ? primaryColor : mutedColor} />
             </IconButton>
             <IconButton size="small" onClick={() => { setShowTagInput(false); setTagInput(''); }}>
-              <XIcon size={14} color="#8B949E" />
+              <XIcon size={14} color={mutedColor} />
             </IconButton>
           </Box>
         ) : (
@@ -508,7 +633,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             sx={{
               fontSize: 11,
               textTransform: 'none',
-              color: '#6C63FF',
+              color: primaryColor,
               minWidth: 'auto',
               px: 1,
             }}
@@ -533,35 +658,35 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             px: 2.5,
             py: 2,
             minHeight: 0,
-            color: '#E6EDF3',
+            color: isDark ? '#E6EDF3' : '#1A1A2E',
             fontSize: 14,
             lineHeight: 1.7,
             '& p.is-editor-empty:first-child::before': {
               content: 'attr(data-placeholder)',
               float: 'left',
-              color: '#484F58',
+              color: isDark ? '#484F58' : '#9E9E9E',
               pointerEvents: 'none',
               height: 0,
             },
-            '& h1': { fontSize: '1.75rem', fontWeight: 700, mt: 2, mb: 1, color: '#F0F6FC' },
-            '& h2': { fontSize: '1.5rem', fontWeight: 700, mt: 1.75, mb: 0.75, color: '#F0F6FC' },
-            '& h3': { fontSize: '1.25rem', fontWeight: 600, mt: 1.5, mb: 0.5, color: '#F0F6FC' },
-            '& h4': { fontSize: '1.1rem', fontWeight: 600, mt: 1.25, mb: 0.5, color: '#F0F6FC' },
+            '& h1': { fontSize: '1.75rem', fontWeight: 700, mt: 2, mb: 1, color: isDark ? '#F0F6FC' : '#1A1A2E' },
+            '& h2': { fontSize: '1.5rem', fontWeight: 700, mt: 1.75, mb: 0.75, color: isDark ? '#F0F6FC' : '#1A1A2E' },
+            '& h3': { fontSize: '1.25rem', fontWeight: 600, mt: 1.5, mb: 0.5, color: isDark ? '#F0F6FC' : '#1A1A2E' },
+            '& h4': { fontSize: '1.1rem', fontWeight: 600, mt: 1.25, mb: 0.5, color: isDark ? '#F0F6FC' : '#1A1A2E' },
             '& h5': { fontSize: '1rem', fontWeight: 600, mt: 1, mb: 0.5 },
-            '& h6': { fontSize: '0.875rem', fontWeight: 600, mt: 1, mb: 0.5, color: '#8B949E' },
+            '& h6': { fontSize: '0.875rem', fontWeight: 600, mt: 1, mb: 0.5, color: mutedColor },
             '& p': { mb: 1 },
             '& ul, & ol': { pl: 2.5, mb: 1 },
             '& li': { mb: 0.25 },
             '& blockquote': {
-              borderLeft: '3px solid #6C63FF',
+              borderLeft: `3px solid ${primaryColor}`,
               pl: 2, py: 0.5, my: 1.5,
-              bgcolor: 'rgba(108,99,255,0.06)',
+              bgcolor: `${primaryColor}10`,
               borderRadius: '0 4px 4px 0',
-              color: '#8B949E',
+                color: mutedColor,
             },
             '& code': {
-              bgcolor: 'rgba(110,118,129,0.2)',
-              color: '#E6EDF3',
+              bgcolor: isDark ? 'rgba(110,118,129,0.2)' : 'rgba(108,99,255,0.1)',
+              color: isDark ? '#E6EDF3' : '#5B54E0',
               px: 0.5,
               py: 0.15,
               borderRadius: 0.5,
@@ -569,8 +694,8 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
               fontFamily: 'monospace',
             },
             '& pre': {
-              bgcolor: 'rgba(22,27,34,0.8)',
-              border: '1px solid rgba(48,54,61,0.6)',
+              bgcolor: isDark ? 'rgba(22,27,34,0.8)' : 'rgba(0,0,0,0.04)',
+              border: `1px solid ${codeBorder}`,
               borderRadius: 1.5,
               p: 2,
               my: 1.5,
@@ -588,25 +713,25 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
               width: '100%',
               my: 1.5,
               '& td, & th': {
-                border: '1px solid rgba(48,54,61,0.6)',
+                border: `1px solid ${codeBorder}`,
                 px: 1.5,
                 py: 0.75,
                 textAlign: 'left',
               },
               '& th': {
-                bgcolor: 'rgba(22,27,34,0.6)',
+                bgcolor: isDark ? 'rgba(22,27,34,0.6)' : 'rgba(108,99,255,0.06)',
                 fontWeight: 600,
               },
             },
             '& hr': {
               border: 'none',
-              borderTop: '1px solid rgba(48,54,61,0.6)',
+              borderTop: `1px solid ${codeBorder}`,
               my: 2,
             },
             '& a': {
-              color: '#6C63FF',
+              color: primaryColor,
               textDecoration: 'underline',
-              '&:hover': { color: '#8B83FF' },
+              '&:hover': { color: isDark ? '#8B83FF' : '#7B75FF' },
             },
             '& img': {
               maxWidth: '100%',
@@ -614,7 +739,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
               my: 1,
             },
             '& mark': {
-              bgcolor: 'rgba(108,99,255,0.3)',
+              bgcolor: `${primaryColor}40`,
               color: 'inherit',
               borderRadius: 0.25,
               px: 0.25,
@@ -640,7 +765,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
               '& .katex-display': { margin: '0 !important' },
             },
             '& div[data-bookmark]': {
-              '&:hover': { borderColor: '#6C63FF !important' },
+              '&:hover': { borderColor: `${primaryColor} !important` },
             },
           },
         }}
@@ -661,7 +786,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
       {linkedCommands.length > 0 && (
         <Box sx={{ mt: 2 }}>
           <Typography variant="subtitle2" sx={{ mb: 0.5, display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <LinkIcon size={14} color="#6C63FF" /> {t('notebook.linked_commands')}
+            <LinkIcon size={14} color={primaryColor} /> {t('notebook.linked_commands')}
           </Typography>
           <List dense sx={{ maxHeight: 150, overflow: 'auto', border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
             {linkedCommands.map((link) => (
@@ -670,7 +795,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
                 sx={{ borderRadius: 1 }}
               >
                 <ListItemIcon sx={{ minWidth: 28 }}>
-                  <CodeIcon size={14} color="#8B949E" />
+                  <CodeIcon size={14} color={mutedColor} />
                 </ListItemIcon>
                 <ListItemText
                   primary={link.context}
@@ -683,21 +808,14 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
           </List>
         </Box>
       )}
-      <Snackbar
-        open={aiSnackbar.open}
-        autoHideDuration={aiOptimizing ? null : 3000}
-        onClose={() => setAiSnackbar((s) => ({ ...s, open: false }))}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
-      >
-        <Alert
-          onClose={() => setAiSnackbar((s) => ({ ...s, open: false }))}
-          severity={aiSnackbar.severity}
-          variant="filled"
-          sx={{ borderRadius: 2 }}
-        >
-          {aiSnackbar.message}
-        </Alert>
-      </Snackbar>
+      <AiOptimizeDialog
+        open={aiDialogOpen}
+        onClose={handleAiDialogClose}
+        onCancel={handleAiCancel}
+        chunks={aiChunks}
+        status={aiStatus}
+        errorMessage={aiError}
+      />
     </Box>
   );
 }

@@ -48,3 +48,11 @@ pub fn relay_execute_command(
         "command": command,
     })).map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub fn get_terminal_cwd(
+    session_id: String,
+    terminal_service: State<'_, Arc<TerminalService>>,
+) -> Result<Option<String>, String> {
+    terminal_service.get_cwd(&session_id).map_err(|e| e.to_string())
+}

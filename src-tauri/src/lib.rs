@@ -12,15 +12,22 @@ use infra::storage::database::Database;
 use app::terminal_service::TerminalService;
 use app::notebook_service::NotebookService;
 use app::agent_service::AgentService;
+use app::plugin_service::PluginService;
 use app::linker_service::LinkerService;
 use app::icon_service::IconService;
 use domain::command::executor::CommandExecutor;
 
+fn get_project_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf()
+}
+
 fn get_data_dir() -> std::path::PathBuf {
     if cfg!(debug_assertions) {
-        let project_root = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
-        project_root.join(".data").join("dev")
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir.join(".data").join("dev")
     } else {
         let exe_dir = std::env::current_exe()
             .ok()
@@ -32,9 +39,7 @@ fn get_data_dir() -> std::path::PathBuf {
 
 fn get_log_dir() -> std::path::PathBuf {
     if cfg!(debug_assertions) {
-        let project_root = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."));
-        project_root.join("logs")
+        get_project_root().join("logs")
     } else {
         get_data_dir().join("logs")
     }
@@ -61,6 +66,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(terminal_service.clone())
         .setup(move |app| {
             let app_handle = app.handle();
@@ -76,13 +82,17 @@ pub fn run() {
                 Ok(db) => db,
                 Err(e) => {
                     tracing::error!("[app] failed to open database: {}", e);
-                    std::process::exit(1);
+                    return Err(Box::new(tauri::Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("failed to open database: {}", e),
+                    ))));
                 }
             };
             let db_arc = Arc::new(db);
 
             let notebook_service = Arc::new(NotebookService::new(notes_dir, db_arc.clone()));
             let agent_service = Arc::new(AgentService::new(db_arc.clone(), notebook_service.clone(), terminal_service.clone()));
+            let plugin_service = Arc::new(PluginService::new(data_dir.clone(), db_arc.clone()));
             let linker_service = Arc::new(LinkerService::new(
                 notebook_service.clone(),
                 db_arc.clone(),
@@ -94,6 +104,7 @@ pub fn run() {
             app_handle.manage(db_arc);
             app_handle.manage(notebook_service);
             app_handle.manage(agent_service);
+            app_handle.manage(plugin_service);
             app_handle.manage(linker_service);
             app_handle.manage(command_executor);
             app_handle.manage(icon_service);
@@ -106,6 +117,7 @@ pub fn run() {
             interface::commands::terminal::kill_terminal,
             interface::commands::terminal::resize_terminal,
             interface::commands::terminal::relay_execute_command,
+            interface::commands::terminal::get_terminal_cwd,
             interface::commands::session::list_sessions,
             interface::commands::session::create_session,
             interface::commands::session::delete_session,
@@ -127,8 +139,34 @@ pub fn run() {
             interface::commands::connection::delete_connection,
             interface::commands::connection::test_connection,
             interface::commands::plugin::list_plugins,
-            interface::commands::plugin::load_plugin,
-            interface::commands::plugin::unload_plugin,
+            interface::commands::plugin::get_plugin,
+            interface::commands::plugin::save_plugin,
+            interface::commands::plugin::delete_plugin,
+            interface::commands::plugin::toggle_plugin,
+            interface::commands::plugin::list_plugin_tools,
+            interface::commands::plugin::list_plugin_groups,
+            interface::commands::plugin::create_plugin_group,
+            interface::commands::plugin::update_plugin_group,
+            interface::commands::plugin::delete_plugin_group,
+            interface::commands::plugin::list_plugin_categories,
+            interface::commands::plugin::create_plugin_category,
+            interface::commands::plugin::update_plugin_category,
+            interface::commands::plugin::delete_plugin_category,
+            interface::commands::plugin::run_plugin_tool,
+            interface::commands::plugin::get_plugin_tool_ui_schema,
+            interface::commands::plugin::get_plugin_usage_metrics,
+            interface::commands::plugin::get_plugin_refine_suggestions,
+            interface::commands::plugin::get_plugin_structured_refine,
+            interface::commands::plugin::list_plugin_usage_logs,
+            interface::commands::plugin::clear_plugin_usage_logs,
+            interface::commands::plugin::clear_usage_logs_before,
+            interface::commands::plugin::clear_failed_logs_before,
+            interface::commands::plugin::purge_all_usage_logs,
+            interface::commands::plugin::count_plugin_usage_logs,
+            interface::commands::plugin::count_all_usage_logs,
+            interface::commands::plugin::usage_logs_size_estimate,
+            interface::commands::plugin::export_plugin_usage_logs,
+            interface::commands::plugin::export_all_usage_logs,
             interface::commands::notebook::list_notes,
             interface::commands::notebook::get_note,
             interface::commands::notebook::create_note,
@@ -168,9 +206,18 @@ pub fn run() {
             interface::commands::agent::list_conversations,
             interface::commands::agent::create_conversation,
             interface::commands::agent::delete_conversation,
+            interface::commands::agent::update_conversation_title,
             interface::commands::agent::list_messages,
             interface::commands::agent::save_message,
+            interface::commands::agent::delete_messages_after,
             interface::commands::agent::run_agent,
+            interface::commands::agent::stop_agent,
+            interface::commands::agent::write_frontend_log,
+            interface::commands::agent::generate_plugin_scenarios,
+            interface::commands::agent::respond_permission,
+            interface::commands::agent::save_plugin_scenarios,
+            interface::commands::agent::delete_plugin_scenario,
+            interface::commands::agent::update_agent_allowed_tools,
             interface::commands::environment::get_environment,
             interface::commands::icon::list_icon_groups,
             interface::commands::icon::create_icon_group,

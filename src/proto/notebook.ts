@@ -9,6 +9,7 @@ export interface NoteDto {
   isPinned: boolean;
   createdAt: number;
   updatedAt: number;
+  summary?: string;
 }
 
 export interface NoteDetailDto {

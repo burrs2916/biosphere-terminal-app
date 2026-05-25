@@ -8,12 +8,14 @@ pub struct Database {
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self, rusqlite::Error> {
+        tracing::info!("[Database::open] opening database at: {:?}", path);
         let conn = Connection::open(path)?;
         let db = Database {
             conn: Mutex::new(conn),
         };
         db.initialize()?;
         db.migrate()?;
+        tracing::info!("[Database::open] database opened and migrated successfully");
         Ok(db)
     }
 
@@ -214,6 +216,29 @@ impl Database {
             );
 
             CREATE INDEX IF NOT EXISTS idx_note_categories_group ON note_categories(group_id);
+
+            CREATE TABLE IF NOT EXISTS plugin_groups (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                icon TEXT NOT NULL DEFAULT '📦',
+                color TEXT NOT NULL DEFAULT '#4FC3F7',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS plugin_categories (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (group_id) REFERENCES plugin_groups(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_plugin_categories_group ON plugin_categories(group_id);
             ",
         )?;
         Ok(())
@@ -452,13 +477,67 @@ impl Database {
             let _ = conn.execute_batch("ALTER TABLE ai_agents ADD COLUMN auto_confirm INTEGER NOT NULL DEFAULT 0;");
         }
 
-        let has_linked_note_ids: bool = {
-            let stmt = conn.prepare("SELECT linked_note_ids FROM ai_agents LIMIT 1");
+        let has_permission_mode: bool = {
+            let stmt = conn.prepare("SELECT permission_mode FROM ai_agents LIMIT 1");
             stmt.is_ok()
         };
 
-        if !has_linked_note_ids {
-            let _ = conn.execute_batch("ALTER TABLE ai_agents ADD COLUMN linked_note_ids TEXT NOT NULL DEFAULT '[]';");
+        if !has_permission_mode {
+            let _ = conn.execute_batch("ALTER TABLE ai_agents ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'confirm';");
+        }
+
+        let has_always_allowed_tools: bool = {
+            let stmt = conn.prepare("SELECT always_allowed_tools FROM ai_agents LIMIT 1");
+            stmt.is_ok()
+        };
+
+        if !has_always_allowed_tools {
+            let _ = conn.execute_batch("ALTER TABLE ai_agents ADD COLUMN always_allowed_tools TEXT NOT NULL DEFAULT '[]';");
+        }
+
+        let has_fallback_model_id: bool = {
+            let stmt = conn.prepare("SELECT fallback_model_id FROM ai_agents LIMIT 1");
+            stmt.is_ok()
+        };
+
+        if !has_fallback_model_id {
+            let _ = conn.execute_batch("ALTER TABLE ai_agents ADD COLUMN fallback_model_id TEXT NOT NULL DEFAULT '';");
+        }
+
+        let has_workspace_dir: bool = {
+            let stmt = conn.prepare("SELECT workspace_dir FROM ai_agents LIMIT 1");
+            stmt.is_ok()
+        };
+
+        if !has_workspace_dir {
+            let _ = conn.execute_batch("ALTER TABLE ai_agents ADD COLUMN workspace_dir TEXT NOT NULL DEFAULT '';");
+        }
+
+        let has_conv_metadata: bool = {
+            let stmt = conn.prepare("SELECT metadata FROM ai_conversations LIMIT 1");
+            stmt.is_ok()
+        };
+
+        if !has_conv_metadata {
+            let _ = conn.execute_batch("ALTER TABLE ai_conversations ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}';");
+        }
+
+        let has_msg_is_error: bool = {
+            let stmt = conn.prepare("SELECT is_error FROM ai_messages LIMIT 1");
+            stmt.is_ok()
+        };
+
+        if !has_msg_is_error {
+            let _ = conn.execute_batch("ALTER TABLE ai_messages ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0;");
+        }
+
+        let has_conv_compaction: bool = {
+            let stmt = conn.prepare("SELECT compaction_summary FROM ai_conversations LIMIT 1");
+            stmt.is_ok()
+        };
+
+        if !has_conv_compaction {
+            let _ = conn.execute_batch("ALTER TABLE ai_conversations ADD COLUMN compaction_summary TEXT NOT NULL DEFAULT '';");
         }
 
         Ok(())

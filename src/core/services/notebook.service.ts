@@ -45,6 +45,10 @@ export async function getLinkedNotes(commandId: string): Promise<CommandNoteLink
   return invoke('get_linked_notes', { commandId });
 }
 
+export async function unlinkCommandNote(linkId: string): Promise<void> {
+  return invoke('unlink_command_note', { linkId });
+}
+
 export async function getNotesForCommandText(commandText: string): Promise<Array<{ linkId: string; noteId: string; title: string; category: string; groupId: string; context: string; createdAt: number }>> {
   return invoke('get_notes_for_command_text', { commandText });
 }

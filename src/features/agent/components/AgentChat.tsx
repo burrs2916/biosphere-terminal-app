@@ -1,53 +1,43 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Box, TextField, IconButton, Typography, Paper, Divider, Chip, CircularProgress,
-  Collapse, Select, MenuItem, FormControl,
+  Box, IconButton, Typography, Divider, Chip,
+  Select, MenuItem, FormControl,
+  Dialog, DialogTitle, DialogContent, DialogActions,
+  Button, Alert,
 } from '@mui/material';
 import {
-  PaperPlaneTilt as PaperPlaneTiltIcon, Robot, User, Plus as PlusIcon, Stop,
-  Terminal, Wrench, ChatCircleDotsIcon, Sparkle, TrashIcon,
+  Robot, Plus as PlusIcon, TrashIcon,
+  ChatCircleDotsIcon, Sparkle, ShieldWarning,
 } from '@phosphor-icons/react';
 import { useAgentStore } from '../store/agentStore';
+import { usePluginStore } from '../store/pluginStore';
 import type { MessageDto } from '../../../proto/agent';
 import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
-import { runAgent, saveMessage } from '../../../core/services/agent.service';
+import { runAgent, saveMessage, stopAgent, respondPermission } from '../../../core/services/agent.service';
+import { useTheme } from '@mui/material/styles';
+import { ChatMessagesArea, ChatInputArea, type FileAttachment } from '../../../components/chat/ChatComponents';
+import type { ToolCallDisplay } from '../../../components/chat/ChatComponents';
 
-interface StreamChunk {
-  conversationId: string;
-  chunk: string;
-}
-
-interface StreamDone {
-  conversationId: string;
-  response: string;
-}
-
-interface StreamError {
-  conversationId: string;
-  error: string;
-}
-
+interface StreamChunk { conversationId: string; chunk: string }
+interface StreamDone { conversationId: string; response: string }
+interface StreamError { conversationId: string; error: string }
 interface ToolCallEvent {
   tool_name: string;
   arguments: Record<string, unknown>;
   result: string | null;
   success: boolean | null;
-  status: 'running' | 'done';
+  status: 'running' | 'done' | 'denied';
 }
+interface ToolCallPayload { conversationId: string; toolCall: ToolCallEvent }
 
-interface ToolCallPayload {
+interface PermissionRequestPayload {
   conversationId: string;
-  toolCall: ToolCallEvent;
-}
-
-interface ToolCallDisplay {
-  id: string;
+  agentId?: string;
   toolName: string;
   arguments: Record<string, unknown>;
-  result: string | null;
-  success: boolean | null;
-  status: 'running' | 'done';
+  riskLevel: 'low' | 'high';
+  description: string;
 }
 
 export function AgentChat() {
@@ -55,14 +45,22 @@ export function AgentChat() {
     messages, activeConversationId, activeAgentId,
     agents, conversations, models,
     loadMessages, addMessage, updateMessage, createConversation, deleteConversation,
-    loadConversations, loadAgents, loadModels,
+    updateConversationTitle, loadConversations, loadAgents, loadModels, deleteMessagesAfter,
   } = useAgentStore();
+  const { loadPluginTools } = usePluginStore();
   const { t } = useTranslation('agent');
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+  const agentColor = isDark ? '#CE93D8' : '#7B1FA2';
+  const userColor = isDark ? '#6C63FF' : '#5B54E0';
+  const mutedBorder = isDark ? 'rgba(48,54,61,0.6)' : 'rgba(0,0,0,0.08)';
 
   const [input, setInput] = useState('');
+  const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [loading, setLoading] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
   const [toolCalls, setToolCalls] = useState<ToolCallDisplay[]>([]);
+  const [permissionRequest, setPermissionRequest] = useState<PermissionRequestPayload | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const streamingMsgIdRef = useRef<string | null>(null);
   const toolCallCounterRef = useRef(0);
@@ -110,19 +108,30 @@ export function AgentChat() {
         const msgId = streamingMsgIdRef.current;
         if (msgId) {
           updateMessage(msgId, event.payload.response);
-          const msg: MessageDto = {
-            id: msgId,
-            conversationId: activeConversationId!,
-            role: 'assistant',
-            content: event.payload.response,
-            toolCalls: '',
-            createdAt: Date.now(),
-          };
-          try { await saveMessage(msg); } catch {}
+        }
+        if (activeConversationId) {
+          try {
+            await loadMessages(activeConversationId);
+          } catch {}
+          const conv = useAgentStore.getState().conversations.find((c) => c.id === activeConversationId);
+          if (conv) {
+            const isDefaultTitle = conv.title === t('chat.new_conversation_title') || conv.title === 'New Conversation' || conv.title === 'AI Copilot';
+            if (isDefaultTitle) {
+              const msgs = useAgentStore.getState().messages;
+              const firstUserMsg = msgs.find((m) => m.role === 'user');
+              if (firstUserMsg) {
+                const autoTitle = firstUserMsg.content.replace(/\[附件:.*?\]\s*/g, '').trim().slice(0, 40);
+                if (autoTitle) {
+                  updateConversationTitle(activeConversationId, autoTitle).catch(() => {});
+                }
+              }
+            }
+          }
         }
         setStreamingContent('');
         setLoading(false);
         streamingMsgIdRef.current = null;
+        loadPluginTools();
       }
     });
 
@@ -145,29 +154,39 @@ export function AgentChat() {
           toolCallCounterRef.current += 1;
           const id = `tc-${toolCallCounterRef.current}`;
           setToolCalls((prev) => [...prev, {
-            id,
-            toolName: tc.tool_name,
-            arguments: tc.arguments,
-            result: null,
-            success: null,
-            status: 'running',
+            id, toolName: tc.tool_name, arguments: tc.arguments,
+            result: null, success: null, status: 'running',
           }]);
+        } else if (tc.status === 'denied') {
+          setToolCalls((prev) => {
+            const last = prev.length - 1;
+            if (last >= 0 && prev[last].status === 'running') {
+              const updated = [...prev];
+              updated[last] = { ...updated[last], result: tc.result, success: false, status: 'denied' };
+              return updated;
+            }
+            return prev;
+          });
         } else {
           setToolCalls((prev) => {
             const last = prev.length - 1;
             if (last >= 0 && prev[last].status === 'running') {
               const updated = [...prev];
-              updated[last] = {
-                ...updated[last],
-                result: tc.result,
-                success: tc.success,
-                status: 'done',
-              };
+              updated[last] = { ...updated[last], result: tc.result, success: tc.success, status: 'done' };
               return updated;
             }
             return prev;
           });
+          if (tc.tool_name === 'plugin_manager' && tc.success) {
+            loadPluginTools();
+          }
         }
+      }
+    });
+
+    const unlistenPermission = listen<PermissionRequestPayload>('agent-permission-request', (event) => {
+      if (event.payload.conversationId === activeConversationId) {
+        setPermissionRequest(event.payload);
       }
     });
 
@@ -176,30 +195,46 @@ export function AgentChat() {
       unlistenDone.then((fn) => fn());
       unlistenError.then((fn) => fn());
       unlistenToolCall.then((fn) => fn());
+      unlistenPermission.then((fn) => fn());
     };
-  }, [activeConversationId, updateMessage]);
+  }, [activeConversationId, updateMessage, loadPluginTools]);
+
+  const handlePermissionResponse = useCallback(async (approved: boolean, alwaysAllow: boolean) => {
+    if (permissionRequest) {
+      try {
+        await respondPermission(permissionRequest.conversationId, approved, alwaysAllow);
+      } catch {}
+      setPermissionRequest(null);
+    }
+  }, [permissionRequest]);
 
   const handleSend = useCallback(async () => {
     if (!input.trim() || !activeConversationId || !activeAgentId) return;
+
+    let messageContent = input.trim();
+    if (attachments.length > 0) {
+      const attachmentText = attachments.map((f) => `[附件: ${f.path}]`).join('\n');
+      messageContent = `${attachmentText}\n\n${messageContent}`;
+    }
 
     const userMsg: MessageDto = {
       id: crypto.randomUUID(),
       conversationId: activeConversationId,
       role: 'user',
-      content: input.trim(),
+      content: messageContent,
       toolCalls: '',
+      isError: 0,
       createdAt: Date.now(),
     };
 
     addMessage(userMsg);
     setInput('');
+    setAttachments([]);
     setLoading(true);
     setToolCalls([]);
     toolCallCounterRef.current = 0;
 
-    try {
-      await saveMessage(userMsg);
-    } catch {}
+    try { await saveMessage(userMsg); } catch {}
 
     const assistantMsgId = crypto.randomUUID();
     streamingMsgIdRef.current = assistantMsgId;
@@ -210,6 +245,7 @@ export function AgentChat() {
       role: 'assistant',
       content: '',
       toolCalls: '',
+      isError: 0,
       createdAt: Date.now(),
     };
     addMessage(assistantMsg);
@@ -225,7 +261,12 @@ export function AgentChat() {
     }
   }, [input, activeConversationId, activeAgentId, addMessage, updateMessage]);
 
-  const handleStop = () => {
+  const handleStop = async () => {
+    if (activeConversationId) {
+      try {
+        await stopAgent(activeConversationId);
+      } catch {}
+    }
     setLoading(false);
     setStreamingContent('');
     streamingMsgIdRef.current = null;
@@ -237,6 +278,45 @@ export function AgentChat() {
     }
   };
 
+  const handleEditMessage = useCallback((_messageId: string, content: string) => {
+    const cleaned = content.replace(/\[附件:.*?\]\s*/g, '').trim();
+    setInput(cleaned);
+  }, []);
+
+  const handleRegenerate = useCallback(async (assistantMsgId: string) => {
+    if (!activeConversationId || !activeAgentId || loading) return;
+    const msgIdx = messages.findIndex((m) => m.id === assistantMsgId);
+    if (msgIdx < 0) return;
+    const prevUserMsg = [...messages].slice(0, msgIdx).reverse().find((m) => m.role === 'user');
+    if (!prevUserMsg) return;
+    await deleteMessagesAfter(activeConversationId, prevUserMsg.id);
+    await loadMessages(activeConversationId);
+    setLoading(true);
+    setToolCalls([]);
+    toolCallCounterRef.current = 0;
+    const newAssistantMsgId = crypto.randomUUID();
+    streamingMsgIdRef.current = newAssistantMsgId;
+    const assistantMsg: MessageDto = {
+      id: newAssistantMsgId,
+      conversationId: activeConversationId,
+      role: 'assistant',
+      content: '',
+      toolCalls: '',
+      isError: 0,
+      createdAt: Date.now(),
+    };
+    addMessage(assistantMsg);
+    setStreamingContent('');
+    try {
+      await runAgent(activeAgentId, prevUserMsg.content.replace(/\[附件:.*?\]\s*/g, '').trim(), activeConversationId);
+    } catch (e) {
+      updateMessage(newAssistantMsgId, `❌ ${String(e)}`);
+      setStreamingContent('');
+      setLoading(false);
+      streamingMsgIdRef.current = null;
+    }
+  }, [activeConversationId, activeAgentId, loading, messages, deleteMessagesAfter, loadMessages, addMessage, updateMessage]);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -245,11 +325,9 @@ export function AgentChat() {
   };
 
   const activeAgent = agents.find((a) => a.id === activeAgentId);
-  const activeModel = activeAgent ? models.find((m) => m.id === activeAgent.modelId) : null;
 
   return (
     <Box sx={{ height: '100%', width: '100%', display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0 }}>
-      {/* ===== Header: Agent Selector + Conversation Tabs ===== */}
       <Box sx={{ px: 2, pt: 1.5, pb: 1 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
           <FormControl size="small" sx={{ flex: 1 }}>
@@ -276,36 +354,17 @@ export function AgentChat() {
                 const model = agent ? models.find((m) => m.id === agent.modelId) : null;
                 return (
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Box
-                      sx={{
-                        width: 22,
-                        height: 22,
-                        borderRadius: '50%',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        background: 'linear-gradient(135deg, #CE93D8 0%, #EA80FC 100%)',
-                        color: '#fff',
-                        flexShrink: 0,
-                      }}
-                    >
+                    <Box sx={{
+                      width: 22, height: 22, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      background: `linear-gradient(135deg, ${agentColor} 0%, ${isDark ? '#EA80FC' : '#9C27B0'} 100%)`, color: '#fff', flexShrink: 0,
+                    }}>
                       <Robot size={11} weight="bold" />
                     </Box>
                     <Typography variant="body2" sx={{ fontWeight: 600, fontSize: 13 }}>
                       {agent?.name || ''}
                     </Typography>
                     {model && (
-                      <Typography
-                        variant="caption"
-                        sx={{
-                          color: 'text.secondary',
-                          fontSize: 10,
-                          bgcolor: 'rgba(206,147,216,0.1)',
-                          px: 0.75,
-                          py: 0.25,
-                          borderRadius: 1,
-                        }}
-                      >
+                      <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10, bgcolor: `${agentColor}10`, px: 0.75, py: 0.25, borderRadius: 1 }}>
                         {model.name}
                       </Typography>
                     )}
@@ -313,18 +372,11 @@ export function AgentChat() {
                 );
               }}
               sx={{
-                borderRadius: 2,
-                bgcolor: 'rgba(206,147,216,0.04)',
+                borderRadius: 2, bgcolor: `${agentColor}08`,
                 '& .MuiSelect-select': { py: 0.75, pr: 3 },
-                '& .MuiOutlinedInput-notchedOutline': {
-                  borderColor: 'rgba(206,147,216,0.15)',
-                },
-                '&:hover .MuiOutlinedInput-notchedOutline': {
-                  borderColor: 'rgba(206,147,216,0.3)',
-                },
-                '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
-                  borderColor: 'rgba(206,147,216,0.5)',
-                },
+                '& .MuiOutlinedInput-notchedOutline': { borderColor: `${agentColor}20` },
+                '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: `${agentColor}40` },
+                '&.Mui-focused .MuiOutlinedInput-notchedOutline': { borderColor: `${agentColor}60` },
               }}
             >
               {agents.length === 0 && (
@@ -339,42 +391,19 @@ export function AgentChat() {
                 return (
                   <MenuItem key={agent.id} value={agent.id}>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
-                      <Box
-                        sx={{
-                          width: 24,
-                          height: 24,
-                          borderRadius: '50%',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          background: 'linear-gradient(135deg, #CE93D8 0%, #EA80FC 100%)',
-                          color: '#fff',
-                          flexShrink: 0,
-                        }}
-                      >
+                      <Box sx={{
+                        width: 24, height: 24, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        background: `linear-gradient(135deg, ${agentColor} 0%, ${isDark ? '#EA80FC' : '#9C27B0'} 100%)`, color: '#fff', flexShrink: 0,
+                      }}>
                         <Robot size={12} weight="bold" />
                       </Box>
                       <Box sx={{ flex: 1, minWidth: 0 }}>
-                        <Typography variant="body2" sx={{ fontWeight: 600, fontSize: 13 }}>
-                          {agent.name}
-                        </Typography>
+                        <Typography variant="body2" sx={{ fontWeight: 600, fontSize: 13 }}>{agent.name}</Typography>
                         {agent.description && (
-                          <Typography
-                            variant="caption"
-                            sx={{ color: 'text.secondary', fontSize: 10, display: 'block' }}
-                            noWrap
-                          >
-                            {agent.description}
-                          </Typography>
+                          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10, display: 'block' }} noWrap>{agent.description}</Typography>
                         )}
                       </Box>
-                      {model && (
-                        <Chip
-                          label={model.name}
-                          size="small"
-                          sx={{ height: 18, fontSize: 9, flexShrink: 0 }}
-                        />
-                      )}
+                      {model && <Chip label={model.name} size="small" sx={{ height: 18, fontSize: 9, flexShrink: 0 }} />}
                     </Box>
                   </MenuItem>
                 );
@@ -382,38 +411,29 @@ export function AgentChat() {
             </Select>
           </FormControl>
           <IconButton
-            size="small"
-            onClick={handleNewChat}
-            disabled={!activeAgentId}
+            size="small" onClick={handleNewChat} disabled={!activeAgentId}
             sx={{
-              borderRadius: 2,
-              border: '1px solid rgba(206,147,216,0.2)',
-              bgcolor: 'rgba(206,147,216,0.04)',
-              '&:hover': { bgcolor: 'rgba(206,147,216,0.12)', borderColor: 'rgba(206,147,216,0.3)' },
+              borderRadius: 2, border: `1px solid ${agentColor}30`, bgcolor: `${agentColor}08`,
+              '&:hover': { bgcolor: `${agentColor}15`, borderColor: `${agentColor}40` },
               '&.Mui-disabled': { opacity: 0.3 },
             }}
           >
-            <PlusIcon size={16} weight="bold" color="#CE93D8" />
+            <PlusIcon size={16} weight="bold" color={agentColor} />
           </IconButton>
         </Box>
 
-        {/* Conversation Tabs */}
         {conversations.length > 0 && (
           <Box sx={{ display: 'flex', gap: 0.5, overflow: 'auto', '&::-webkit-scrollbar': { height: 3 } }}>
             {conversations.map((conv) => (
               <Chip
-                key={conv.id}
-                label={conv.title}
-                size="small"
+                key={conv.id} label={conv.title} size="small"
                 variant={activeConversationId === conv.id ? 'filled' : 'outlined'}
                 color={activeConversationId === conv.id ? 'secondary' : 'default'}
                 onClick={() => useAgentStore.getState().setActiveConversation(conv.id)}
                 onDelete={conversations.length > 1 ? () => deleteConversation(conv.id) : undefined}
                 deleteIcon={<TrashIcon size={12} />}
                 sx={{
-                  height: 24,
-                  fontSize: 11,
-                  borderRadius: 1.5,
+                  height: 24, fontSize: 11, borderRadius: 1.5,
                   '& .MuiChip-deleteIcon': { color: 'rgba(255,123,114,0.5)', '&:hover': { color: '#FF7B72' } },
                 }}
               />
@@ -422,440 +442,128 @@ export function AgentChat() {
         )}
       </Box>
 
-      <Divider sx={{ borderColor: 'rgba(48,54,61,0.6)' }} />
+      <Divider sx={{ borderColor: mutedBorder }} />
 
-      {/* ===== Messages Area ===== */}
-      <Box sx={{ flex: 1, overflow: 'auto', px: 2, py: 1.5 }}>
-        {!activeAgentId && (
-          <EmptyState type="no_agent" t={t} />
-        )}
-        {activeAgentId && messages.length === 0 && !loading && (
-          <EmptyState type="no_messages" t={t} agentName={activeAgent?.name} />
-        )}
+      {!activeAgentId ? (
+        <EmptyState type="no_agent" t={t} agentColor={agentColor} />
+      ) : (
+        <>
+          <ChatMessagesArea
+            messages={messages}
+            streamingContent={streamingContent}
+            streamingMsgId={streamingMsgIdRef.current}
+            loading={loading}
+            toolCalls={toolCalls}
+            agentColor={agentColor}
+            userColor={userColor}
+            isDark={isDark}
+            conversationId={activeConversationId ?? undefined}
+            emptyIcon={<Sparkle size={40} weight="duotone" color={userColor} />}
+            emptyText={activeAgent?.name ? `Start chatting with ${activeAgent.name}` : t('chat.start_conversation')}
+            thinkingText={t('chat.thinking')}
+            onEditMessage={handleEditMessage}
+            onRegenerate={handleRegenerate}
+          />
+          <ChatInputArea
+            input={input}
+            setInput={setInput}
+            handleSend={handleSend}
+            handleKeyDown={handleKeyDown}
+            loading={loading}
+            conversationId={activeConversationId}
+            agentName={activeAgent?.name}
+            agentColor={agentColor}
+            userColor={userColor}
+            isDark={isDark}
+            placeholder={!activeConversationId ? t('chat.start_conversation') : t('chat.input_placeholder')}
+            onStop={handleStop}
+            attachments={attachments}
+            onAttachmentsChange={setAttachments}
+            hasFileTool={activeAgent?.toolIds?.includes('file') ?? false}
+          />
+        </>
+      )}
 
-        {messages.map((msg) => {
-          const isStreamingAssistant = msg.role === 'assistant' && msg.id === streamingMsgIdRef.current && loading;
-          const displayContent = isStreamingAssistant ? streamingContent : msg.content;
-          const isUser = msg.role === 'user';
-
-          return (
-            <Box
-              key={msg.id}
-              sx={{
-                display: 'flex',
-                gap: 1,
-                mb: 1.5,
-                flexDirection: isUser ? 'row-reverse' : 'row',
-                alignItems: 'flex-start',
-              }}
-            >
-              <Box
-                sx={{
-                  width: 28,
-                  height: 28,
-                  borderRadius: '50%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background: isUser
-                    ? 'linear-gradient(135deg, #6C63FF 0%, #8B83FF 100%)'
-                    : 'linear-gradient(135deg, #CE93D8 0%, #EA80FC 100%)',
-                  color: '#fff',
-                  flexShrink: 0,
-                  mt: 0.25,
-                }}
-              >
-                {isUser ? <User size={14} weight="bold" /> : <Robot size={14} weight="bold" />}
-              </Box>
-              <Box sx={{ maxWidth: '82%', minWidth: 0 }}>
-                {isStreamingAssistant && toolCalls.length > 0 && (
-                  <Box sx={{ mb: 0.75 }}>
-                    {toolCalls.map((tc) => (
-                      <ToolCallCard key={tc.id} toolCall={tc} />
-                    ))}
-                  </Box>
-                )}
-                <Box
-                  sx={{
-                    px: 1.5,
-                    py: 1,
-                    bgcolor: isUser
-                      ? 'rgba(108,99,255,0.1)'
-                      : 'rgba(206,147,216,0.06)',
-                    border: '1px solid',
-                    borderColor: isUser
-                      ? 'rgba(108,99,255,0.15)'
-                      : 'rgba(206,147,216,0.12)',
-                    fontSize: 13,
-                    lineHeight: 1.6,
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    borderRadius: isUser
-                      ? '16px 16px 4px 16px'
-                      : '16px 16px 16px 4px',
-                  }}
-                >
-                  {displayContent || (isStreamingAssistant ? (
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                      <CircularProgress size={12} sx={{ color: '#CE93D8' }} />
-                      <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                        {t('chat.thinking')}
-                      </Typography>
-                    </Box>
-                  ) : null)}
-                  {isStreamingAssistant && displayContent && (
-                    <Box component="span" sx={{ color: '#CE93D8', ml: 0.25 }}>▌</Box>
-                  )}
-                </Box>
-              </Box>
-            </Box>
-          );
-        })}
-        <div ref={messagesEndRef} />
-      </Box>
-
-      {/* ===== Input Area ===== */}
-      <Box sx={{ px: 2, pb: 1.5, pt: 0.5 }}>
-        <Box
-          sx={{
-            display: 'flex',
-            flexDirection: 'column',
-            borderRadius: 3,
-            border: '1px solid',
-            borderColor: activeConversationId
-              ? 'rgba(108,99,255,0.2)'
-              : 'rgba(48,54,61,0.4)',
-            bgcolor: activeConversationId
-              ? 'rgba(108,99,255,0.03)'
-              : 'rgba(48,54,61,0.1)',
-            overflow: 'hidden',
-            transition: 'border-color 0.2s, background-color 0.2s',
-            '&:focus-within': {
-              borderColor: 'rgba(108,99,255,0.4)',
-              bgcolor: 'rgba(108,99,255,0.05)',
-            },
-          }}
-        >
-          {/* Agent info bar */}
-          {activeAgentId && activeAgent && (
-            <Box
-              sx={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 0.75,
-                px: 1.5,
-                pt: 1,
-                pb: 0,
-              }}
-            >
-              <Box
-                sx={{
-                  width: 16,
-                  height: 16,
-                  borderRadius: '50%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  background: 'linear-gradient(135deg, #CE93D8 0%, #EA80FC 100%)',
-                  color: '#fff',
-                  flexShrink: 0,
-                }}
-              >
-                <Robot size={8} weight="bold" />
-              </Box>
-              <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10, fontWeight: 500 }}>
-                {activeAgent.name}
+      <Dialog
+        open={permissionRequest !== null}
+        onClose={() => handlePermissionResponse(false, false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <ShieldWarning size={20} weight="fill" color="#FF9800" />
+          Permission Request
+        </DialogTitle>
+        <DialogContent>
+          {permissionRequest && (
+            <Box sx={{ pt: 1 }}>
+              <Alert severity={permissionRequest.riskLevel === 'high' ? 'warning' : 'info'} sx={{ mb: 2, '& .MuiAlert-message': { whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.8rem' } }}>
+                {permissionRequest.description}
+              </Alert>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Tool: <strong>{permissionRequest.toolName}</strong>
               </Typography>
-              {activeModel && (
-                <>
-                  <Typography variant="caption" sx={{ color: 'rgba(206,147,216,0.4)', fontSize: 10 }}>·</Typography>
-                  <Typography variant="caption" sx={{ color: 'rgba(206,147,216,0.6)', fontSize: 10 }}>
-                    {activeModel.name}
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Risk Level: <Chip
+                  label={permissionRequest.riskLevel}
+                  size="small"
+                  color={permissionRequest.riskLevel === 'high' ? 'warning' : 'info'}
+                  sx={{ textTransform: 'capitalize' }}
+                />
+              </Typography>
+              {permissionRequest.arguments && Object.keys(permissionRequest.arguments).length > 0 && (
+                <Box sx={{ mt: 1, p: 1, borderRadius: 1, bgcolor: 'action.hover' }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>
+                    {JSON.stringify(permissionRequest.arguments, null, 2)}
                   </Typography>
-                </>
-              )}
-              {activeAgent.toolIds.length > 0 && (
-                <>
-                  <Typography variant="caption" sx={{ color: 'rgba(206,147,216,0.4)', fontSize: 10 }}>·</Typography>
-                  <Typography variant="caption" sx={{ color: 'rgba(206,147,216,0.6)', fontSize: 10 }}>
-                    {activeAgent.toolIds.length} tools
-                  </Typography>
-                </>
+                </Box>
               )}
             </Box>
           )}
-
-          {/* Input row */}
-          <Box sx={{ display: 'flex', alignItems: 'flex-end', px: 0.5, py: 0.5 }}>
-            <TextField
-              fullWidth
-              variant="standard"
-              placeholder={
-                !activeAgentId
-                  ? t('chat.select_agent_placeholder')
-                  : !activeConversationId
-                    ? t('chat.start_conversation')
-                    : t('chat.input_placeholder')
-              }
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              disabled={!activeConversationId || loading}
-              multiline
-              maxRows={4}
-              slotProps={{
-                input: {
-                  disableUnderline: true,
-                },
-              }}
-              sx={{
-                '& .MuiInputBase-root': {
-                  fontSize: 13,
-                  px: 1,
-                  py: 0.5,
-                  minHeight: 28,
-                  alignItems: 'flex-start',
-                },
-                '& .MuiInputBase-input': {
-                  lineHeight: 1.5,
-                },
-                '& .MuiInputBase-input::placeholder': {
-                  color: 'text.secondary',
-                  opacity: 0.6,
-                },
-              }}
-            />
-            {loading ? (
-              <IconButton
-                size="small"
-                onClick={handleStop}
-                sx={{
-                  borderRadius: 2,
-                  mr: 0.5,
-                  mb: 0.25,
-                  color: '#FF7B72',
-                  '&:hover': { bgcolor: 'rgba(255,123,114,0.1)' },
-                }}
-              >
-                <Stop size={16} weight="fill" />
-              </IconButton>
-            ) : (
-              <IconButton
-                size="small"
-                onClick={handleSend}
-                disabled={!input.trim() || !activeConversationId}
-                sx={{
-                  borderRadius: 2,
-                  mr: 0.5,
-                  mb: 0.25,
-                  background: input.trim() && activeConversationId
-                    ? 'linear-gradient(135deg, #6C63FF 0%, #8B83FF 100%)'
-                    : 'transparent',
-                  color: input.trim() && activeConversationId
-                    ? '#fff'
-                    : 'rgba(108,99,255,0.3)',
-                  '&:hover': {
-                    background: input.trim() && activeConversationId
-                      ? 'linear-gradient(135deg, #8B83FF 0%, #6C63FF 100%)'
-                      : 'rgba(108,99,255,0.05)',
-                  },
-                  '&.Mui-disabled': {
-                    color: 'rgba(108,99,255,0.2)',
-                  },
-                  transition: 'all 0.2s',
-                }}
-              >
-                <PaperPlaneTiltIcon size={16} weight="fill" />
-              </IconButton>
-            )}
-          </Box>
-        </Box>
-      </Box>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2, gap: 1 }}>
+          <Button onClick={() => handlePermissionResponse(false, false)} color="inherit">
+            Deny
+          </Button>
+          <Button onClick={() => handlePermissionResponse(true, true)} color="info" variant="outlined">
+            Always Allow
+          </Button>
+          <Button onClick={() => handlePermissionResponse(true, false)} color="primary" variant="contained" autoFocus>
+            Allow Once
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
 
-function EmptyState({ type, t, agentName }: {
+function EmptyState({ type, t, agentColor }: {
   type: 'no_agent' | 'no_messages';
   t: (key: string, options?: { defaultValue: string }) => string;
-  agentName?: string;
+  agentColor: string;
 }) {
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+  const userColor = isDark ? '#6C63FF' : '#5B54E0';
+
   return (
-    <Box
-      sx={{
-        height: '100%',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 1.5,
-        px: 3,
-        opacity: 0.6,
-      }}
-    >
-      <Box
-        sx={{
-          width: 56,
-          height: 56,
-          borderRadius: '50%',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          background: type === 'no_agent'
-            ? 'rgba(206,147,216,0.08)'
-            : 'rgba(108,99,255,0.08)',
-          mb: 0.5,
-        }}
-      >
+    <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1.5, px: 3, opacity: 0.6 }}>
+      <Box sx={{
+        width: 56, height: 56, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: type === 'no_agent' ? `${agentColor}12` : `${userColor}12`, mb: 0.5,
+      }}>
         {type === 'no_agent' ? (
-          <Robot size={28} weight="duotone" color="#CE93D8" />
+          <Robot size={28} weight="duotone" color={agentColor} />
         ) : (
-          <Sparkle size={28} weight="duotone" color="#6C63FF" />
+          <Sparkle size={28} weight="duotone" color={userColor} />
         )}
       </Box>
       <Typography variant="body2" sx={{ fontWeight: 600, textAlign: 'center', fontSize: 14 }}>
-        {type === 'no_agent'
-          ? t('chat.select_agent_placeholder')
-          : agentName
-            ? `Start chatting with ${agentName}`
-            : t('chat.start_conversation')}
+        {type === 'no_agent' ? t('chat.select_agent_placeholder') : t('chat.start_conversation')}
       </Typography>
       <Typography variant="caption" sx={{ color: 'text.secondary', textAlign: 'center', maxWidth: 240 }}>
-        {type === 'no_agent'
-          ? 'Select an agent from the dropdown above, or create one in the Agent Manager tab'
-          : t('chat.input_placeholder')}
+        {type === 'no_agent' ? 'Select an agent from the dropdown above, or create one in the Agent Manager tab' : t('chat.input_placeholder')}
       </Typography>
     </Box>
-  );
-}
-
-function ToolCallCard({ toolCall }: { toolCall: ToolCallDisplay }) {
-  const [expanded, setExpanded] = useState(false);
-  const isRunning = toolCall.status === 'running';
-  const isSuccess = toolCall.success === true;
-
-  const toolIcon = toolCall.toolName === 'terminal' ? (
-    <Terminal size={14} weight="bold" />
-  ) : (
-    <Wrench size={14} weight="bold" />
-  );
-
-  return (
-    <Paper
-      variant="outlined"
-      sx={{
-        mb: 0.5,
-        borderRadius: 1.5,
-        borderColor: isRunning
-          ? 'rgba(255,183,77,0.4)'
-          : isSuccess
-            ? 'rgba(129,199,132,0.4)'
-            : 'rgba(255,123,114,0.4)',
-        bgcolor: isRunning
-          ? 'rgba(255,183,77,0.06)'
-          : isSuccess
-            ? 'rgba(129,199,132,0.06)'
-            : 'rgba(255,123,114,0.06)',
-        overflow: 'hidden',
-      }}
-    >
-      <Box
-        sx={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 0.75,
-          px: 1,
-          py: 0.5,
-          cursor: 'pointer',
-          fontSize: 12,
-        }}
-        onClick={() => setExpanded(!expanded)}
-      >
-        {isRunning ? (
-          <CircularProgress size={12} sx={{ color: '#FFB74D' }} />
-        ) : isSuccess ? (
-          <Box sx={{ color: '#81C784', display: 'flex' }}>✓</Box>
-        ) : (
-          <Box sx={{ color: '#FF7B72', display: 'flex' }}>✗</Box>
-        )}
-        <Box sx={{ color: 'rgba(206,147,216,0.9)', display: 'flex' }}>{toolIcon}</Box>
-        <Typography variant="caption" sx={{ fontWeight: 600, flex: 1 }}>
-          {toolCall.toolName}
-        </Typography>
-        {toolCall.arguments && toolCall.toolName === 'terminal' && typeof toolCall.arguments.command === 'string' && (
-          <Typography
-            variant="caption"
-            sx={{
-              fontFamily: 'monospace',
-              color: 'text.secondary',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              maxWidth: 200,
-            }}
-          >
-            {toolCall.arguments.command}
-          </Typography>
-        )}
-        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
-          {isRunning ? '...' : '▼'}
-        </Typography>
-      </Box>
-      <Collapse in={expanded}>
-        <Box sx={{ px: 1, pb: 0.75, borderTop: '1px solid rgba(48,54,61,0.4)' }}>
-          {toolCall.arguments && (
-            <Box sx={{ mt: 0.5 }}>
-              <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
-                {toolCall.toolName === 'terminal' ? 'Command' : 'Arguments'}
-              </Typography>
-              <Box
-                sx={{
-                  fontFamily: 'monospace',
-                  fontSize: 11,
-                  bgcolor: 'rgba(0,0,0,0.2)',
-                  p: 0.5,
-                  borderRadius: 1,
-                  mt: 0.25,
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-all',
-                  maxHeight: 120,
-                  overflow: 'auto',
-                }}
-              >
-                {toolCall.toolName === 'terminal' && toolCall.arguments.command
-                  ? String(toolCall.arguments.command)
-                  : JSON.stringify(toolCall.arguments, null, 2)}
-              </Box>
-            </Box>
-          )}
-          {toolCall.result && (
-            <Box sx={{ mt: 0.5 }}>
-              <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
-                Output
-              </Typography>
-              <Box
-                sx={{
-                  fontFamily: 'monospace',
-                  fontSize: 11,
-                  bgcolor: 'rgba(0,0,0,0.2)',
-                  p: 0.5,
-                  borderRadius: 1,
-                  mt: 0.25,
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-all',
-                  maxHeight: 200,
-                  overflow: 'auto',
-                  color: isSuccess ? '#81C784' : '#FF7B72',
-                }}
-              >
-                {toolCall.result.length > 500
-                  ? toolCall.result.slice(0, 500) + '...'
-                  : toolCall.result}
-              </Box>
-            </Box>
-          )}
-        </Box>
-      </Collapse>
-    </Paper>
   );
 }

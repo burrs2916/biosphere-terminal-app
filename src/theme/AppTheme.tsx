@@ -32,6 +32,7 @@ const lightPalette = {
 
 function buildTheme(mode: 'dark' | 'light') {
   const palette = mode === 'dark' ? darkPalette : lightPalette;
+  const isDark = mode === 'dark';
 
   return createTheme({
     palette,
@@ -44,24 +45,25 @@ function buildTheme(mode: 'dark' | 'light') {
     components: {
       MuiAppBar: {
         styleOverrides: {
-          root: mode === 'dark'
-            ? {
-                backgroundImage: 'linear-gradient(135deg, #1a1f2e 0%, #0d1117 100%)',
-                borderBottom: '1px solid rgba(99, 102, 241, 0.15)',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
-              }
-            : {
-                backgroundImage: 'linear-gradient(135deg, #ffffff 0%, #f5f5f5 100%)',
-                borderBottom: '1px solid rgba(0, 0, 0, 0.08)',
-                boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
-              },
+          root: {
+            backgroundImage: isDark
+              ? 'linear-gradient(135deg, #1a1f2e 0%, #0d1117 100%)'
+              : 'linear-gradient(135deg, #ffffff 0%, #f5f5f5 100%)',
+            borderBottom: isDark
+              ? '1px solid rgba(99, 102, 241, 0.15)'
+              : '1px solid rgba(0, 0, 0, 0.08)',
+            boxShadow: isDark
+              ? '0 1px 3px rgba(0,0,0,0.3)'
+              : '0 1px 3px rgba(0,0,0,0.08)',
+            color: isDark ? '#E6EDF3' : '#1A1A2E',
+          },
         },
       },
       MuiDrawer: {
         styleOverrides: {
           paper: {
             backgroundColor: palette.background.default,
-            borderRight: mode === 'dark'
+            borderRight: isDark
               ? '1px solid rgba(99, 102, 241, 0.1)'
               : '1px solid rgba(0, 0, 0, 0.08)',
           },
@@ -74,17 +76,17 @@ function buildTheme(mode: 'dark' | 'light') {
             mx: 1,
             mb: 0.25,
             '&.Mui-selected': {
-              backgroundColor: mode === 'dark'
+              backgroundColor: isDark
                 ? 'rgba(108, 99, 255, 0.12)'
                 : 'rgba(91, 84, 224, 0.08)',
               '&:hover': {
-                backgroundColor: mode === 'dark'
+                backgroundColor: isDark
                   ? 'rgba(108, 99, 255, 0.18)'
                   : 'rgba(91, 84, 224, 0.12)',
               },
             },
             '&:hover': {
-              backgroundColor: mode === 'dark'
+              backgroundColor: isDark
                 ? 'rgba(108, 99, 255, 0.08)'
                 : 'rgba(91, 84, 224, 0.04)',
             },
@@ -104,6 +106,23 @@ function buildTheme(mode: 'dark' | 'light') {
       MuiPaper: {
         styleOverrides: {
           root: { backgroundImage: 'none' },
+        },
+      },
+      MuiDialog: {
+        styleOverrides: {
+          paper: {
+            backgroundColor: palette.background.paper,
+            border: isDark
+              ? '1px solid rgba(48,54,61,0.6)'
+              : '1px solid rgba(0,0,0,0.12)',
+          },
+        },
+      },
+      MuiDivider: {
+        styleOverrides: {
+          root: {
+            borderColor: palette.divider,
+          },
         },
       },
     },
@@ -144,3 +163,5 @@ export function AppTheme({ children }: AppThemeProps) {
     </ThemeProvider>
   );
 }
+
+export { darkPalette, lightPalette };

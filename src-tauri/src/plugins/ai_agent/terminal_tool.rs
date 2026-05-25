@@ -14,6 +14,7 @@ impl TerminalTool {
         TerminalTool { working_dir: None }
     }
 
+    #[allow(dead_code)]
     pub fn with_working_dir(mut self, dir: String) -> Self {
         self.working_dir = Some(dir);
         self
@@ -98,8 +99,9 @@ impl AgentTool for TerminalTool {
             output_parts.join("\n")
         };
 
-        let truncated = if output_text.len() > 8000 {
-            format!("{}...\n[Output truncated, {} characters total]", &output_text[..8000], output_text.len())
+        let truncated = if output_text.chars().count() > 8000 {
+            let head: String = output_text.chars().take(8000).collect();
+            format!("{}...\n[Output truncated, {} characters total]", head, output_text.chars().count())
         } else {
             output_text
         };

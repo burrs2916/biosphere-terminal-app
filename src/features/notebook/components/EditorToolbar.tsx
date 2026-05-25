@@ -2,6 +2,7 @@ import { type Editor } from '@tiptap/core';
 import {
   Box, IconButton, Tooltip, Divider, Select, MenuItem, CircularProgress,
 } from '@mui/material';
+import { useTheme } from '@mui/material/styles';
 import {
   TextBIcon, TextItalicIcon, TextStrikethroughIcon, CodeIcon,
   QuotesIcon, ListBulletsIcon, ListNumbersIcon, LinkIcon,
@@ -20,6 +21,8 @@ interface EditorToolbarProps {
 
 export function EditorToolbar({ editor, onAiOptimize, aiOptimizing }: EditorToolbarProps) {
   const { t } = useTranslation('notebook');
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
 
   if (!editor) return null;
 
@@ -47,11 +50,11 @@ export function EditorToolbar({ editor, onAiOptimize, aiOptimizing }: EditorTool
   };
 
   const btnSx = {
-    color: '#8B949E',
+    color: isDark ? '#8B949E' : '#6B7280',
     borderRadius: 1.5,
     p: 0.5,
-    '&:hover': { bgcolor: 'rgba(108,99,255,0.12)', color: '#6C63FF' },
-    '&.active': { bgcolor: 'rgba(108,99,255,0.15)', color: '#6C63FF' },
+    '&:hover': { bgcolor: isDark ? 'rgba(108,99,255,0.12)' : 'rgba(108,99,255,0.08)', color: '#6C63FF' },
+    '&.active': { bgcolor: isDark ? 'rgba(108,99,255,0.15)' : 'rgba(108,99,255,0.1)', color: '#6C63FF' },
   };
 
   const ToolBtn = ({
@@ -76,7 +79,7 @@ export function EditorToolbar({ editor, onAiOptimize, aiOptimizing }: EditorTool
         py: 0.5,
         borderBottom: '1px solid',
         borderColor: 'divider',
-        bgcolor: 'rgba(22,27,34,0.6)',
+        bgcolor: isDark ? 'rgba(22,27,34,0.6)' : 'rgba(0,0,0,0.02)',
         borderRadius: '8px 8px 0 0',
         flexWrap: 'wrap',
         minHeight: 36,
@@ -90,9 +93,9 @@ export function EditorToolbar({ editor, onAiOptimize, aiOptimizing }: EditorTool
           minWidth: 72,
           bgcolor: 'transparent',
           '& .MuiOutlinedInput-notchedOutline': { border: 'none' },
-          '& .MuiSelect-icon': { color: '#8B949E' },
+          '& .MuiSelect-icon': { color: isDark ? '#8B949E' : '#6B7280' },
           fontSize: 12,
-          color: '#E6EDF3',
+          color: isDark ? '#E6EDF3' : '#1A1A2E',
           '& .MuiSelect-select': { py: 0.25, px: 1, fontSize: 12 },
         }}
       >
@@ -105,7 +108,7 @@ export function EditorToolbar({ editor, onAiOptimize, aiOptimizing }: EditorTool
         <MenuItem value={6} sx={{ fontSize: 12 }}>H6</MenuItem>
       </Select>
 
-      <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: 'rgba(48,54,61,0.6)' }} />
+      <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: isDark ? 'rgba(48,54,61,0.6)' : 'rgba(0,0,0,0.08)' }} />
 
       <ToolBtn icon={<TextBIcon size={16} weight="bold" />} label={t('toolbar.bold')} onClick={() => editor.chain().focus().toggleBold().run()} active={editor.isActive('bold')} />
       <ToolBtn icon={<TextItalicIcon size={16} />} label={t('toolbar.italic')} onClick={() => editor.chain().focus().toggleItalic().run()} active={editor.isActive('italic')} />
@@ -114,25 +117,25 @@ export function EditorToolbar({ editor, onAiOptimize, aiOptimizing }: EditorTool
       <ToolBtn icon={<HighlighterCircleIcon size={16} />} label={t('toolbar.highlight')} onClick={() => editor.chain().focus().toggleHighlight().run()} active={editor.isActive('highlight')} />
       <ToolBtn icon={<CodeIcon size={16} />} label={t('toolbar.code')} onClick={() => editor.chain().focus().toggleCode().run()} active={editor.isActive('code')} />
 
-      <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: 'rgba(48,54,61,0.6)' }} />
+      <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: isDark ? 'rgba(48,54,61,0.6)' : 'rgba(0,0,0,0.08)' }} />
 
       <ToolBtn icon={<QuotesIcon size={16} />} label={t('toolbar.blockquote')} onClick={() => editor.chain().focus().toggleBlockquote().run()} active={editor.isActive('blockquote')} />
       <ToolBtn icon={<ListBulletsIcon size={16} />} label={t('toolbar.bullet_list')} onClick={() => editor.chain().focus().toggleBulletList().run()} active={editor.isActive('bulletList')} />
       <ToolBtn icon={<ListNumbersIcon size={16} />} label={t('toolbar.ordered_list')} onClick={() => editor.chain().focus().toggleOrderedList().run()} active={editor.isActive('orderedList')} />
       <ToolBtn icon={<ChecksIcon size={16} />} label={t('toolbar.task_list')} onClick={() => editor.chain().focus().toggleTaskList().run()} active={editor.isActive('taskList')} />
 
-      <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: 'rgba(48,54,61,0.6)' }} />
+      <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: isDark ? 'rgba(48,54,61,0.6)' : 'rgba(0,0,0,0.08)' }} />
 
       <ToolBtn icon={<LinkIcon size={16} />} label={t('toolbar.link')} onClick={addLink} active={editor.isActive('link')} />
       <ToolBtn icon={<TableIcon size={16} />} label={t('toolbar.table')} onClick={insertTable} />
       <ToolBtn icon={<MinusIcon size={16} />} label={t('toolbar.horizontal_rule')} onClick={() => editor.chain().focus().setHorizontalRule().run()} />
 
-      <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: 'rgba(48,54,61,0.6)' }} />
+      <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: isDark ? 'rgba(48,54,61,0.6)' : 'rgba(0,0,0,0.08)' }} />
 
       <ToolBtn icon={<ArrowLineUpIcon size={16} />} label={t('toolbar.superscript')} onClick={() => editor.chain().focus().toggleSuperscript().run()} active={editor.isActive('superscript')} />
       <ToolBtn icon={<ArrowLineDownIcon size={16} />} label={t('toolbar.subscript')} onClick={() => editor.chain().focus().toggleSubscript().run()} active={editor.isActive('subscript')} />
 
-      <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: 'rgba(48,54,61,0.6)' }} />
+      <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: isDark ? 'rgba(48,54,61,0.6)' : 'rgba(0,0,0,0.08)' }} />
 
       <ToolBtn icon={<InfoIcon size={16} />} label={t('toolbar.callout')} onClick={() => editor.chain().focus().toggleCallout('info').run()} active={editor.isActive('callout')} />
       <ToolBtn icon={<FunctionIcon size={16} />} label={t('toolbar.latex')} onClick={() => editor.chain().focus().setLatex().run()} active={editor.isActive('latex')} />
@@ -142,7 +145,7 @@ export function EditorToolbar({ editor, onAiOptimize, aiOptimizing }: EditorTool
 
       {onAiOptimize && (
         <>
-          <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: 'rgba(48,54,61,0.6)' }} />
+          <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: isDark ? 'rgba(48,54,61,0.6)' : 'rgba(0,0,0,0.08)' }} />
           <Tooltip title={t('editor.ai_optimize')} arrow>
             <IconButton
               size="small"

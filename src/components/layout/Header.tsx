@@ -6,6 +6,8 @@ import Button from '@mui/material/Button';
 import Box from '@mui/material/Box';
 import { ListIcon } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
+import { useTheme } from '@mui/material/styles';
+import logo from '../../assets/logo.svg?url';
 
 interface HeaderProps {
   onToggleSidebar: () => void;
@@ -13,7 +15,9 @@ interface HeaderProps {
 
 export function Header({ onToggleSidebar }: HeaderProps) {
   const { i18n, t } = useTranslation();
+  const theme = useTheme();
   const currentLang = i18n.language?.startsWith('zh') ? 'zh-CN' : 'en-US';
+  const isDark = theme.palette.mode === 'dark';
 
   const toggleLanguage = () => {
     const nextLang = currentLang === 'zh-CN' ? 'en-US' : 'zh-CN';
@@ -29,22 +33,16 @@ export function Header({ onToggleSidebar }: HeaderProps) {
         </IconButton>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexGrow: 1 }}>
           <Box
+            component="img"
+            src={logo}
+            alt="Biosphere Terminal"
             sx={{
               width: 24,
               height: 24,
               borderRadius: '6px',
-              background: 'linear-gradient(135deg, #6C63FF 0%, #FF6584 100%)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 13,
-              fontWeight: 800,
-              color: '#fff',
-              lineHeight: 1,
+              objectFit: 'contain',
             }}
-          >
-            B
-          </Box>
+          />
           <Typography variant="h6" noWrap component="div" sx={{ fontSize: 15 }}>
             {t('app.name')}
           </Typography>
@@ -57,7 +55,9 @@ export function Header({ onToggleSidebar }: HeaderProps) {
             minWidth: 52,
             fontSize: 12,
             fontWeight: 600,
-            border: '1px solid rgba(255,255,255,0.15)',
+            border: isDark
+              ? '1px solid rgba(255,255,255,0.15)'
+              : '1px solid rgba(0,0,0,0.15)',
             borderRadius: 2,
             px: 1.5,
           }}

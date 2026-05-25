@@ -117,8 +117,9 @@ impl TerminalSessionTool {
             result: if output.is_empty() {
                 format!("No output available for session '{}'", session_id)
             } else {
-                let truncated = if output.len() > 8000 {
-                    format!("{}...\n[Output truncated, {} characters total]", &output[..8000], output.len())
+                let truncated = if output.chars().count() > 8000 {
+                    let head: String = output.chars().take(8000).collect();
+                    format!("{}...\n[Output truncated, {} characters total]", head, output.chars().count())
                 } else {
                     output
                 };

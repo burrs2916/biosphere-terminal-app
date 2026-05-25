@@ -296,13 +296,36 @@ impl NotebookService {
     }
 
     pub fn delete_group(&self, id: &str) -> Result<(), String> {
-        NoteRepo::reset_group(&self.db, id)?;
+        let notes = NoteRepo::list_by_group(&self.db, id)?;
+        for note in &notes {
+            let file_path = PathBuf::from(&note.file_path);
+            let _ = self.fs.delete_note(&file_path);
+        }
+        NoteRepo::delete_by_group(&self.db, id)?;
         NoteCategoryRepo::delete_by_group(&self.db, id)?;
         NoteGroupRepo::delete(&self.db, id)
     }
 
     pub fn list_categories_by_group(&self, group_id: &str) -> Result<Vec<NoteCategoryRow>, String> {
-        NoteCategoryRepo::list_by_group(&self.db, group_id)
+        let mut cats = NoteCategoryRepo::list_by_group(&self.db, group_id)?;
+        let existing_names: std::collections::HashSet<String> = cats.iter().map(|c| c.name.clone()).collect();
+        let actual_categories = NoteRepo::list_categories_by_group(&self.db, group_id)?;
+        let now = now_ms();
+        for cat_name in actual_categories {
+            if !existing_names.contains(&cat_name) && !cat_name.is_empty() {
+                cats.push(NoteCategoryRow {
+                    id: format!("auto-{}", cat_name),
+                    name: cat_name,
+                    group_id: group_id.to_string(),
+                    is_default: false,
+                    sort_order: 999,
+                    created_at: now,
+                    updated_at: now,
+                });
+            }
+        }
+        cats.sort_by(|a, b| a.sort_order.cmp(&b.sort_order).then(a.name.cmp(&b.name)));
+        Ok(cats)
     }
 
     pub fn create_category(&self, name: &str, group_id: &str, sort_order: i64) -> Result<NoteCategoryRow, String> {
@@ -334,7 +357,12 @@ impl NotebookService {
     pub fn delete_category(&self, id: &str) -> Result<(), String> {
         let cat = NoteCategoryRepo::get_by_id(&self.db, id)?;
         if let Some(c) = cat {
-            NoteRepo::reset_category(&self.db, &c.name)?;
+            let notes = NoteRepo::list_by_category(&self.db, &c.name)?;
+            for note in &notes {
+                let file_path = PathBuf::from(&note.file_path);
+                let _ = self.fs.delete_note(&file_path);
+            }
+            NoteRepo::delete_by_category(&self.db, &c.name)?;
         }
         NoteCategoryRepo::delete(&self.db, id)
     }

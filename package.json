@@ -16,6 +16,8 @@
     "@mui/material": "^9.0.0",
     "@phosphor-icons/react": "^2.1.10",
     "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
+    "@tauri-apps/plugin-opener": "^2.5.4",
     "@tiptap/core": "^3.23.1",
     "@tiptap/extension-character-count": "^3.23.1",
     "@tiptap/extension-code-block-lowlight": "^3.23.1",

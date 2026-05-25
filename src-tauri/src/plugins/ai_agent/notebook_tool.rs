@@ -13,6 +13,7 @@ pub struct NotebookTool {
 }
 
 impl NotebookTool {
+    #[allow(dead_code)]
     pub fn new(db: Arc<Database>) -> Self {
         NotebookTool { db, notebook: None }
     }

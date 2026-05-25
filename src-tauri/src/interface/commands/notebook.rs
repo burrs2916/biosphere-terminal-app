@@ -17,6 +17,8 @@ pub struct NoteDto {
     pub is_pinned: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,7 +89,39 @@ pub struct UpdateGroupInput {
     pub sort_order: i64,
 }
 
+fn extract_summary(file_path: &str) -> String {
+    let path = std::path::Path::new(file_path);
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let body = if content.starts_with("---") {
+            if let Some(end) = content[3..].find("---") {
+                content[3 + end + 3..].trim()
+            } else {
+                content.trim()
+            }
+        } else {
+            content.trim()
+        };
+        let cleaned = body
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let truncated: String = cleaned.chars().take(120).collect();
+        if cleaned.chars().count() > 120 {
+            format!("{}...", truncated)
+        } else {
+            truncated
+        }
+    } else {
+        String::new()
+    }
+}
+
 fn to_note_dto(n: &crate::infra::storage::note_repo::NoteRow) -> NoteDto {
+    let summary = extract_summary(&n.file_path);
     NoteDto {
         id: n.id.clone(),
         title: n.title.clone(),
@@ -99,6 +133,7 @@ fn to_note_dto(n: &crate::infra::storage::note_repo::NoteRow) -> NoteDto {
         is_pinned: n.is_pinned,
         created_at: n.created_at,
         updated_at: n.updated_at,
+        summary,
     }
 }
 

@@ -17,16 +17,14 @@ import { useTranslation } from 'react-i18next';
 import {
   MagnifyingGlassIcon,
   ClockCounterClockwiseIcon,
-  CodeBlockIcon,
   WarningIcon,
   ShieldWarningIcon,
 } from '@phosphor-icons/react';
 import {
   searchCommandHistory,
-  listSnippets,
   parseCommand,
 } from '../../../core/services/command.service';
-import type { CommandHistoryEntry, CommandSnippet, ParsedCommandResult } from '../../../proto';
+import type { CommandHistoryEntry, ParsedCommandResult } from '../../../proto';
 
 interface CommandPaletteProps {
   open: boolean;
@@ -34,26 +32,21 @@ interface CommandPaletteProps {
   onExecute: (command: string) => void;
 }
 
-type SearchItem =
-  | { type: 'history'; data: CommandHistoryEntry }
-  | { type: 'snippet'; data: CommandSnippet };
-
 export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps) {
   const { t } = useTranslation('command');
   const [query, setQuery] = useState('');
   const [history, setHistory] = useState<CommandHistoryEntry[]>([]);
-  const [snippets, setSnippets] = useState<CommandSnippet[]>([]);
   const [parsed, setParsed] = useState<ParsedCommandResult | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [dangerConfirm, setDangerConfirm] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) {
-      listSnippets().then(setSnippets).catch(() => {});
       setQuery('');
       setParsed(null);
       setSelectedIndex(0);
       setDangerConfirm(null);
+      setHistory([]);
     }
   }, [open]);
 
@@ -69,18 +62,6 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
     }, 200);
     return () => clearTimeout(timer);
   }, [query]);
-
-  const items: SearchItem[] = [
-    ...snippets
-      .filter(
-        (s) =>
-          !query.trim() ||
-          s.name.toLowerCase().includes(query.toLowerCase()) ||
-          s.command.toLowerCase().includes(query.toLowerCase()),
-      )
-      .map((s) => ({ type: 'snippet' as const, data: s })),
-    ...history.map((h) => ({ type: 'history' as const, data: h })),
-  ];
 
   const doExecute = useCallback(
     (command: string) => {
@@ -106,16 +87,14 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
     (e: React.KeyboardEvent) => {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        setSelectedIndex((prev) => Math.min(prev + 1, items.length - 1));
+        setSelectedIndex((prev) => Math.min(prev + 1, history.length - 1));
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         setSelectedIndex((prev) => Math.max(prev - 1, 0));
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        if (items.length > 0 && selectedIndex < items.length) {
-          const item = items[selectedIndex];
-          if (item.type === 'history') handleExecute(item.data.command);
-          else if (item.type === 'snippet') handleExecute(item.data.command);
+        if (history.length > 0 && selectedIndex < history.length) {
+          handleExecute(history[selectedIndex].command);
         } else if (query.trim()) {
           handleExecute(query.trim());
         }
@@ -123,7 +102,7 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
         onClose();
       }
     },
-    [items, selectedIndex, query, handleExecute, onClose],
+    [history, selectedIndex, query, handleExecute, onClose],
   );
 
   return (
@@ -209,20 +188,13 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
             </Box>
           )}
 
-          {items.length > 0 && (
+          {history.length > 0 && (
             <List dense sx={{ maxHeight: 300, overflow: 'auto', py: 0 }}>
-              {items.map((item, index) => (
+              {history.map((entry, index) => (
                 <ListItemButton
-                  key={
-                    item.type === 'history'
-                      ? `h-${item.data.id}`
-                      : `s-${item.data.id}`
-                  }
+                  key={entry.id}
                   selected={index === selectedIndex}
-                  onClick={() => {
-                    if (item.type === 'history') handleExecute(item.data.command);
-                    else if (item.type === 'snippet') handleExecute(item.data.command);
-                  }}
+                  onClick={() => handleExecute(entry.command)}
                   sx={{
                     '&.Mui-selected': {
                       bgcolor: 'rgba(108,99,255,0.1)',
@@ -230,39 +202,22 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
                   }}
                 >
                   <ListItemIcon sx={{ minWidth: 36 }}>
-                    {item.type === 'history' ? (
-                      <ClockCounterClockwiseIcon size={18} color="#8B949E" />
-                    ) : (
-                      <CodeBlockIcon size={18} color="#6C63FF" />
-                    )}
+                    <ClockCounterClockwiseIcon size={18} color="#8B949E" />
                   </ListItemIcon>
                   <ListItemText
-                    primary={
-                      item.type === 'history' ? item.data.command : item.data.name
-                    }
-                    secondary={
-                      item.type === 'history'
-                        ? item.data.cwd
-                        : item.data.command
-                    }
+                    primary={entry.command}
+                    secondary={entry.cwd}
                     slotProps={{
                       primary: { variant: 'body2', sx: { fontFamily: 'monospace' } },
                       secondary: { variant: 'caption' },
                     }}
                   />
-                  {item.type === 'snippet' && item.data.tags.length > 0 && (
-                    <Box sx={{ display: 'flex', gap: 0.5, ml: 1 }}>
-                      {item.data.tags.slice(0, 2).map((tag) => (
-                        <Chip key={tag} label={tag} size="small" variant="outlined" />
-                      ))}
-                    </Box>
-                  )}
                 </ListItemButton>
               ))}
             </List>
           )}
 
-          {items.length === 0 && query.trim() && (
+          {history.length === 0 && query.trim() && (
             <Box sx={{ p: 3, textAlign: 'center' }}>
               <Typography variant="body2" color="text.secondary">
                 {t('palette.press_enter_execute')}: <code>{query}</code>
@@ -270,10 +225,10 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
             </Box>
           )}
 
-          {items.length === 0 && !query.trim() && (
+          {history.length === 0 && !query.trim() && (
             <Box sx={{ p: 3, textAlign: 'center' }}>
               <Typography variant="body2" color="text.secondary">
-                {t('palette.search_commands_snippets')}
+                {t('palette.search_commands')}
               </Typography>
             </Box>
           )}

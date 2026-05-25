@@ -12,9 +12,14 @@ import { IconRenderer } from './IconRenderer';
 import { useNotebookStore } from '../store/notebookStore';
 import type { NoteGroupDto } from '../../../proto/notebook';
 import { GroupManageDialog } from './GroupManageDialog';
+import { useTheme } from '@mui/material/styles';
 
 export function GroupSidebar() {
   const { t } = useTranslation('notebook');
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+  const primaryColor = isDark ? '#6C63FF' : '#5B54E0';
+  const mutedColor = isDark ? '#8B949E' : '#6B7280';
 
   const {
     groups, activeGroupId, loadGroups, setActiveGroupId, setActiveCategory,
@@ -59,7 +64,7 @@ export function GroupSidebar() {
             bgcolor: `${group.color}18`,
             '&:hover': { bgcolor: `${group.color}28` },
           },
-          '&:hover': { bgcolor: 'rgba(255,255,255,0.04)' },
+          '&:hover': { bgcolor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)' },
         }}
       >
         <ListItemIcon sx={{ minWidth: 28 }}>
@@ -86,7 +91,7 @@ export function GroupSidebar() {
           onClick={(e) => handleGroupMenuOpen(e, group.id)}
           sx={{ opacity: 0, transition: 'opacity 0.2s', '.MuiListItemButton-root:hover &': { opacity: 1 } }}
         >
-          <DotsThreeVerticalIcon size={12} color="#8B949E" />
+          <DotsThreeVerticalIcon size={12} color={mutedColor} />
         </IconButton>
       </ListItemButton>
     );
@@ -101,7 +106,7 @@ export function GroupSidebar() {
         borderColor: 'divider',
         display: 'flex',
         flexDirection: 'column',
-        bgcolor: 'rgba(0,0,0,0.02)',
+        bgcolor: isDark ? 'rgba(0,0,0,0.02)' : 'rgba(0,0,0,0.01)',
       }}
     >
       <Box sx={{ p: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -110,7 +115,7 @@ export function GroupSidebar() {
         </Typography>
         <Tooltip title={t('group.manage') || ''}>
           <IconButton size="small" onClick={() => setGroupManageOpen(true)}>
-            <FolderSimplePlusIcon size={14} color="#6C63FF" />
+            <FolderSimplePlusIcon size={14} color={primaryColor} />
           </IconButton>
         </Tooltip>
       </Box>
@@ -122,11 +127,11 @@ export function GroupSidebar() {
           sx={{
             borderRadius: 1.5,
             mb: 0.25,
-            '&.Mui-selected': { bgcolor: 'rgba(108,99,255,0.12)' },
+            '&.Mui-selected': { bgcolor: `${primaryColor}18` },
           }}
         >
           <ListItemIcon sx={{ minWidth: 28 }}>
-            <BooksIcon size={14} color="#6C63FF" />
+            <BooksIcon size={14} color={primaryColor} />
           </ListItemIcon>
           <ListItemText
             primary={t('notebook.all_notes')}
@@ -145,7 +150,7 @@ export function GroupSidebar() {
           {t('group.edit')}
         </MenuItem>
         <MenuItem onClick={() => { if (menuGroupId) useNotebookStore.getState().deleteGroup(menuGroupId); handleGroupMenuClose(); }}>
-          <TrashIcon size={14} color="#FF5252" style={{ marginRight: 8 }} />
+          <TrashIcon size={14} color={isDark ? '#FF5252' : '#D32F2F'} style={{ marginRight: 8 }} />
           {t('group.delete')}
         </MenuItem>
       </Menu>

@@ -91,27 +91,31 @@ pub struct SshConnectionInfo {
     pub password: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginManifest {
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    pub description: String,
-    pub tools: Vec<ToolDefinition>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    pub parameters: Vec<ToolParameter>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolParameter {
-    pub name: String,
-    pub param_type: String,
-    pub required: bool,
-    pub description: String,
-    pub default_value: Option<serde_json::Value>,
-}
+#[allow(unused_imports)]
+pub use crate::plugins::domain::plugin::PluginManifest;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::plugin::PluginTool;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::plugin::ToolParameter;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::plugin::PluginScenario;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::changelog::ChangelogEntry;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::changelog::ToolChange;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::ui_schema::UiSchema;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::ui_schema::UiField;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::ui_schema::QuickAction;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::ui_schema::ResultViewSpec;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::ui_schema::TableColumn;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::usage_log::UsageLogEntry;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::usage_log::ExecutionMetrics;
+#[allow(unused_imports)]
+pub use crate::plugins::domain::usage_log::RefineSuggestion;

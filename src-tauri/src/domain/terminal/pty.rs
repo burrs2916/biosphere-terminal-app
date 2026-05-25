@@ -167,4 +167,9 @@ impl Pty {
             ))),
         }
     }
+
+    pub fn process_id(&self) -> Option<u32> {
+        let child = self.child.lock().unwrap();
+        child.process_id()
+    }
 }

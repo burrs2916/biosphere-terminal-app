@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -12,9 +13,14 @@ pub struct OpenAiCompatProvider {
 
 impl OpenAiCompatProvider {
     pub fn new(config: ProviderConfig) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         OpenAiCompatProvider {
             config,
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
@@ -282,57 +288,91 @@ impl LlmProvider for OpenAiCompatProvider {
             return Err(format!("API error {}: {}", status, text));
         }
 
-        let text = response.text().await.map_err(|e| e.to_string())?;
         let mut chunks = Vec::new();
+        let mut buffer = String::new();
+        let mut stream = response.bytes_stream();
+        use futures::StreamExt;
 
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || !line.starts_with("data: ") {
-                if self.config.api_type == "anthropic-messages" && line.starts_with("event: ") {
-                    continue;
-                }
-                continue;
-            }
-            let data = &line[6..];
-            if data == "[DONE]" {
-                break;
-            }
-            if let Ok(json) = serde_json::from_str::<Value>(data) {
-                if self.config.api_type == "anthropic-messages" {
-                    if let Some(chunk) = self.parse_anthropic_chunk(&json) {
-                        chunks.push(chunk);
+        while let Some(chunk_result) = stream.next().await {
+            let chunk_bytes = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
+            let chunk_str = String::from_utf8_lossy(&chunk_bytes);
+            buffer.push_str(&chunk_str);
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim().to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if line.is_empty() || !line.starts_with("data: ") {
+                    if self.config.api_type == "anthropic-messages" && line.starts_with("event: ") {
+                        continue;
                     }
                     continue;
                 }
+                let data = &line[6..];
+                if data == "[DONE]" {
+                    break;
+                }
+                if let Ok(json) = serde_json::from_str::<Value>(data) {
+                    if self.config.api_type == "anthropic-messages" {
+                        if let Some(chunk) = self.parse_anthropic_chunk(&json) {
+                            chunks.push(chunk);
+                        }
+                        continue;
+                    }
 
-                let choice = &json["choices"][0];
-                let delta = &choice["delta"];
+                    let choice = &json["choices"][0];
+                    let delta = &choice["delta"];
 
-                let content = delta["content"].as_str().map(|s| s.to_string());
-                let finish_reason = choice["finish_reason"].as_str().map(|s| s.to_string());
+                    let content = delta["content"].as_str().map(|s| s.to_string());
+                    let finish_reason = choice["finish_reason"].as_str().map(|s| s.to_string());
 
-                let tool_calls = if let Some(tc) = delta["tool_calls"].as_array() {
-                    Some(tc.iter().map(|t| super::provider::ToolCallDelta {
-                        index: t["index"].as_i64().unwrap_or(0) as i32,
-                        id: t["id"].as_str().map(|s| s.to_string()),
-                        function: if t["function"].is_object() {
-                            Some(super::provider::FunctionCallDelta {
-                                name: t["function"]["name"].as_str().map(|s| s.to_string()),
-                                arguments: t["function"]["arguments"].as_str().map(|s| s.to_string()),
-                            })
-                        } else {
-                            None
-                        },
-                    }).collect())
-                } else {
-                    None
-                };
+                    let tool_calls = if let Some(tc) = delta["tool_calls"].as_array() {
+                        Some(tc.iter().map(|t| super::provider::ToolCallDelta {
+                            index: t["index"].as_i64().unwrap_or(0) as i32,
+                            id: t["id"].as_str().map(|s| s.to_string()),
+                            function: if t["function"].is_object() {
+                                Some(super::provider::FunctionCallDelta {
+                                    name: t["function"]["name"].as_str().map(|s| s.to_string()),
+                                    arguments: t["function"]["arguments"].as_str().map(|s| s.to_string()),
+                                })
+                            } else {
+                                None
+                            },
+                        }).collect())
+                    } else {
+                        None
+                    };
 
-                chunks.push(super::provider::ChatChunk {
-                    content,
-                    tool_calls,
-                    finish_reason,
-                });
+                    chunks.push(super::provider::ChatChunk {
+                        content,
+                        tool_calls,
+                        finish_reason,
+                    });
+                }
+            }
+        }
+
+        let remaining = buffer.trim();
+        if !remaining.is_empty() && remaining.starts_with("data: ") {
+            let data = &remaining[6..];
+            if data != "[DONE]" {
+                if let Ok(json) = serde_json::from_str::<Value>(data) {
+                    if self.config.api_type == "anthropic-messages" {
+                        if let Some(chunk) = self.parse_anthropic_chunk(&json) {
+                            chunks.push(chunk);
+                        }
+                    } else {
+                        let choice = &json["choices"][0];
+                        let delta = &choice["delta"];
+                        let content = delta["content"].as_str().map(|s| s.to_string());
+                        let finish_reason = choice["finish_reason"].as_str().map(|s| s.to_string());
+                        chunks.push(super::provider::ChatChunk {
+                            content,
+                            tool_calls: None,
+                            finish_reason,
+                        });
+                    }
+                }
             }
         }
 
@@ -347,5 +387,143 @@ impl LlmProvider for OpenAiCompatProvider {
             return Err("Custom auth header name is required when auth type is 'custom'".to_string());
         }
         Ok(())
+    }
+
+    async fn chat_stream_realtime(
+        &self,
+        messages: &[ChatMessage],
+        options: &ChatOptions,
+        on_chunk: Arc<dyn Fn(super::provider::ChatChunk) + Send + Sync>,
+    ) -> Result<super::provider::ChatResponse, String> {
+        let url = self.build_chat_url();
+        let body = self.build_chat_body(messages, options, true);
+        let (auth_header_name, auth_header_value) = self.build_auth_header();
+
+        let mut req = self.client
+            .post(&url)
+            .header(&auth_header_name, &auth_header_value)
+            .header("Content-Type", "application/json");
+
+        if self.config.api_type == "anthropic-messages" {
+            req = req.header("anthropic-version", "2023-06-01");
+        }
+
+        let response = req
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP error: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!("API error {}: {}", status, text));
+        }
+
+        let mut full_content = String::new();
+        let mut tool_calls_map: std::collections::BTreeMap<i32, (Option<String>, String, String)> = std::collections::BTreeMap::new();
+        let mut finish_reason: Option<String> = None;
+        let mut buffer = String::new();
+        let mut stream = response.bytes_stream();
+        use futures::StreamExt;
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk_bytes = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
+            let chunk_str = String::from_utf8_lossy(&chunk_bytes);
+            buffer.push_str(&chunk_str);
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim().to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if line.is_empty() || !line.starts_with("data: ") {
+                    if self.config.api_type == "anthropic-messages" && line.starts_with("event: ") {
+                        continue;
+                    }
+                    continue;
+                }
+                let data = &line[6..];
+                if data == "[DONE]" {
+                    continue;
+                }
+                if let Ok(json) = serde_json::from_str::<Value>(data) {
+                    let chat_chunk = if self.config.api_type == "anthropic-messages" {
+                        self.parse_anthropic_chunk(&json)
+                    } else {
+                        let choice = &json["choices"][0];
+                        let delta = &choice["delta"];
+                        let content = delta["content"].as_str().map(|s| s.to_string());
+                        let fr = choice["finish_reason"].as_str().map(|s| s.to_string());
+                        let tool_calls = if let Some(tc) = delta["tool_calls"].as_array() {
+                            Some(tc.iter().map(|t| super::provider::ToolCallDelta {
+                                index: t["index"].as_i64().unwrap_or(0) as i32,
+                                id: t["id"].as_str().map(|s| s.to_string()),
+                                function: if t["function"].is_object() {
+                                    Some(super::provider::FunctionCallDelta {
+                                        name: t["function"]["name"].as_str().map(|s| s.to_string()),
+                                        arguments: t["function"]["arguments"].as_str().map(|s| s.to_string()),
+                                    })
+                                } else {
+                                    None
+                                },
+                            }).collect())
+                        } else {
+                            None
+                        };
+                        Some(super::provider::ChatChunk {
+                            content,
+                            tool_calls,
+                            finish_reason: fr,
+                        })
+                    };
+
+                    if let Some(chunk) = chat_chunk {
+                        if let Some(content) = &chunk.content {
+                            if !content.is_empty() {
+                                full_content.push_str(content);
+                            }
+                        }
+                        if let Some(tc_deltas) = &chunk.tool_calls {
+                            for delta in tc_deltas {
+                                let entry = tool_calls_map
+                                    .entry(delta.index)
+                                    .or_insert((None, String::new(), String::new()));
+                                if let Some(id) = &delta.id {
+                                    entry.0 = Some(id.clone());
+                                }
+                                if let Some(func) = &delta.function {
+                                    if let Some(name) = &func.name {
+                                        entry.1 = name.clone();
+                                    }
+                                    if let Some(args) = &func.arguments {
+                                        entry.2.push_str(args);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(fr) = &chunk.finish_reason {
+                            finish_reason = Some(fr.clone());
+                        }
+                        on_chunk(chunk);
+                    }
+                }
+            }
+        }
+
+        let tool_calls: Vec<super::provider::ToolCall> = tool_calls_map
+            .into_iter()
+            .map(|(_, (id, name, arguments))| super::provider::ToolCall {
+                id: id.unwrap_or_else(|| format!("tc_{}", uuid::Uuid::new_v4())),
+                call_type: "function".to_string(),
+                function: super::provider::FunctionCall { name, arguments },
+            })
+            .collect();
+
+        Ok(super::provider::ChatResponse {
+            role: "assistant".to_string(),
+            content: if full_content.is_empty() { None } else { Some(full_content) },
+            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            finish_reason,
+        })
     }
 }

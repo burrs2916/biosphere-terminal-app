@@ -1,8 +1,8 @@
 {
   "palette": {
     "title": "Command Palette",
-    "placeholder": "Search commands, snippets, or type a new command...",
-    "search_commands_snippets": "Type to search commands and snippets",
+    "placeholder": "Search commands or type a new command...",
+    "search_commands": "Type to search command history",
     "press_enter_execute": "Press Enter to execute",
     "execute": "Execute",
     "cancel": "Cancel"

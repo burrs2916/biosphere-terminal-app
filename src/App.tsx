@@ -14,6 +14,9 @@ import { NotebookPage } from './pages/NotebookPage';
 import { AgentPage } from './pages/AgentPage';
 import { CategoryNotesPage } from './features/notebook/components/CategoryNotesPage';
 import { NotesReferencePage } from './features/notebook/components/NotesReferencePage';
+import { AiCopilotPage } from './pages/AiCopilotPage';
+import { PluginWorkshopPage } from './pages/PluginWorkshopPage';
+import { PluginScriptViewerPage } from './pages/PluginScriptViewerPage';
 
 function AppLayout() {
   const sidebarOpen = useLayoutStore((s) => s.sidebarOpen);
@@ -87,13 +90,16 @@ function StandaloneLayout() {
     <Routes>
       <Route path="/category-notes" element={<CategoryNotesPage />} />
       <Route path="/notes-reference" element={<NotesReferencePage />} />
+      <Route path="/ai-copilot" element={<AiCopilotPage />} />
+      <Route path="/plugin-workshop" element={<PluginWorkshopPage />} />
+      <Route path="/plugin-script-viewer" element={<PluginScriptViewerPage />} />
     </Routes>
   );
 }
 
 function RootRouter() {
   const location = useLocation();
-  const isStandalone = location.pathname.startsWith('/category-notes') || location.pathname.startsWith('/notes-reference');
+  const isStandalone = location.pathname.startsWith('/category-notes') || location.pathname.startsWith('/notes-reference') || location.pathname.startsWith('/ai-copilot') || location.pathname.startsWith('/plugin-workshop') || location.pathname.startsWith('/plugin-script-viewer');
 
   return isStandalone ? <StandaloneLayout /> : <AppLayout />;
 }

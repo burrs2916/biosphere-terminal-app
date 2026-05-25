@@ -37,11 +37,13 @@ interface AgentState {
   loadConversations: (agentId: string) => Promise<void>;
   createConversation: (agentId: string, title: string) => Promise<ConversationDto | null>;
   deleteConversation: (id: string) => Promise<void>;
+  updateConversationTitle: (id: string, title: string) => Promise<void>;
   loadMessages: (conversationId: string) => Promise<void>;
   addMessage: (msg: MessageDto) => void;
   updateMessage: (id: string, content: string) => void;
   setActiveConversation: (id: string | null) => void;
   setActiveAgent: (id: string | null) => void;
+  deleteMessagesAfter: (conversationId: string, afterMessageId: string) => Promise<void>;
 }
 
 export const useAgentStore = create<AgentState>((set, get) => ({
@@ -235,6 +237,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }
   },
 
+  updateConversationTitle: async (id: string, title: string) => {
+    try {
+      await agentService.updateConversationTitle(id, title);
+      const conversations = get().conversations.map((c) => c.id === id ? { ...c, title } : c);
+      set({ conversations });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
   loadMessages: async (conversationId: string) => {
     try {
       const messages = await agentService.listMessages(conversationId);
@@ -258,6 +270,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setActiveConversation: (id: string | null) => set({ activeConversationId: id }),
   setActiveAgent: (id: string | null) => set({ activeAgentId: id }),
+
+  deleteMessagesAfter: async (conversationId: string, afterMessageId: string) => {
+    await agentService.deleteMessagesAfter(conversationId, afterMessageId);
+    const remaining = get().messages.filter((m) => {
+      const afterMsg = get().messages.find((msg) => msg.id === afterMessageId);
+      return afterMsg ? m.createdAt < afterMsg.createdAt : true;
+    });
+    set({ messages: remaining });
+  },
 }));
 
 export { genId };

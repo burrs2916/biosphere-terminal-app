@@ -3,17 +3,20 @@ import {
   Box, Typography, Paper, IconButton, TextField, Button, Select, MenuItem,
   FormControl, InputLabel, Slider, Chip, Dialog, DialogTitle, DialogContent,
   DialogActions, Card, CardContent, Snackbar, Alert,
-  FormHelperText, Tooltip, Autocomplete
+  FormHelperText, Tooltip,
 } from '@mui/material';
 import {
-  PlusIcon, TrashIcon, RobotIcon, FloppyDiskIcon, XIcon,
+  PlusIcon, TrashIcon, RobotIcon, FloppyDiskIcon, XIcon, FolderOpenIcon,
 } from '@phosphor-icons/react';
 import { useAgentStore } from '../store/agentStore';
-import { useNotebookStore } from '../../notebook/store/notebookStore';
+import { usePluginStore } from '../store/pluginStore';
+import { updateAgentAllowedTools } from '../../../core/services/agent.service';
 import type { AgentDto } from '../../../proto/agent';
 import { useTranslation } from 'react-i18next';
+import { useTheme } from '@mui/material/styles';
+import { open } from '@tauri-apps/plugin-dialog';
 
-const AVAILABLE_TOOLS = ['terminal', 'notebook', 'file', 'command_history', 'terminal_session'];
+const BUILTIN_TOOLS = ['terminal', 'notebook', 'file', 'command_history', 'terminal_session', 'plugin_manager'];
 
 interface AgentFormData {
   id: string;
@@ -26,7 +29,11 @@ interface AgentFormData {
   toolIds: string[];
   triggerType: string;
   autoConfirm: boolean;
-  linkedNoteIds: string[];
+  permissionMode: string;
+  alwaysAllowedTools: string[];
+  fallbackModelId: string;
+  workspaceDir: string;
+  createdAt: number;
 }
 
 function defaultFormData(): AgentFormData {
@@ -41,7 +48,11 @@ function defaultFormData(): AgentFormData {
     toolIds: ['terminal'],
     triggerType: 'manual',
     autoConfirm: false,
-    linkedNoteIds: [],
+    permissionMode: 'confirm',
+    alwaysAllowedTools: [],
+    fallbackModelId: '',
+    workspaceDir: '',
+    createdAt: 0,
   };
 }
 
@@ -49,8 +60,11 @@ export function AgentManager() {
   const {
     agents, models, loadAgents, loadModels, saveAgent, deleteAgent,
   } = useAgentStore();
-  const { notes, loadNotes } = useNotebookStore();
+  const { pluginTools, loadPluginTools, plugins, groups, loadGroups } = usePluginStore();
   const { t } = useTranslation('agent');
+  const theme = useTheme();
+  const isDark = theme.palette.mode === 'dark';
+  const agentColor = isDark ? '#CE93D8' : '#7B1FA2';
 
   const [editing, setEditing] = useState<AgentFormData | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
@@ -63,8 +77,15 @@ export function AgentManager() {
   useEffect(() => {
     loadAgents();
     loadModels();
-    loadNotes();
-  }, [loadAgents, loadModels, loadNotes]);
+    loadPluginTools();
+    loadGroups();
+
+    const interval = setInterval(() => {
+      loadPluginTools();
+    }, 60000);
+
+    return () => clearInterval(interval);
+  }, [loadAgents, loadModels, loadPluginTools, loadGroups]);
 
   const handleNew = () => {
     setEditing({
@@ -85,7 +106,11 @@ export function AgentManager() {
       toolIds: [...agent.toolIds],
       triggerType: agent.triggerType || 'manual',
       autoConfirm: agent.autoConfirm || false,
-      linkedNoteIds: agent.linkedNoteIds || [],
+      permissionMode: agent.permissionMode || 'confirm',
+      alwaysAllowedTools: agent.alwaysAllowedTools || [],
+      fallbackModelId: agent.fallbackModelId || '',
+      workspaceDir: agent.workspaceDir || '',
+      createdAt: agent.createdAt || 0,
     });
   };
 
@@ -111,8 +136,11 @@ export function AgentManager() {
         toolIds: editing.toolIds,
         triggerType: editing.triggerType,
         autoConfirm: editing.autoConfirm,
-        linkedNoteIds: editing.linkedNoteIds,
-        createdAt: Date.now(),
+        permissionMode: editing.permissionMode,
+        alwaysAllowedTools: editing.alwaysAllowedTools,
+        fallbackModelId: editing.fallbackModelId,
+        workspaceDir: editing.workspaceDir,
+        createdAt: editing.createdAt || Date.now(),
         updatedAt: Date.now(),
       });
       setSnackbar({ open: true, message: t('agent.save_success'), severity: 'success' });
@@ -174,7 +202,7 @@ export function AgentManager() {
           <IconButton
             onClick={handleNew}
             sx={{
-              background: 'linear-gradient(135deg, #CE93D8 0%, #EA80FC 100%)',
+              background: `linear-gradient(135deg, ${agentColor} 0%, ${isDark ? '#EA80FC' : '#9C27B0'} 100%)`,
               color: '#fff',
               '&:hover': { opacity: 0.9 },
             }}
@@ -193,10 +221,10 @@ export function AgentManager() {
                 p: 3,
                 textAlign: 'center',
                 borderStyle: 'dashed',
-                borderColor: 'rgba(48,54,61,0.4)',
+                borderColor: 'divider',
               }}
             >
-              <RobotIcon size={48} color="rgba(255,255,255,0.3)" />
+              <RobotIcon size={48} color={isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.2)'} />
               <Typography variant="body2" sx={{ color: 'text.secondary', mt: 1 }}>
                 {t('agent.no_agents')}
               </Typography>
@@ -222,12 +250,12 @@ export function AgentManager() {
                     mb: 1.5,
                     cursor: 'pointer',
                     borderRadius: 2,
-                    borderColor: isSelected ? 'primary.main' : 'rgba(48,54,61,0.6)',
-                    bgcolor: isSelected ? 'rgba(206,147,216,0.08)' : 'transparent',
+                    borderColor: isSelected ? 'primary.main' : 'divider',
+                    bgcolor: isSelected ? `${agentColor}10` : 'transparent',
                     transition: 'all 0.2s',
                     '&:hover': {
                       borderColor: 'primary.main',
-                      bgcolor: 'rgba(206,147,216,0.04)',
+                      bgcolor: `${agentColor}08`,
                     },
                   }}
                 >
@@ -241,9 +269,9 @@ export function AgentManager() {
                         alignItems: 'center',
                         justifyContent: 'center',
                         background: isSelected
-                          ? 'linear-gradient(135deg, #CE93D8 0%, #EA80FC 100%)'
-                          : 'rgba(255,255,255,0.08)',
-                        color: isSelected ? '#fff' : 'rgba(255,255,255,0.5)',
+                          ? `linear-gradient(135deg, ${agentColor} 0%, ${isDark ? '#EA80FC' : '#9C27B0'} 100%)`
+                          : (isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'),
+                        color: isSelected ? '#fff' : (isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.4)'),
                       }}
                     >
                       <RobotIcon size={18} weight="bold" />
@@ -325,7 +353,7 @@ export function AgentManager() {
                     onClick={handleSave}
                     disabled={!editing.name.trim() || !editing.modelId}
                     sx={{
-                      background: 'linear-gradient(135deg, #CE93D8 0%, #EA80FC 100%)',
+                      background: `linear-gradient(135deg, ${agentColor} 0%, ${isDark ? '#EA80FC' : '#9C27B0'} 100%)`,
                       textTransform: 'none',
                       fontSize: 13,
                       '&:disabled': { opacity: 0.5 },
@@ -420,6 +448,75 @@ export function AgentManager() {
                     />
                   </Box>
                   <Box sx={{ flex: { xs: '1 1 100%', md: '1 1 calc(50% - 8px)' } }}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Permission Mode</InputLabel>
+                      <Select
+                        value={editing.permissionMode}
+                        label="Permission Mode"
+                        onChange={(e) => setEditing({ ...editing, permissionMode: e.target.value })}
+                      >
+                        <MenuItem value="confirm">
+                          Confirm — Ask before high-risk actions
+                        </MenuItem>
+                        <MenuItem value="auto">
+                          Auto — Execute all actions without confirmation
+                        </MenuItem>
+                      </Select>
+                    </FormControl>
+                  </Box>
+                  <Box sx={{ flex: { xs: '1 1 100%', md: '1 1 calc(50% - 8px)' } }}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Fallback Model</InputLabel>
+                      <Select
+                        value={editing.fallbackModelId}
+                        label="Fallback Model"
+                        onChange={(e) => setEditing({ ...editing, fallbackModelId: e.target.value })}
+                      >
+                        <MenuItem value="">
+                          <em>None</em>
+                        </MenuItem>
+                        {models.filter((m) => m.id !== editing.modelId).map((m) => (
+                          <MenuItem key={m.id} value={m.id}>
+                            {m.name || m.refKey}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Box>
+                  <Box sx={{ flex: { xs: '1 1 100%', md: '1 1 calc(50% - 8px)' } }}>
+                    <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'flex-start' }}>
+                      <TextField
+                        fullWidth
+                        size="small"
+                        label={t('agent.workspace_dir')}
+                        placeholder={t('agent.workspace_dir_placeholder')}
+                        value={editing.workspaceDir}
+                        onChange={(e) => setEditing({ ...editing, workspaceDir: e.target.value })}
+                        helperText={t('agent.workspace_dir_helper')}
+                        sx={{ '& .MuiFormHelperText-root': { fontSize: '0.7rem' } }}
+                      />
+                      <Tooltip title={t('agent.select_workspace_dir')}>
+                        <IconButton
+                          size="small"
+                          sx={{ mt: 0.5 }}
+                          onClick={async () => {
+                            try {
+                              const selected = await open({
+                                directory: true,
+                                title: t('agent.select_workspace_dir'),
+                              });
+                              if (selected && typeof selected === 'string') {
+                                setEditing({ ...editing, workspaceDir: selected });
+                              }
+                            } catch {}
+                          }}
+                        >
+                          <FolderOpenIcon size={20} />
+                        </IconButton>
+                      </Tooltip>
+                    </Box>
+                  </Box>
+                  <Box sx={{ flex: { xs: '1 1 100%', md: '1 1 calc(50% - 8px)' } }}>
                     <Box sx={{ mb: 2 }}>
                       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
                         <Typography variant="caption" sx={{ color: 'text.secondary' }}>
@@ -467,8 +564,8 @@ export function AgentManager() {
                 <Typography variant="subtitle2" sx={{ mb: 2, color: 'primary.main', fontWeight: 600 }}>
                   {t('agent.tools_label')}
                 </Typography>
-                <Box sx={{ display: 'flex', gap: 1, mb: 3, flexWrap: 'wrap' }}>
-                  {AVAILABLE_TOOLS.map((toolId) => (
+                <Box sx={{ display: 'flex', gap: 1, mb: 1, flexWrap: 'wrap' }}>
+                  {BUILTIN_TOOLS.map((toolId) => (
                     <Chip
                       key={toolId}
                       label={getToolLabel(toolId)}
@@ -484,35 +581,127 @@ export function AgentManager() {
                     />
                   ))}
                 </Box>
-
-                {/* Linked Notes Section */}
-                <Typography variant="subtitle2" sx={{ mb: 2, color: 'primary.main', fontWeight: 600 }}>
-                  {t('agent.linked_notes_label', { defaultValue: 'Linked Notes' })}
-                </Typography>
-                <Box sx={{ mb: 3 }}>
-                  <Autocomplete
-                    multiple
-                    options={notes}
-                    getOptionLabel={(note) => note.title}
-                    value={notes.filter(n => editing.linkedNoteIds.includes(n.id))}
-                    onChange={(_, newValue) => {
-                      setEditing({
-                        ...editing,
-                        linkedNoteIds: newValue.map(n => n.id)
+                {pluginTools.length > 0 && (
+                  <>
+                    <Typography variant="caption" sx={{ mb: 1, color: 'text.secondary', display: 'block' }}>
+                      {t('agent.plugin_tools_label')}
+                    </Typography>
+                    {groups.length > 0 && groups.map((group) => {
+                      const groupPluginIds = plugins
+                        .filter((p) => p.groupId === group.id && p.enabled)
+                        .map((p) => p.id);
+                      const groupTools = pluginTools.filter((pt) => {
+                        const parentPlugin = plugins.find((p) => p.tools.some((t) => t.name === pt.name));
+                        return parentPlugin && groupPluginIds.includes(parentPlugin.id);
                       });
-                    }}
-                    renderInput={(params) => (
-                      <TextField
-                        {...params}
-                        size="small"
-                        placeholder={t('agent.select_notes_placeholder', { defaultValue: 'Select notes to link' })}
-                      />
+                      if (groupTools.length === 0) return null;
+                      return (
+                        <Box key={group.id} sx={{ mb: 1 }}>
+                          <Typography variant="caption" sx={{ fontSize: 10, color: group.color, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 0.3, mb: 0.5 }}>
+                            <span style={{ fontSize: 12 }}>{group.icon}</span> {group.name}
+                          </Typography>
+                          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                            {groupTools.map((pt) => (
+                              <Chip
+                                key={pt.name}
+                                label={pt.name}
+                                size="medium"
+                                variant={editing.toolIds.includes(pt.name) ? 'filled' : 'outlined'}
+                                color={editing.toolIds.includes(pt.name) ? 'secondary' : 'default'}
+                                onClick={() => toggleTool(pt.name)}
+                                sx={{ cursor: 'pointer', transition: 'all 0.2s', '&:hover': { transform: 'translateY(-2px)' } }}
+                              />
+                            ))}
+                          </Box>
+                        </Box>
+                      );
+                    })}
+                    {(() => {
+                      const groupedPluginIds = new Set(
+                        groups.flatMap((g) => plugins.filter((p) => p.groupId === g.id && p.enabled).map((p) => p.id))
+                      );
+                      const ungroupedTools = pluginTools.filter((pt) => {
+                        const parentPlugin = plugins.find((p) => p.tools.some((t) => t.name === pt.name));
+                        return parentPlugin && !groupedPluginIds.has(parentPlugin.id);
+                      });
+                      if (ungroupedTools.length === 0) return null;
+                      return (
+                        <Box sx={{ mb: 3 }}>
+                          {groups.length > 0 && (
+                            <Typography variant="caption" sx={{ fontSize: 10, color: 'text.disabled', fontWeight: 600, mb: 0.5, display: 'block' }}>
+                              未分组
+                            </Typography>
+                          )}
+                          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                            {ungroupedTools.map((pt) => (
+                              <Chip
+                                key={pt.name}
+                                label={pt.name}
+                                size="medium"
+                                variant={editing.toolIds.includes(pt.name) ? 'filled' : 'outlined'}
+                                color={editing.toolIds.includes(pt.name) ? 'secondary' : 'default'}
+                                onClick={() => toggleTool(pt.name)}
+                                sx={{ cursor: 'pointer', transition: 'all 0.2s', '&:hover': { transform: 'translateY(-2px)' } }}
+                              />
+                            ))}
+                          </Box>
+                        </Box>
+                      );
+                    })()}
+                  </>
+                )}
+
+                {editing.toolIds.length > 0 && (
+                  <>
+                    <Typography variant="subtitle2" sx={{ mb: 1, mt: 1, color: 'warning.main', fontWeight: 600 }}>
+                      {t('agent.allowed_tools_label')}
+                    </Typography>
+                    <Typography variant="caption" sx={{ mb: 1, color: 'text.secondary', display: 'block' }}>
+                      {t('agent.allowed_tools_desc')}
+                    </Typography>
+                    {editing.alwaysAllowedTools.length > 0 && (
+                      <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1 }}>
+                        {editing.alwaysAllowedTools.map((toolName) => (
+                          <Chip
+                            key={toolName}
+                            label={toolName}
+                            size="small"
+                            color="warning"
+                            variant="outlined"
+                            onDelete={() => {
+                              const newAllowed = editing.alwaysAllowedTools.filter((t) => t !== toolName);
+                              setEditing({ ...editing, alwaysAllowedTools: newAllowed });
+                              updateAgentAllowedTools(editing.id, newAllowed);
+                            }}
+                            deleteIcon={<XIcon size={14} />}
+                          />
+                        ))}
+                      </Box>
                     )}
-                  />
-                  <FormHelperText sx={{ mt: 0.5 }}>
-                    {t('agent.linked_notes_help', { defaultValue: 'These notes will be provided as context to the AI agent' })}
-                  </FormHelperText>
-                </Box>
+                    {(() => {
+                      const candidates = editing.toolIds.filter((t) => !editing.alwaysAllowedTools.includes(t));
+                      if (candidates.length === 0) return null;
+                      return (
+                        <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                          {candidates.map((toolName) => (
+                            <Chip
+                              key={toolName}
+                              label={toolName}
+                              size="small"
+                              variant="outlined"
+                              sx={{ fontSize: 10, borderColor: 'divider', color: 'text.secondary', '&:hover': { borderColor: 'warning.main', color: 'warning.main' } }}
+                              onClick={() => {
+                                const newAllowed = [...editing.alwaysAllowedTools, toolName];
+                                setEditing({ ...editing, alwaysAllowedTools: newAllowed });
+                                updateAgentAllowedTools(editing.id, newAllowed);
+                              }}
+                            />
+                          ))}
+                        </Box>
+                      );
+                    })()}
+                  </>
+                )}
 
                 {/* System Prompt Section */}
                 <Typography variant="subtitle2" sx={{ mb: 2, color: 'primary.main', fontWeight: 600 }}>
@@ -546,7 +735,7 @@ export function AgentManager() {
                 opacity: 0.7,
               }}
             >
-              <RobotIcon size={64} color="rgba(255,255,255,0.2)" />
+              <RobotIcon size={64} color={isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.15)'} />
               <Typography variant="h6" sx={{ color: 'text.secondary', mt: 2, mb: 1 }}>
                 {t('agent.select_or_create')}
               </Typography>

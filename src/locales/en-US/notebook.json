@@ -85,9 +85,12 @@
     "add_tag": "Add Tag",
     "add_tag_hint": "Tag name",
     "ai_optimize": "AI Optimize",
+    "open_folder": "Open Folder",
     "ai_no_agent": "Please select a note assistant agent in the Note Assistant tab first",
     "ai_no_content": "Note content is empty, nothing to optimize",
     "ai_optimizing": "AI is optimizing your note...",
+    "ai_thinking": "AI is thinking...",
+    "ai_cancel": "Cancel",
     "ai_optimize_done": "Note optimization completed",
     "ai_optimize_error": "AI optimization failed",
     "toolbar": {

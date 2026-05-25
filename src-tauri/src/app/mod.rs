@@ -5,6 +5,7 @@ pub mod profile_service;
 pub mod connection_service;
 pub mod notebook_service;
 pub mod agent_service;
+pub mod plugin_service;
 pub mod linker_service;
 pub mod environment_service;
 pub mod icon_service;

@@ -46,7 +46,10 @@ export interface AgentDto {
   toolIds: string[];
   triggerType: string;
   autoConfirm: boolean;
-  linkedNoteIds: string[];
+  permissionMode: string;
+  alwaysAllowedTools: string[];
+  fallbackModelId: string;
+  workspaceDir: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -55,6 +58,7 @@ export interface ConversationDto {
   id: string;
   agentId: string;
   title: string;
+  metadata: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -65,5 +69,6 @@ export interface MessageDto {
   role: string;
   content: string;
   toolCalls: string;
+  isError: number;
   createdAt: number;
 }

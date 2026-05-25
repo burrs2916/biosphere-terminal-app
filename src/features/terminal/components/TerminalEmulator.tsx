@@ -1,251 +1,523 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useRef, useCallback, useState, forwardRef, useImperativeHandle } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebglAddon } from '@xterm/addon-webgl';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn, emit } from '@tauri-apps/api/event';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { writeToTerminal, resizeTerminal } from '../../../core/services/terminal.service';
-import { parseCommand } from '../../../core/services/command.service';
-import { useSettingsStore } from '../../../engine';
+import { parseCommand, recordExitCode } from '../../../core/services/command.service';
+import { getDefaultProfile } from '../../../core/services/profile.service';
+import { useSettingsStore, getThemeAppearance } from '../../../engine';
 import { useTranslation } from 'react-i18next';
+import type { AppearanceConfig } from '../../../proto';
 import '@xterm/xterm/css/xterm.css';
 import Box from '@mui/material/Box';
+
+export interface TerminalEmulatorHandle {
+  findNext: (query: string, options?: { regex?: boolean; wholeWord?: boolean; caseSensitive?: boolean }) => void;
+  findPrevious: (query: string, options?: { regex?: boolean; wholeWord?: boolean; caseSensitive?: boolean }) => void;
+  clearBuffer: () => void;
+  focus: () => void;
+  getSelection: () => string;
+  paste: (text: string) => void;
+  selectAll: () => void;
+  scrollToBottom: () => void;
+  clearSearchDecorations: () => void;
+  hasSelection: () => boolean;
+}
 
 interface TerminalEmulatorProps {
   sessionId: string;
   onExit?: (sessionId: string) => void;
+  onTitleChange?: (sessionId: string, title: string) => void;
+  onFindResultsChange?: (resultIndex: number, resultCount: number) => void;
   visible?: boolean;
+  profileId?: string;
 }
 
-export function TerminalEmulator({ sessionId, onExit, visible = true }: TerminalEmulatorProps) {
-  const { t } = useTranslation('terminal');
-  const containerRef = useRef<HTMLDivElement>(null);
-  const terminalRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
-  const unlistenersRef = useRef<UnlistenFn[]>([]);
-  const lineBufferRef = useRef('');
-  const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [terminalReady, setTerminalReady] = useState(false);
+function buildTheme(appearance: ReturnType<typeof getThemeAppearance>) {
+  return {
+    background: appearance.background,
+    foreground: appearance.foreground,
+    cursor: appearance.cursorColor,
+    cursorAccent: appearance.background,
+    selectionBackground: appearance.selectionBackground,
+    selectionForeground: appearance.selectionForeground,
+    black: appearance.colors[0] || '#0D1117',
+    red: appearance.colors[1] || '#FF7B72',
+    green: appearance.colors[2] || '#00E676',
+    yellow: appearance.colors[3] || '#FFD740',
+    blue: appearance.colors[4] || '#4FC3F7',
+    magenta: appearance.colors[5] || '#CE93D8',
+    cyan: appearance.colors[6] || '#4DD0E1',
+    white: appearance.colors[7] || '#E6EDF3',
+    brightBlack: appearance.colors[8] || '#8B949E',
+    brightRed: appearance.colors[9] || '#FF8A80',
+    brightGreen: appearance.colors[10] || '#69F0AE',
+    brightYellow: appearance.colors[11] || '#FFE57F',
+    brightBlue: appearance.colors[12] || '#80D8FF',
+    brightMagenta: appearance.colors[13] || '#EA80FC',
+    brightCyan: appearance.colors[14] || '#84FFFF',
+    brightWhite: appearance.colors[15] || '#FFFFFF',
+  };
+}
 
-  const appearance = useSettingsStore((s) => s.settings.appearance);
-  const scrollback = useSettingsStore((s) => s.settings.scrollback);
-  const bellStyle = useSettingsStore((s) => s.settings.bellStyle);
-  const copyOnSelect = useSettingsStore((s) => s.settings.copyOnSelect);
-  const pasteOnMiddleClick = useSettingsStore((s) => s.settings.pasteOnMiddleClick);
-  const webglRenderer = useSettingsStore((s) => s.settings.webglRenderer);
+export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmulatorProps>(
+  function TerminalEmulator({ sessionId, onExit, onTitleChange, onFindResultsChange, visible = true, profileId }, ref) {
+    const { t } = useTranslation('terminal');
+    const containerRef = useRef<HTMLDivElement>(null);
+    const terminalRef = useRef<Terminal | null>(null);
+    const fitAddonRef = useRef<FitAddon | null>(null);
+    const searchAddonRef = useRef<SearchAddon | null>(null);
+    const unlistenersRef = useRef<UnlistenFn[]>([]);
+    const lineBufferRef = useRef('');
+    const lastEntryIdRef = useRef<string | null>(null);
+    const lastCommandRef = useRef<string | null>(null);
+    const textEncoderRef = useRef(new TextEncoder());
+    const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const selectionChangeOffRef = useRef<import('@xterm/xterm').IDisposable | null>(null);
+    const middleClickHandlerRef = useRef<((e: MouseEvent) => void) | null>(null);
+    const dragDropUnlistenRef = useRef<UnlistenFn | null>(null);
+    const resizeOffRef = useRef<import('@xterm/xterm').IDisposable | null>(null);
+    const [terminalReady, setTerminalReady] = useState(false);
+    const [profileAppearance, setProfileAppearance] = useState<AppearanceConfig | null>(null);
 
-  const handleResize = useCallback(() => {
-    if (resizeTimerRef.current) {
-      clearTimeout(resizeTimerRef.current);
-    }
-    resizeTimerRef.current = setTimeout(() => {
-      if (!fitAddonRef.current || !terminalRef.current || !containerRef.current) return;
-      if (!visible) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) return;
-      try {
-        fitAddonRef.current.fit();
-        const cols = terminalRef.current.cols;
-        const rows = terminalRef.current.rows;
-        resizeTerminal(sessionId, rows, cols).catch(() => {});
-      } catch {}
-    }, 50);
-  }, [sessionId, visible]);
+    const themeMode = useSettingsStore((s) => s.settings.theme);
+    const scrollback = useSettingsStore((s) => s.settings.scrollback);
+    const copyOnSelect = useSettingsStore((s) => s.settings.copyOnSelect);
+    const pasteOnMiddleClick = useSettingsStore((s) => s.settings.pasteOnMiddleClick);
+    const webglRenderer = useSettingsStore((s) => s.settings.webglRenderer);
 
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    const terminal = new Terminal({
-      cursorBlink: appearance.cursorBlink,
-      cursorStyle: appearance.cursorStyle,
-      fontSize: appearance.fontSize,
-      fontFamily: appearance.fontFamily,
-      lineHeight: appearance.lineHeight,
-      scrollback,
-      allowTransparency: true,
-      theme: {
-        background: appearance.background,
-        foreground: appearance.foreground,
-        cursor: appearance.cursorColor,
-        cursorAccent: appearance.background,
-        selectionBackground: appearance.selectionBackground,
-        selectionForeground: appearance.selectionForeground,
-        black: appearance.colors[0] || '#0D1117',
-        red: appearance.colors[1] || '#FF7B72',
-        green: appearance.colors[2] || '#00E676',
-        yellow: appearance.colors[3] || '#FFD740',
-        blue: appearance.colors[4] || '#4FC3F7',
-        magenta: appearance.colors[5] || '#CE93D8',
-        cyan: appearance.colors[6] || '#4DD0E1',
-        white: appearance.colors[7] || '#E6EDF3',
-        brightBlack: appearance.colors[8] || '#8B949E',
-        brightRed: appearance.colors[9] || '#FF8A80',
-        brightGreen: appearance.colors[10] || '#69F0AE',
-        brightYellow: appearance.colors[11] || '#FFE57F',
-        brightBlue: appearance.colors[12] || '#80D8FF',
-        brightMagenta: appearance.colors[13] || '#EA80FC',
-        brightCyan: appearance.colors[14] || '#84FFFF',
-        brightWhite: appearance.colors[15] || '#FFFFFF',
-      },
-    });
-
-    const fitAddon = new FitAddon();
-    const webLinksAddon = new WebLinksAddon();
-    const searchAddon = new SearchAddon();
-
-    terminal.loadAddon(fitAddon);
-    terminal.loadAddon(webLinksAddon);
-    terminal.loadAddon(searchAddon);
-
-    if (webglRenderer) {
-      try {
-        const webglAddon = new WebglAddon();
-        terminal.loadAddon(webglAddon);
-      } catch {
-        // WebGL not available, fall back to canvas renderer
-      }
-    }
-
-    terminal.open(containerRef.current);
-
-    requestAnimationFrame(() => {
-      if (fitAddonRef.current && containerRef.current) {
-        const rect = containerRef.current.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          try {
-            fitAddon.fit();
-          } catch {}
-        }
-      }
-      setTerminalReady(true);
-    });
-
-    if (copyOnSelect) {
-      terminal.onSelectionChange(() => {
-        const selection = terminal.getSelection();
-        if (selection) {
-          navigator.clipboard.writeText(selection).catch(() => {});
-        }
-      });
-    }
-
-    if (pasteOnMiddleClick) {
-      containerRef.current.addEventListener('mousedown', (e) => {
-        if (e.button === 1) {
-          e.preventDefault();
-          navigator.clipboard.readText().then((text) => {
-            if (text) {
-              terminal.paste(text);
+    useEffect(() => {
+      if (profileId) {
+        import('../../../core/services/profile.service').then(({ listProfiles }) => {
+          listProfiles().then((profiles) => {
+            const profile = profiles.find((p) => p.id === profileId);
+            if (profile) {
+              try {
+                setProfileAppearance(JSON.parse(profile.config_json));
+              } catch {}
             }
           }).catch(() => {});
+        }).catch(() => {});
+      } else {
+        getDefaultProfile().then((profile) => {
+          if (profile) {
+            try {
+              setProfileAppearance(JSON.parse(profile.config_json));
+            } catch {}
+          }
+        }).catch(() => {});
+      }
+    }, [profileId]);
+
+    const baseAppearance = getThemeAppearance(themeMode);
+    const appearance = profileAppearance
+      ? {
+          ...baseAppearance,
+          ...profileAppearance,
+          colors: baseAppearance.colors,
+          selectionBackground: baseAppearance.selectionBackground,
+          selectionForeground: baseAppearance.selectionForeground,
+          cursorColor: baseAppearance.cursorColor,
         }
-      });
-    }
+      : baseAppearance;
 
-    terminal.onData((data) => {
-      const bytes = new TextEncoder().encode(data);
-      writeToTerminal(sessionId, Array.from(bytes)).catch(() => {});
+    useImperativeHandle(ref, () => ({
+      findNext: (query: string, options?: { regex?: boolean; wholeWord?: boolean; caseSensitive?: boolean }) => {
+        searchAddonRef.current?.findNext(query, options);
+      },
+      findPrevious: (query: string, options?: { regex?: boolean; wholeWord?: boolean; caseSensitive?: boolean }) => {
+        searchAddonRef.current?.findPrevious(query, options);
+      },
+      clearBuffer: () => {
+        terminalRef.current?.clear();
+      },
+      focus: () => {
+        terminalRef.current?.focus();
+      },
+      getSelection: () => {
+        return terminalRef.current?.getSelection() ?? '';
+      },
+      paste: (text: string) => {
+        terminalRef.current?.paste(text);
+      },
+      selectAll: () => {
+        terminalRef.current?.selectAll();
+      },
+      scrollToBottom: () => {
+        terminalRef.current?.scrollToBottom();
+      },
+      clearSearchDecorations: () => {
+        searchAddonRef.current?.clearDecorations();
+      },
+      hasSelection: () => {
+        return terminalRef.current?.hasSelection() ?? false;
+      },
+    }), []);
 
-      if (data === '\r') {
-        const cmd = lineBufferRef.current.trim();
-        if (cmd) {
-          parseCommand(cmd, sessionId).catch(() => {});
-        }
-        lineBufferRef.current = '';
-      } else if (data === '\x7f') {
-        lineBufferRef.current = lineBufferRef.current.slice(0, -1);
-      } else if (data === '\x03') {
-        lineBufferRef.current = '';
-      } else if (data === '\x15') {
-        lineBufferRef.current = '';
-      } else if (data.charCodeAt(0) >= 32 && data.charCodeAt(0) < 127 && !data.startsWith('\x1b')) {
-        lineBufferRef.current += data;
-      }
-    });
-
-    terminal.onResize(({ cols, rows }) => {
-      resizeTerminal(sessionId, rows, cols).catch(() => {});
-    });
-
-    terminalRef.current = terminal;
-    fitAddonRef.current = fitAddon;
-
-    const unlisteners = unlistenersRef.current;
-
-    listen<{ session_id: string; data: string }>('terminal-output', (event) => {
-      if (event.payload.session_id === sessionId) {
-        terminal.write(event.payload.data);
-      }
-    }).then((unlisten) => {
-      unlisteners.push(unlisten);
-    });
-
-    listen<{ session_id: string; exit_code: number | null }>('terminal-closed', (event) => {
-      if (event.payload.session_id === sessionId) {
-        terminal.write(`\r\n\x1b[90m${t('output.process_exited')}\x1b[0m\r\n`);
-        onExit?.(sessionId);
-      }
-    }).then((unlisten) => {
-      unlisteners.push(unlisten);
-    });
-
-    listen<{ session_id: string; error: string }>('terminal-error', (event) => {
-      if (event.payload.session_id === sessionId) {
-        terminal.write(`\r\n\x1b[31m${t('output.error', { error: event.payload.error })}\x1b[0m\r\n`);
-      }
-    }).then((unlisten) => {
-      unlisteners.push(unlisten);
-    });
-
-    const resizeObserver = new ResizeObserver(() => {
-      handleResize();
-    });
-    resizeObserver.observe(containerRef.current);
-
-    window.addEventListener('resize', handleResize);
-
-    return () => {
+    const handleResize = useCallback(() => {
       if (resizeTimerRef.current) {
         clearTimeout(resizeTimerRef.current);
       }
-      window.removeEventListener('resize', handleResize);
-      resizeObserver.disconnect();
-      for (const unlisten of unlistenersRef.current) {
-        unlisten();
-      }
-      unlistenersRef.current = [];
-      terminal.dispose();
-      terminalRef.current = null;
-      fitAddonRef.current = null;
-    };
-  }, [sessionId, onExit, handleResize, appearance, scrollback, bellStyle, copyOnSelect, pasteOnMiddleClick, webglRenderer]);
+      resizeTimerRef.current = setTimeout(() => {
+        if (!fitAddonRef.current || !terminalRef.current || !containerRef.current) return;
+        if (!visible) return;
+        const rect = containerRef.current.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        try {
+          fitAddonRef.current.fit();
+        } catch {}
+      }, 50);
+    }, [visible]);
 
-  useEffect(() => {
-    if (visible && terminalRef.current && fitAddonRef.current && containerRef.current) {
+    useEffect(() => {
+      if (!containerRef.current) return;
+
+      const terminal = new Terminal({
+        cursorBlink: appearance.cursorBlink,
+        cursorStyle: appearance.cursorStyle,
+        fontSize: appearance.fontSize,
+        fontFamily: appearance.fontFamily,
+        lineHeight: appearance.lineHeight,
+        scrollback,
+        allowTransparency: true,
+        theme: buildTheme(appearance),
+      });
+
+      const fitAddon = new FitAddon();
+      const webLinksAddon = new WebLinksAddon((_event: MouseEvent, uri: string) => {
+        openUrl(uri).catch(() => {
+          window.open(uri, '_blank');
+        });
+      });
+      const searchAddon = new SearchAddon();
+
+      searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => {
+        onFindResultsChange?.(resultIndex, resultCount);
+      });
+
+      terminal.loadAddon(fitAddon);
+      terminal.loadAddon(webLinksAddon);
+      terminal.loadAddon(searchAddon);
+
+      if (webglRenderer) {
+        try {
+          const webglAddon = new WebglAddon();
+          webglAddon.onContextLoss(() => {
+            webglAddon.dispose();
+          });
+          terminal.loadAddon(webglAddon);
+        } catch {}
+      }
+
+      terminal.open(containerRef.current);
+
+      terminal.onBell(() => {
+        const currentBellStyle = useSettingsStore.getState().settings.bellStyle;
+        if (currentBellStyle === 'visual') {
+          if (!containerRef.current) return;
+          containerRef.current.style.outline = '2px solid rgba(108,99,255,0.6)';
+          containerRef.current.style.outlineOffset = '-2px';
+          setTimeout(() => {
+            if (containerRef.current) {
+              containerRef.current.style.outline = 'none';
+            }
+          }, 200);
+        } else if (currentBellStyle === 'sound') {
+          try {
+            const ctx = new AudioContext();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.frequency.value = 800;
+            gain.gain.value = 0.1;
+            osc.start();
+            osc.stop(ctx.currentTime + 0.1);
+          } catch {}
+        }
+      });
+
+      terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+        if (e.type !== 'keydown') return false;
+        const mod = e.ctrlKey || e.metaKey;
+        if (mod && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
+          const selection = terminal.getSelection();
+          if (selection) {
+            navigator.clipboard.writeText(selection).catch(() => {});
+          }
+          return false;
+        }
+        if (mod && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
+          navigator.clipboard.readText().then((text) => {
+            if (text) terminal.paste(text);
+          }).catch(() => {});
+          return false;
+        }
+        return true;
+      });
+
       requestAnimationFrame(() => {
         if (fitAddonRef.current && containerRef.current) {
           const rect = containerRef.current.getBoundingClientRect();
           if (rect.width > 0 && rect.height > 0) {
             try {
-              fitAddonRef.current.fit();
+              fitAddon.fit();
+              const cols = terminal.cols;
+              const rows = terminal.rows;
+              resizeTerminal(sessionId, rows, cols).catch(() => {});
             } catch {}
           }
         }
+        setTerminalReady(true);
       });
-    }
-  }, [visible]);
 
-  return (
-    <Box
-      ref={containerRef}
-      sx={{
-        height: '100%',
-        width: '100%',
-        backgroundColor: appearance.background,
-        visibility: visible && terminalReady ? 'visible' : 'hidden',
-        '& .xterm': { height: '100%', p: 1 },
-      }}
-    />
-  );
-}
+      if (copyOnSelect) {
+        selectionChangeOffRef.current = terminal.onSelectionChange(() => {
+          const selection = terminal.getSelection();
+          if (selection) {
+            navigator.clipboard.writeText(selection).catch(() => {});
+          }
+        });
+      }
+
+      if (pasteOnMiddleClick) {
+        const handler = (e: MouseEvent) => {
+          if (e.button === 1) {
+            e.preventDefault();
+            navigator.clipboard.readText().then((text) => {
+              if (text) {
+                terminal.paste(text);
+              }
+            }).catch(() => {});
+          }
+        };
+        containerRef.current.addEventListener('mousedown', handler);
+        middleClickHandlerRef.current = handler;
+      }
+
+      getCurrentWebviewWindow().onDragDropEvent((event) => {
+        if (event.payload.type === 'drop') {
+          const paths = event.payload.paths;
+          if (paths && paths.length > 0) {
+            const formatted = paths.map((p: string) =>
+              p.includes(' ') ? `'${p}'` : p
+            );
+            terminal.paste(formatted.join(' '));
+          }
+        }
+      }).then((unlisten) => {
+        dragDropUnlistenRef.current = unlisten;
+      }).catch(() => {});
+
+      terminal.onData((data) => {
+        const bytes = textEncoderRef.current.encode(data);
+        writeToTerminal(sessionId, Array.from(bytes)).catch(() => {});
+
+        if (data === '\r') {
+          const cmd = lineBufferRef.current.trim();
+          if (cmd) {
+            lastCommandRef.current = cmd;
+            parseCommand(cmd, sessionId).then((result) => {
+              lastEntryIdRef.current = result.entryId;
+            }).catch(() => {});
+          }
+          lineBufferRef.current = '';
+        } else if (data === '\x7f') {
+          lineBufferRef.current = lineBufferRef.current.slice(0, -1);
+        } else if (data === '\x03') {
+          lineBufferRef.current = '';
+        } else if (data === '\x15') {
+          lineBufferRef.current = '';
+        } else if (data === '\x17') {
+          const trimmed = lineBufferRef.current.trimEnd();
+          const lastSpace = trimmed.lastIndexOf(' ');
+          lineBufferRef.current = lastSpace >= 0 ? trimmed.slice(0, lastSpace) : '';
+        } else if (data === '\x1b[3~') {
+          // Delete key - no-op for line buffer (forward delete)
+        } else if (data.startsWith('\x1b')) {
+          // Escape sequences (arrow keys, etc.) - ignore
+        } else {
+          let printable = true;
+          for (let i = 0; i < data.length; i++) {
+            const code = data.charCodeAt(i);
+            if (code < 32 && code !== 9) {
+              printable = false;
+              break;
+            }
+          }
+          if (printable) {
+            lineBufferRef.current += data;
+          }
+        }
+      });
+
+      resizeOffRef.current = terminal.onResize(({ cols, rows }) => {
+        resizeTerminal(sessionId, rows, cols).catch(() => {});
+      });
+
+      terminal.onTitleChange((title) => {
+        onTitleChange?.(sessionId, title);
+      });
+
+      terminalRef.current = terminal;
+      fitAddonRef.current = fitAddon;
+      searchAddonRef.current = searchAddon;
+
+      const unlisteners = unlistenersRef.current;
+
+      listen<{ session_id: string; data: string }>('terminal-output', (event) => {
+        if (event.payload.session_id === sessionId) {
+          terminal.write(event.payload.data);
+        }
+      }).then((unlisten) => {
+        unlisteners.push(unlisten);
+      });
+
+      listen<{ session_id: string; exit_code: number | null }>('terminal-closed', (event) => {
+        if (event.payload.session_id === sessionId) {
+          if (lastEntryIdRef.current && event.payload.exit_code != null) {
+            recordExitCode(lastEntryIdRef.current, event.payload.exit_code).catch(() => {});
+          }
+          if (event.payload.exit_code != null && event.payload.exit_code !== 0 && lastCommandRef.current) {
+            emit('auto-trigger-agent', {
+              triggerType: 'auto_failure',
+              command: lastCommandRef.current,
+              exitCode: event.payload.exit_code,
+              sessionId,
+            }).catch(() => {});
+          }
+          terminal.write(`\r\n\x1b[90m${t('output.process_exited')}\x1b[0m\r\n`);
+          onExit?.(sessionId);
+        }
+      }).then((unlisten) => {
+        unlisteners.push(unlisten);
+      });
+
+      listen<{ session_id: string; error: string }>('terminal-error', (event) => {
+        if (event.payload.session_id === sessionId) {
+          terminal.write(`\r\n\x1b[31m${t('output.error', { error: event.payload.error })}\x1b[0m\r\n`);
+        }
+      }).then((unlisten) => {
+        unlisteners.push(unlisten);
+      });
+
+      const resizeObserver = new ResizeObserver(() => {
+        handleResize();
+      });
+      resizeObserver.observe(containerRef.current);
+
+      window.addEventListener('resize', handleResize);
+
+      return () => {
+        if (resizeTimerRef.current) {
+          clearTimeout(resizeTimerRef.current);
+        }
+        window.removeEventListener('resize', handleResize);
+        resizeObserver.disconnect();
+        selectionChangeOffRef.current?.dispose();
+        selectionChangeOffRef.current = null;
+        if (middleClickHandlerRef.current && containerRef.current) {
+          containerRef.current.removeEventListener('mousedown', middleClickHandlerRef.current);
+          middleClickHandlerRef.current = null;
+        }
+        dragDropUnlistenRef.current?.();
+        dragDropUnlistenRef.current = null;
+        resizeOffRef.current?.dispose();
+        resizeOffRef.current = null;
+        for (const unlisten of unlistenersRef.current) {
+          unlisten();
+        }
+        unlistenersRef.current = [];
+        terminal.dispose();
+        terminalRef.current = null;
+        fitAddonRef.current = null;
+        searchAddonRef.current = null;
+      };
+    }, [sessionId]);
+
+    useEffect(() => {
+      if (!terminalRef.current) return;
+      terminalRef.current.options.theme = buildTheme(appearance);
+      terminalRef.current.options.cursorBlink = appearance.cursorBlink;
+      terminalRef.current.options.cursorStyle = appearance.cursorStyle;
+      terminalRef.current.options.fontSize = appearance.fontSize;
+      terminalRef.current.options.fontFamily = appearance.fontFamily;
+      terminalRef.current.options.lineHeight = appearance.lineHeight;
+    }, [appearance]);
+
+    useEffect(() => {
+      if (terminalRef.current) {
+        terminalRef.current.options.scrollback = scrollback;
+      }
+    }, [scrollback]);
+
+    useEffect(() => {
+      if (!terminalRef.current) return;
+      selectionChangeOffRef.current?.dispose();
+      selectionChangeOffRef.current = null;
+      if (copyOnSelect) {
+        selectionChangeOffRef.current = terminalRef.current.onSelectionChange(() => {
+          const selection = terminalRef.current?.getSelection();
+          if (selection) {
+            navigator.clipboard.writeText(selection).catch(() => {});
+          }
+        });
+      }
+    }, [copyOnSelect]);
+
+    useEffect(() => {
+      if (!containerRef.current) return;
+      if (middleClickHandlerRef.current) {
+        containerRef.current.removeEventListener('mousedown', middleClickHandlerRef.current);
+        middleClickHandlerRef.current = null;
+      }
+      if (pasteOnMiddleClick) {
+        const handler = (e: MouseEvent) => {
+          if (e.button === 1) {
+            e.preventDefault();
+            navigator.clipboard.readText().then((text) => {
+              if (text) {
+                terminalRef.current?.paste(text);
+              }
+            }).catch(() => {});
+          }
+        };
+        containerRef.current.addEventListener('mousedown', handler);
+        middleClickHandlerRef.current = handler;
+      }
+    }, [pasteOnMiddleClick]);
+
+    useEffect(() => {
+      if (visible && terminalRef.current && fitAddonRef.current && containerRef.current) {
+        requestAnimationFrame(() => {
+          if (fitAddonRef.current && containerRef.current) {
+            const rect = containerRef.current.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              try {
+                fitAddonRef.current.fit();
+              } catch {}
+            }
+          }
+        });
+      }
+    }, [visible]);
+
+    return (
+      <Box
+        ref={containerRef}
+        sx={{
+          height: '100%',
+          width: '100%',
+          backgroundColor: appearance.background,
+          visibility: visible && terminalReady ? 'visible' : 'hidden',
+          '& .xterm': { height: '100%', p: 1 },
+        }}
+      />
+    );
+  },
+);
