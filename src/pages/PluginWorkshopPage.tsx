@@ -461,7 +461,7 @@ export function PluginWorkshopPage() {
     if (permissionRequest) {
       try {
         await respondPermission(permissionRequest.conversationId, approved, alwaysAllow);
-      } catch (err) { console.error('PluginWorkshop: operation failed', err); }
+      } catch (err) { console.error('PluginWorkshopPage: failed to respond to permission', err); }
       setPermissionRequest(null);
     }
   }, [permissionRequest]);
