@@ -87,7 +87,7 @@ export function AiCopilotPage() {
           setConversationId(conv.id);
           setMessages([]);
         }
-      } catch {}
+      } catch (err) { console.error('AiCopilotPage: operation failed', err); }
     };
     initConversation();
   }, [boundAgentId]);
@@ -117,7 +117,7 @@ export function AiCopilotPage() {
               updateConversationTitle(conversationId, autoTitle).catch((e) => notify(String(e)));
             }
           }
-        } catch {}
+        } catch (err) { console.error('AiCopilotPage: operation failed', err); }
         setStreamingContent('');
         setLoading(false);
         streamingMsgIdRef.current = null;
@@ -181,7 +181,7 @@ export function AiCopilotPage() {
     setToolCalls([]);
     toolCallCounterRef.current = 0;
 
-    try { await saveMessage(userMsg); } catch {}
+    try { await saveMessage(userMsg); } catch (err) { console.error('AiCopilotPage: operation failed', err); }
 
     const assistantMsgId = crypto.randomUUID();
     streamingMsgIdRef.current = assistantMsgId;
@@ -260,7 +260,7 @@ export function AiCopilotPage() {
     if (conversationId) {
       try {
         await stopAgent(conversationId);
-      } catch {}
+      } catch (err) { console.error('AiCopilotPage: operation failed', err); }
     }
     setLoading(false);
     setStreamingContent('');
@@ -273,7 +273,7 @@ export function AiCopilotPage() {
       const conv = await createConversation(boundAgentId, 'AI Copilot');
       setConversationId(conv.id);
       setMessages([]);
-    } catch {}
+    } catch (err) { console.error('AiCopilotPage: operation failed', err); }
   };
 
   if (!boundAgentId) {

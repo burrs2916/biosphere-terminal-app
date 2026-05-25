@@ -114,7 +114,7 @@ export function AgentChat() {
         if (activeConversationId) {
           try {
             await loadMessages(activeConversationId);
-          } catch {}
+          } catch (err) { console.error('AgentChat: failed to load messages after agent-done', err); }
           const conv = useAgentStore.getState().conversations.find((c) => c.id === activeConversationId);
           if (conv) {
             const isDefaultTitle = conv.title === t('chat.new_conversation_title') || conv.title === 'New Conversation' || conv.title === 'AI Copilot';
@@ -205,7 +205,7 @@ export function AgentChat() {
     if (permissionRequest) {
       try {
         await respondPermission(permissionRequest.conversationId, approved, alwaysAllow);
-      } catch {}
+      } catch (err) { console.error('AgentChat: failed to respond to permission', err); }
       setPermissionRequest(null);
     }
   }, [permissionRequest]);
@@ -236,7 +236,7 @@ export function AgentChat() {
     setToolCalls([]);
     toolCallCounterRef.current = 0;
 
-    try { await saveMessage(userMsg); } catch {}
+    try { await saveMessage(userMsg); } catch (err) { console.error('AgentChat: failed to save message', err); notify('Failed to save message'); }
 
     const assistantMsgId = crypto.randomUUID();
     streamingMsgIdRef.current = assistantMsgId;
@@ -267,7 +267,7 @@ export function AgentChat() {
     if (activeConversationId) {
       try {
         await stopAgent(activeConversationId);
-      } catch {}
+      } catch (err) { console.error('AgentChat: failed to stop agent', err); }
     }
     setLoading(false);
     setStreamingContent('');

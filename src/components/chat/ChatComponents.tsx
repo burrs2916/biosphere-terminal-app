@@ -555,7 +555,7 @@ export function ChatInputArea({
           onAttachmentsChange?.([...attachments, ...unique]);
         }
       }
-    } catch {}
+    } catch (err) { console.error('ChatComponents: operation failed', err); }
   }, [attachments, onAttachmentsChange, t]);
 
   const handleRemoveAttachment = useCallback((path: string) => {

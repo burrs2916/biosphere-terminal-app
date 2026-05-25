@@ -508,7 +508,7 @@ export function AgentManager() {
                               if (selected && typeof selected === 'string') {
                                 setEditing({ ...editing, workspaceDir: selected });
                               }
-                            } catch {}
+                            } catch (err) { console.error('AgentManager: operation failed', err); }
                           }}
                         >
                           <FolderOpenIcon size={20} />

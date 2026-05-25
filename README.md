@@ -72,8 +72,8 @@ Biosphere Terminal App
 ## Getting Started
 
 ### Prerequisites
-- Node.js 18+ and npm
-- Rust 1.70+ with `cargo`
+- Node.js 20+ and pnpm
+- Rust 1.77+ with `cargo`
 - Tauri CLI: `cargo install tauri-cli`
 
 ### Installation
@@ -84,16 +84,16 @@ git clone https://github.com/burrs2916/biosphere-terminal-app.git
 cd biosphere-terminal-app
 
 # Install frontend dependencies
-npm install
+pnpm install
 
 # Start development server
-npm run tauri dev
+pnpm tauri dev
 ```
 
 ### Build for Production
 
 ```bash
-npm run tauri build
+pnpm tauri build
 ```
 
 ## Project Structure

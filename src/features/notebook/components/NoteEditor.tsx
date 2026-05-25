@@ -358,7 +358,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
 
   const handleAiCancel = useCallback(async () => {
     if (aiConvIdRef.current) {
-      try { await stopAgent(aiConvIdRef.current); } catch {}
+      try { await stopAgent(aiConvIdRef.current); } catch (err) { console.error('NoteEditor: operation failed', err); }
       aiConvIdRef.current = null;
     }
     setAiOptimizing(false);
@@ -414,7 +414,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             <IconButton
               size="small"
               onClick={() => {
-                try { revealItemInDir(selectedNote!.note.filePath); } catch {}
+                try { revealItemInDir(selectedNote!.note.filePath); } catch (err) { console.error('NoteEditor: operation failed', err); }
               }}
               sx={{
                 borderRadius: 2,

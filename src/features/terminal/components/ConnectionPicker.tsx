@@ -93,7 +93,7 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
     if (conn.connection_type === 'ssh') {
       try {
         sshInfo = JSON.parse(conn.config_json);
-      } catch {}
+      } catch (err) { console.error('ConnectionPicker: operation failed', err); }
     }
     onConnect({
       connectionType: conn.connection_type as 'local' | 'ssh',
@@ -357,7 +357,7 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
                     try {
                       const s = JSON.parse(conn.config_json);
                       subtitle = `${s.username}@${s.host}:${s.port}`;
-                    } catch {}
+                    } catch (err) { console.error('ConnectionPicker: operation failed', err); }
                     return (
                       <ListItemButton
                         key={conn.id}

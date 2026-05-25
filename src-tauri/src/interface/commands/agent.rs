@@ -697,7 +697,7 @@ Your workspace directory is: `{}`\n\
                     pending.insert(req_with_id.conversation_id.clone(), (tx, agent_id.clone(), req_with_id.tool_name.clone()));
                 }
 
-                let _ = handle.emit("agent-permission-request", serde_json::json!({
+                if let Err(e) = handle.emit("agent-permission-request", serde_json::json!({
                     "conversationId": req_with_id.conversation_id,
                     "agentId": agent_id,
                     "toolName": req_with_id.tool_name,
@@ -707,7 +707,9 @@ Your workspace directory is: `{}`\n\
                         crate::plugins::ai_agent::permission::ToolRiskLevel::High => "high",
                     },
                     "description": req_with_id.description,
-                }));
+                })) {
+                    tracing::warn!("[run_agent] failed to emit agent-permission-request: {}", e);
+                }
 
                 match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
                     Ok(Ok(result)) => result,
@@ -813,7 +815,9 @@ Your workspace directory is: `{}`\n\
 
     let message_persister = Arc::new(move |pm: crate::plugins::ai_agent::engine::PersistMessage| {
         if pm.role == "system_compaction" {
-            let _ = persister_service.update_compaction_summary(&persister_conv_id, &pm.content);
+            if let Err(e) = persister_service.update_compaction_summary(&persister_conv_id, &pm.content) {
+                tracing::warn!("[run_agent] persister: failed to update compaction summary: {}", e);
+            }
             return;
         }
         let msg_id = if pm.role == "tool" {
@@ -880,21 +884,27 @@ Your workspace directory is: `{}`\n\
     let result = engine.run(&message, history,
         move |chunk| {
             if chunk.starts_with("[Auto-compacting") || chunk.starts_with("[Compacted:") || chunk.starts_with("[Compaction") || chunk.starts_with("[Context too long") {
-                let _ = emit_compaction.emit("agent-compaction", serde_json::json!({
+                if let Err(e) = emit_compaction.emit("agent-compaction", serde_json::json!({
                     "conversationId": conv_id_compaction,
                     "message": chunk.trim(),
-                }));
+                })) {
+                    tracing::warn!("[run_agent] failed to emit agent-compaction: {}", e);
+                }
             }
-            let _ = emit_handle.emit("agent-chunk", serde_json::json!({
+            if let Err(e) = emit_handle.emit("agent-chunk", serde_json::json!({
                 "conversationId": conv_id_clone,
                 "chunk": chunk,
-            }));
+            })) {
+                tracing::warn!("[run_agent] failed to emit agent-chunk: {}", e);
+            }
         },
         move |tool_event| {
-            let _ = emit_tool.emit("agent-tool-call", serde_json::json!({
+            if let Err(e) = emit_tool.emit("agent-tool-call", serde_json::json!({
                 "conversationId": conv_id_tool,
                 "toolCall": tool_event,
-            }));
+            })) {
+                tracing::warn!("[run_agent] failed to emit agent-tool-call: {}", e);
+            }
         },
     ).await;
 
@@ -979,23 +989,28 @@ Your workspace directory is: `{}`\n\
                 }
             }
 
-            // Update conversation timestamp for proper ordering
-            let _ = service.touch_conversation(&conv_id);
+            if let Err(e) = service.touch_conversation(&conv_id) {
+                tracing::warn!("[run_agent] failed to touch conversation {}: {}", conv_id, e);
+            }
 
             tracing::info!("[run_agent] emitting agent-done, conv_id={}, response_len={}", conv_id, run_result.final_content.len());
-            let _ = app_handle.emit("agent-done", serde_json::json!({
+            if let Err(e) = app_handle.emit("agent-done", serde_json::json!({
                 "conversationId": conv_id,
                 "response": run_result.final_content,
-            }));
+            })) {
+                tracing::warn!("[run_agent] failed to emit agent-done for {}: {}", conv_id, e);
+            }
             tracing::info!("[run_agent] agent-done emitted successfully, conv_id={}", conv_id);
             Ok(run_result.final_content)
         }
         Err(e) => {
             tracing::error!("[run_agent] engine.run failed: {}, conv_id={}", e, conv_id);
-            let _ = app_handle.emit("agent-error", serde_json::json!({
+            if let Err(emit_err) = app_handle.emit("agent-error", serde_json::json!({
                 "conversationId": conv_id,
                 "error": e,
-            }));
+            })) {
+                tracing::warn!("[run_agent] failed to emit agent-error for {}: {}", conv_id, emit_err);
+            }
             tracing::info!("[run_agent] agent-error emitted, conv_id={}", conv_id);
             Err(e)
         }

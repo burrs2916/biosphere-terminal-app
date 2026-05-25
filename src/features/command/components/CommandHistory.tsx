@@ -110,7 +110,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
     try {
       const data = await getCommandHistory(500);
       setAllEntries(data);
-    } catch {}
+    } catch (err) { console.error('CommandHistory: operation failed', err); }
     setLoading(false);
   }, []);
 
@@ -128,7 +128,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
         try {
           const results = await searchCommandHistory(value);
           setSearchResults(results);
-        } catch {}
+        } catch (err) { console.error('CommandHistory: operation failed', err); }
       }, 300);
     } else {
       setSearchResults(null);
@@ -254,7 +254,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
       if (results.length > 0) {
         setSelectedExistingNoteId(results[0].id);
       }
-    } catch {}
+    } catch (err) { console.error('CommandHistory: operation failed', err); }
   };
 
   const handleGroupChange = (gid: string) => {

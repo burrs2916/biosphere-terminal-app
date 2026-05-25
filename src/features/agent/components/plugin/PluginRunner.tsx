@@ -80,7 +80,7 @@ function saveParamMemory(pluginId: string, toolName: string, values: Record<stri
   try {
     const key = `${PARAM_MEMORY_PREFIX}${pluginId}_${toolName}`;
     localStorage.setItem(key, JSON.stringify(values));
-  } catch {}
+  } catch { console.error('PluginRunner: saveParamMemory failed'); }
 }
 
 function loadParamMemory(pluginId: string, toolName: string): Record<string, unknown> | null {
@@ -88,7 +88,7 @@ function loadParamMemory(pluginId: string, toolName: string): Record<string, unk
     const key = `${PARAM_MEMORY_PREFIX}${pluginId}_${toolName}`;
     const stored = localStorage.getItem(key);
     if (stored) return JSON.parse(stored);
-  } catch {}
+  } catch { console.error('PluginRunner: saveParamMemory failed'); }
   return null;
 }
 

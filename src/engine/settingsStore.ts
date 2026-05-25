@@ -87,7 +87,7 @@ function loadFromStorage(): AppSettings {
         appearance: { ...DEFAULT_APPEARANCE, ...parsed.appearance },
       };
     }
-  } catch {}
+  } catch (err) { console.error('settingsStore: JSON parse failed', err); }
   return DEFAULT_SETTINGS;
 }
 

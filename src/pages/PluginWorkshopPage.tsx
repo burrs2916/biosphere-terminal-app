@@ -14,6 +14,7 @@ import { PluginGroupManageDialog } from '../features/agent/components/PluginGrou
 import { UsageLogManagerDialog } from '../features/agent/components/plugin/UsageLogManagerDialog';
 import { IconRenderer } from '../components/icon/IconRenderer';
 import { useAgentStore } from '../features/agent/store/agentStore';
+import { useNotify } from '../core/notification';
 import { generatePluginScenarios, type GeneratedScenario } from '../core/services/agent.service';
 import { runAgent, saveMessage, listMessages, createConversation, listConversations, stopAgent, respondPermission, writeFrontendLog } from '../core/services/agent.service';
 import { getPluginAssistantAgentId } from '../features/agent/components/PluginAssistantTab';
@@ -95,7 +96,7 @@ export function PluginWorkshopPage() {
 
   const { plugins, loadPlugins } = usePluginStore();
   const { agents, loadAgents, loadModels } = useAgentStore();
-
+  const notify = useNotify().notify;
   const [selectedPlugin, setSelectedPlugin] = useState<PluginManifest | null>(null);
   const [scenarioCache, setScenarioCache] = useState<ScenarioCache>({});
   const [generating, setGenerating] = useState(false);
@@ -224,7 +225,7 @@ export function PluginWorkshopPage() {
           try {
             const meta = JSON.parse(c.metadata || '{}');
             return meta.pluginId === pluginId && meta.source === 'workshop';
-          } catch { return false; }
+          } catch { console.error('PluginWorkshop: failed to parse conversation metadata'); return false; }
         });
 
         if (matchingConv) {
@@ -244,7 +245,7 @@ export function PluginWorkshopPage() {
           setConversationId(conv.id);
           setMessages([]);
         }
-      } catch {} finally {
+      } catch (err) { console.error('PluginWorkshopPage: failed to initialize conversation', err); } finally {
         // Only set ready if we're still the latest generation
         if (initGenerationRef.current === generation) {
           setReady(true);
@@ -373,7 +374,8 @@ export function PluginWorkshopPage() {
         });
         convId = conv.id;
         setConversationId(convId);
-      } catch {
+      } catch (err) {
+        console.error('PluginWorkshop: createConversation failed', err);
         return;
       }
     }
@@ -389,7 +391,7 @@ export function PluginWorkshopPage() {
     setCompactionMessages([]);
     toolCallCounterRef.current = 0;
 
-    try { await saveMessage(userMsg); } catch {}
+    try { await saveMessage(userMsg); } catch (err) { console.error('PluginWorkshopPage: failed to save message', err); notify('Failed to save message'); }
 
     const assistantMsgId = crypto.randomUUID();
     streamingMsgIdRef.current = assistantMsgId;
@@ -416,7 +418,7 @@ export function PluginWorkshopPage() {
 
   const handleStop = useCallback(async () => {
     if (conversationId) {
-      try { await stopAgent(conversationId); } catch {}
+      try { await stopAgent(conversationId); } catch (err) { console.error('PluginWorkshopPage: failed to stop agent', err); }
     }
     setLoading(false);
     setStreamingContent('');
@@ -434,7 +436,7 @@ export function PluginWorkshopPage() {
       setToolCalls([]);
       setStreamingContent('');
       setCompactionMessages([]);
-    } catch {}
+    } catch (err) { console.error('PluginWorkshopPage: failed to create new conversation', err); }
   }, [workshopAgentId, selectedPlugin]);
 
   const handleToolResult = useCallback(async (toolName: string, result: { success: boolean; output: string; durationMs: number }, params: Record<string, unknown>) => {
@@ -459,7 +461,7 @@ export function PluginWorkshopPage() {
     if (permissionRequest) {
       try {
         await respondPermission(permissionRequest.conversationId, approved, alwaysAllow);
-      } catch {}
+      } catch (err) { console.error('PluginWorkshop: operation failed', err); }
       setPermissionRequest(null);
     }
   }, [permissionRequest]);

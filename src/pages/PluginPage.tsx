@@ -416,7 +416,7 @@ export function PluginPage() {
     if (permissionRequest) {
       try {
         await respondPermission(permissionRequest.conversationId, approved, alwaysAllow);
-      } catch {}
+      } catch (err) { console.error('PluginPage: operation failed', err); }
       setPermissionRequest(null);
     }
   };
@@ -477,7 +477,7 @@ export function PluginPage() {
                 }
                 logContext += '\n请根据以上使用日志数据，重点修复失败问题并优化性能。';
               }
-            } catch {}
+            } catch (err) { console.error('PluginPage: operation failed', err); }
             const prompt = t('plugin_page.refine_prompt', { name: pluginName, id: pluginId }) + logContext;
             sendMessage(prompt);
           }}
@@ -523,7 +523,7 @@ export function PluginPage() {
                       }
                       logContext += '\n请根据以上使用日志数据，重点修复失败问题并优化性能。';
                     }
-                  } catch {}
+                  } catch (err) { console.error('PluginPage: operation failed', err); }
                   const prompt = (suggestion || t('plugin_page.refine_prompt', { name: pluginName, id: pluginId })) + logContext;
                   sendMessage(prompt);
                 }} />

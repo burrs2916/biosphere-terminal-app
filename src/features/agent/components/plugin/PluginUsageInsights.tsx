@@ -358,7 +358,7 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
                     a.click();
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
-                  } catch {}
+                  } catch (err) { console.error('PluginUsageInsights: operation failed', err); }
                 }}
                 sx={{ p: 0.25, color: 'text.secondary' }}
               >
@@ -373,7 +373,7 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
                   try {
                     await clearPluginUsageLogs(plugin.id);
                     loadData();
-                  } catch {}
+                  } catch (err) { console.error('PluginUsageInsights: operation failed', err); }
                 }}
                 sx={{ p: 0.25, color: 'text.secondary' }}
               >

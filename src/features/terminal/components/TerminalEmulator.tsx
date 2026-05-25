@@ -101,7 +101,9 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
             if (profile) {
               try {
                 setProfileAppearance(JSON.parse(profile.config_json));
-              } catch {}
+              } catch (err) {
+                console.error('TerminalEmulator: JSON.parse profile config from listProfiles', err);
+              }
             }
           }).catch((e) => notify(String(e)));
         }).catch((e) => notify(String(e)));
@@ -110,7 +112,9 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
           if (profile) {
             try {
               setProfileAppearance(JSON.parse(profile.config_json));
-            } catch {}
+            } catch (err) {
+              console.error('TerminalEmulator: JSON.parse default profile config', err);
+            }
           }
         }).catch((e) => notify(String(e)));
       }
@@ -172,7 +176,9 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         if (rect.width === 0 || rect.height === 0) return;
         try {
           fitAddonRef.current.fit();
-        } catch {}
+        } catch (err) {
+          console.error('TerminalEmulator: fitAddon.fit in handleResize', err);
+        }
       }, 50);
     }, [visible]);
 
@@ -192,7 +198,8 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
 
       const fitAddon = new FitAddon();
       const webLinksAddon = new WebLinksAddon((_event: MouseEvent, uri: string) => {
-        openUrl(uri).catch(() => {
+        openUrl(uri).catch((err) => {
+          console.error('TerminalEmulator: openUrl failed', err);
           window.open(uri, '_blank');
         });
       });
@@ -213,7 +220,9 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
             webglAddon.dispose();
           });
           terminal.loadAddon(webglAddon);
-        } catch {}
+        } catch (err) {
+          console.error('TerminalEmulator: WebglAddon load failed', err);
+        }
       }
 
       terminal.open(containerRef.current);
@@ -240,7 +249,9 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
             gain.gain.value = 0.1;
             osc.start();
             osc.stop(ctx.currentTime + 0.1);
-          } catch {}
+          } catch (err) {
+            console.error('TerminalEmulator: AudioContext bell sound', err);
+          }
         }
       });
 
@@ -272,7 +283,9 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
               const cols = terminal.cols;
               const rows = terminal.rows;
               resizeTerminal(sessionId, rows, cols).catch((e) => notify(String(e)));
-            } catch {}
+            } catch (err) {
+              console.error('TerminalEmulator: fitAddon.fit in requestAnimationFrame', err);
+            }
           }
         }
         setTerminalReady(true);
@@ -502,7 +515,9 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
             if (rect.width > 0 && rect.height > 0) {
               try {
                 fitAddonRef.current.fit();
-              } catch {}
+              } catch (err) {
+                console.error('TerminalEmulator: fitAddon.fit in visible effect', err);
+              }
             }
           }
         });

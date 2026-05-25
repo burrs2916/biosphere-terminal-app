@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { AppTheme } from './theme';
 import { AppShell, Sidebar, Header, StatusBar } from './components/layout';
 import { NotificationProvider } from './core/notification';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { useLayoutStore, useSettingsStore } from './engine';
 import i18n from './core/i18n';
 import { TerminalPage } from './pages/TerminalPage';
@@ -128,7 +129,9 @@ export default function App() {
     <BrowserRouter>
       <AppTheme>
         <NotificationProvider>
-          <RootRouter />
+          <ErrorBoundary>
+            <RootRouter />
+          </ErrorBoundary>
         </NotificationProvider>
       </AppTheme>
     </BrowserRouter>
