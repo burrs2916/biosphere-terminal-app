@@ -139,6 +139,25 @@ impl AiProviderRepo {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    pub fn get_by_id(db: &Database, id: &str) -> Result<Option<AiProviderRow>, String> {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT id, name, api_key, logo, enabled, created_at, updated_at FROM ai_providers WHERE id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![id], |row| {
+                let enabled: i32 = row.get(4)?;
+                Ok(AiProviderRow {
+                    id: row.get(0)?, name: row.get(1)?, api_key: row.get(2)?,
+                    logo: row.get(3)?, enabled: enabled != 0,
+                    created_at: row.get(5)?, updated_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut result: Vec<AiProviderRow> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        Ok(result.pop())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,6 +378,26 @@ impl AiEndpointRepo {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    pub fn get_by_id(db: &Database, id: &str) -> Result<Option<AiEndpointRow>, String> {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT id, provider_id, name, api_type, base_url, auth_type, custom_auth_header, enabled, created_at, updated_at FROM ai_endpoints WHERE id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![id], |row| {
+                let enabled: i32 = row.get(7)?;
+                Ok(AiEndpointRow {
+                    id: row.get(0)?, provider_id: row.get(1)?, name: row.get(2)?,
+                    api_type: row.get(3)?, base_url: row.get(4)?, auth_type: row.get(5)?,
+                    custom_auth_header: row.get(6)?, enabled: enabled != 0,
+                    created_at: row.get(8)?, updated_at: row.get(9)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut result: Vec<AiEndpointRow> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        Ok(result.pop())
+    }
 }
 
 pub struct AiModelRepo;
@@ -445,6 +484,29 @@ impl AiModelRepo {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    pub fn get_by_id(db: &Database, id: &str) -> Result<Option<AiModelRow>, String> {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT id, name, ref_key, endpoint_id, reasoning, input_types, context_window, max_tokens, enabled, created_at, updated_at FROM ai_models WHERE id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![id], |row| {
+                let reasoning: i32 = row.get(4)?;
+                let enabled: i32 = row.get(8)?;
+                let input_types_str: String = row.get(5)?;
+                let input_types: Vec<String> = serde_json::from_str(&input_types_str).unwrap_or_else(|_| vec!["text".to_string()]);
+                Ok(AiModelRow {
+                    id: row.get(0)?, name: row.get(1)?, ref_key: row.get(2)?,
+                    endpoint_id: row.get(3)?, reasoning: reasoning != 0, input_types,
+                    context_window: row.get(6)?, max_tokens: row.get(7)?,
+                    enabled: enabled != 0, created_at: row.get(9)?, updated_at: row.get(10)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut result: Vec<AiModelRow> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        Ok(result.pop())
+    }
 }
 
 pub struct AiAgentRepo;
@@ -512,6 +574,32 @@ impl AiAgentRepo {
         conn.execute("DELETE FROM ai_agents WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn get_by_id(db: &Database, id: &str) -> Result<Option<AiAgentRow>, String> {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT id, name, description, model_id, system_prompt, temperature, max_iterations, tool_ids, trigger_type, auto_confirm, permission_mode, always_allowed_tools, fallback_model_id, workspace_dir, created_at, updated_at FROM ai_agents WHERE id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![id], |row| {
+                let tool_ids_str: String = row.get(7)?;
+                let tool_ids: Vec<String> = serde_json::from_str(&tool_ids_str).unwrap_or_default();
+                let auto_confirm: i32 = row.get(9)?;
+                let always_allowed_str: String = row.get(11)?;
+                let always_allowed_tools: Vec<String> = serde_json::from_str(&always_allowed_str).unwrap_or_default();
+                Ok(AiAgentRow {
+                    id: row.get(0)?, name: row.get(1)?, description: row.get(2)?,
+                    model_id: row.get(3)?, system_prompt: row.get(4)?, temperature: row.get(5)?,
+                    max_iterations: row.get(6)?, tool_ids, trigger_type: row.get(8)?,
+                    auto_confirm: auto_confirm != 0, permission_mode: row.get(10)?,
+                    always_allowed_tools, fallback_model_id: row.get(12)?,
+                    workspace_dir: row.get(13)?, created_at: row.get(14)?, updated_at: row.get(15)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut result: Vec<AiAgentRow> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        Ok(result.pop())
     }
 }
 

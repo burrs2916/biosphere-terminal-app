@@ -4,9 +4,21 @@ use std::io::{self, Seek};
 const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024;
 
 pub fn init(log_dir: &Path) {
-    let log_file = log_dir.join("biosphere.log");
-
-    let file_appender = RollingFileAppender::new(log_dir, "biosphere.log");
+    let file_appender = match RollingFileAppender::new(log_dir, "biosphere.log") {
+        Ok(fa) => fa,
+        Err(e) => {
+            eprintln!("Failed to open log file: {}. Logging to stderr only.", e);
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/dev/null")
+                .expect("Cannot open /dev/null");
+            RollingFileAppender {
+                file: std::sync::Mutex::new(file),
+                path: log_dir.join("biosphere.log"),
+            }
+        }
+    };
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -20,7 +32,7 @@ pub fn init(log_dir: &Path) {
         .with_file(true)
         .init();
 
-    tracing::info!("Logging initialized, log file: {:?}", log_file);
+    tracing::info!("Logging initialized, log file: {:?}", log_dir.join("biosphere.log"));
     tracing::info!("Max log size: {} bytes", MAX_LOG_SIZE);
 }
 
@@ -30,17 +42,16 @@ struct RollingFileAppender {
 }
 
 impl RollingFileAppender {
-    fn new(directory: &Path, file_name: &str) -> Self {
+    fn new(directory: &Path, file_name: &str) -> io::Result<Self> {
         let path = directory.join(file_name);
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
-            .expect("failed to open log file");
-        RollingFileAppender {
+            .open(&path)?;
+        Ok(RollingFileAppender {
             file: std::sync::Mutex::new(file),
             path,
-        }
+        })
     }
 
     fn check_rotation(&self, file: &mut std::fs::File) {
@@ -55,7 +66,7 @@ impl RollingFileAppender {
 
 impl io::Write for RollingFileAppender {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut file = self.file.lock().expect("log lock poisoned");
+        let mut file = self.file.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("log lock poisoned: {}", e)))?;
         self.check_rotation(&mut file);
         let result = file.write(buf);
         let _ = file.flush();
@@ -65,7 +76,7 @@ impl io::Write for RollingFileAppender {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let mut file = self.file.lock().expect("log lock poisoned");
+        let mut file = self.file.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("log lock poisoned: {}", e)))?;
         file.flush()?;
         io::stdout().flush()
     }
@@ -75,7 +86,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RollingFileAppender {
     type Writer = RollingFileAppenderGuard<'a>;
 
     fn make_writer(&'a self) -> Self::Writer {
-        let mut file = self.file.lock().expect("log lock poisoned");
+        let mut file = self.file.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("log lock poisoned: {}", e))).expect("log lock poisoned");
         self.check_rotation(&mut file);
         RollingFileAppenderGuard(file)
     }

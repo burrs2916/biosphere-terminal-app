@@ -382,20 +382,16 @@ pub async fn run_agent(
     let skip_tools = disable_tools.unwrap_or(false);
     tracing::info!("[run_agent] called agent_id={}, conv_id={:?}, message_len={}, disable_tools={}", agent_id, conversation_id, message.len(), skip_tools);
     tracing::debug!("[run_agent] message preview: {}...", &message[..message.len().min(200)]);
-    let agents = service.list_agents()?;
-    let agent = agents.iter().find(|a| a.id == agent_id)
+    let agent = service.get_agent_by_id(&agent_id)?
         .ok_or_else(|| "Agent not found".to_string())?;
 
-    let models = service.list_models()?;
-    let model = models.iter().find(|m| m.id == agent.model_id)
+    let model = service.get_model_by_id(&agent.model_id)?
         .ok_or_else(|| "Model not found".to_string())?;
 
-    let endpoints = service.list_endpoints()?;
-    let endpoint = endpoints.iter().find(|e| e.id == model.endpoint_id)
+    let endpoint = service.get_endpoint_by_id(&model.endpoint_id)?
         .ok_or_else(|| "Endpoint not found".to_string())?;
 
-    let providers = service.list_providers()?;
-    let provider = providers.iter().find(|p| p.id == endpoint.provider_id)
+    let provider = service.get_provider_by_id(&endpoint.provider_id)?
         .ok_or_else(|| "Provider not found".to_string())?;
 
     let config = crate::plugins::ai_agent::provider::ProviderConfig {
@@ -410,9 +406,9 @@ pub async fn run_agent(
     let llm_provider_arc: Arc<dyn crate::plugins::ai_agent::provider::LlmProvider> = Arc::new(llm_provider);
 
     let fallback_provider_and_model: Option<(Arc<dyn crate::plugins::ai_agent::provider::LlmProvider>, String)> = if !agent.fallback_model_id.is_empty() {
-        if let Some(fb_model) = models.iter().find(|m| m.id == agent.fallback_model_id) {
-            if let Some(fb_endpoint) = endpoints.iter().find(|e| e.id == fb_model.endpoint_id) {
-                if let Some(fb_provider_row) = providers.iter().find(|p| p.id == fb_endpoint.provider_id) {
+        if let Ok(Some(fb_model)) = service.get_model_by_id(&agent.fallback_model_id) {
+            if let Ok(Some(fb_endpoint)) = service.get_endpoint_by_id(&fb_model.endpoint_id) {
+                if let Ok(Some(fb_provider_row)) = service.get_provider_by_id(&fb_endpoint.provider_id) {
                     let fb_config = crate::plugins::ai_agent::provider::ProviderConfig {
                         api_key: fb_provider_row.api_key.clone(),
                         base_url: fb_endpoint.base_url.clone(),
@@ -825,15 +821,27 @@ Your workspace directory is: `{}`\n\
             if let Some(id) = tc_id {
                 format!("tool-{}-{}", persister_conv_id, id)
             } else {
-                let counter = *persister_tool_counter.lock().unwrap();
-                *persister_tool_counter.lock().unwrap() += 1;
+                let counter = match persister_tool_counter.lock() {
+                    Ok(mut guard) => {
+                        let c = *guard;
+                        *guard += 1;
+                        c
+                    }
+                    Err(_) => return,
+                };
                 tracing::warn!("[run_agent] persister: tool_call_id is empty for tool message, using counter={}", counter);
                 format!("tool-{}-auto-{}", persister_conv_id, counter)
             }
         } else {
-            let counter = *persister_asst_counter.lock().unwrap();
+            let counter = match persister_asst_counter.lock() {
+                Ok(mut guard) => {
+                    let c = *guard;
+                    *guard += 1;
+                    c
+                }
+                Err(_) => return,
+            };
             let id = format!("asst-{}-{}-{}", persister_conv_id, persister_run_ts, counter);
-            *persister_asst_counter.lock().unwrap() += 1;
             id
         };
         let tool_calls_str = pm.tool_calls.as_ref()
@@ -900,7 +908,8 @@ Your workspace directory is: `{}`\n\
     match result {
         Ok(run_result) => {
             tracing::info!("[run_agent] run_result: final_content_len={}, total_messages={}", run_result.final_content.len(), run_result.messages.len());
-            let already_persisted: Vec<String> = persisted_ids.lock().unwrap().drain(..).collect();
+            let already_persisted: Vec<String> = persisted_ids.lock()
+                .map_err(|e| format!("Agent persister error: {}", e))?.drain(..).collect();
             tracing::info!(
                 "[run_agent] {} messages already persisted incrementally, checking for any missed",
                 already_persisted.len()
@@ -1134,8 +1143,7 @@ pub async fn generate_plugin_scenarios(
     let plugin = plugin_service.get_plugin(&plugin_id)?
         .ok_or_else(|| format!("Plugin '{}' not found", plugin_id))?;
 
-    let agents = service.list_agents()?;
-    let agent = agents.iter().find(|a| a.id == agent_id)
+    let agent = service.get_agent_by_id(&agent_id)?
         .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
 
     let cat = category.unwrap_or_else(|| "all".to_string());
@@ -1251,16 +1259,13 @@ Generate 3-5 DIFFERENT and UNIQUE analysis scenarios. Respond ONLY with valid JS
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
     );
 
-    let models = service.list_models()?;
-    let model = models.iter().find(|m| m.id == agent.model_id)
+    let model = service.get_model_by_id(&agent.model_id)?
         .ok_or_else(|| "Model not found".to_string())?;
 
-    let endpoints = service.list_endpoints()?;
-    let endpoint = endpoints.iter().find(|e| e.id == model.endpoint_id)
+    let endpoint = service.get_endpoint_by_id(&model.endpoint_id)?
         .ok_or_else(|| "Endpoint not found".to_string())?;
 
-    let providers = service.list_providers()?;
-    let provider = providers.iter().find(|p| p.id == endpoint.provider_id)
+    let provider = service.get_provider_by_id(&endpoint.provider_id)?
         .ok_or_else(|| "Provider not found".to_string())?;
 
     let config = crate::plugins::ai_agent::provider::ProviderConfig {

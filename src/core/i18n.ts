@@ -6,11 +6,13 @@ import commonZh from '../locales/zh-CN/common.json';
 import terminalZh from '../locales/zh-CN/terminal.json';
 import notebookZh from '../locales/zh-CN/notebook.json';
 import agentZh from '../locales/zh-CN/agent.json';
+import commandZh from '../locales/zh-CN/command.json';
 
 import commonEn from '../locales/en-US/common.json';
 import terminalEn from '../locales/en-US/terminal.json';
 import notebookEn from '../locales/en-US/notebook.json';
 import agentEn from '../locales/en-US/agent.json';
+import commandEn from '../locales/en-US/command.json';
 
 const resources = {
   'zh-CN': {
@@ -18,12 +20,14 @@ const resources = {
     terminal: terminalZh,
     notebook: notebookZh,
     agent: agentZh,
+    command: commandZh,
   },
   'en-US': {
     common: commonEn,
     terminal: terminalEn,
     notebook: notebookEn,
     agent: agentEn,
+    command: commandEn,
   },
 };
 
@@ -34,7 +38,7 @@ i18n
     resources,
     fallbackLng: 'zh-CN',
     defaultNS: 'common',
-    ns: ['common', 'terminal', 'notebook', 'agent'],
+    ns: ['common', 'terminal', 'notebook', 'agent', 'command'],
     interpolation: {
       escapeValue: false,
     },

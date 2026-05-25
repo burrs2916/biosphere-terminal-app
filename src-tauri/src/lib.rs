@@ -46,7 +46,7 @@ fn get_log_dir() -> std::path::PathBuf {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = get_data_dir();
     let log_dir = get_log_dir();
 
@@ -71,7 +71,7 @@ pub fn run() {
         .setup(move |app| {
             let app_handle = app.handle();
 
-            terminal_service.set_app_handle(app_handle.clone());
+            terminal_service.set_app_handle(app_handle.clone())?;
 
             let db_path = data_dir.join("biosphere.db");
             let notes_dir = data_dir.join("notes");
@@ -229,6 +229,7 @@ pub fn run() {
             interface::commands::icon::get_custom_icon_urls,
             interface::commands::notebook::unlink_command_note,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!())?;
+
+    Ok(())
 }

@@ -1,3 +1,4 @@
+use crate::core::error::Error;
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Mutex;
@@ -7,7 +8,7 @@ pub struct Database {
 }
 
 impl Database {
-    pub fn open(path: &Path) -> Result<Self, rusqlite::Error> {
+    pub fn open(path: &Path) -> crate::core::error::Result<Self> {
         tracing::info!("[Database::open] opening database at: {:?}", path);
         let conn = Connection::open(path)?;
         let db = Database {
@@ -19,8 +20,8 @@ impl Database {
         Ok(db)
     }
 
-    fn initialize(&self) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().unwrap();
+    fn initialize(&self) -> crate::core::error::Result<()> {
+        let conn = self.conn.lock().map_err(|e| Error::Internal(format!("DB lock poisoned: {}", e)))?;
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS sessions (
@@ -248,8 +249,8 @@ impl Database {
         self.conn.lock().unwrap()
     }
 
-    fn migrate(&self) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().unwrap();
+    fn migrate(&self) -> crate::core::error::Result<()> {
+        let conn = self.conn.lock().map_err(|e| Error::Internal(format!("DB lock poisoned: {}", e)))?;
 
         let has_group_id: bool = {
             let stmt = conn.prepare("SELECT group_id FROM notes LIMIT 1");
@@ -291,8 +292,9 @@ impl Database {
         let has_cnl_context_idx: bool = {
             let mut stmt = conn.prepare(
                 "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_cnl_context'"
-            ).unwrap();
-            stmt.query_map([], |row| row.get::<_, String>(0)).unwrap().count() > 0
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.count() > 0
         };
 
         if !has_cnl_context_idx {

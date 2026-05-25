@@ -133,7 +133,7 @@ impl TerminalSessionTool {
     }
 
     async fn action_list_sessions(&self) -> Result<ToolOutput, String> {
-        let sessions = self.terminal.list_sessions();
+        let sessions = self.terminal.list_sessions().map_err(|e| e.to_string())?;
 
         let results: Vec<Value> = sessions.iter().map(|s| json!({
             "id": s,

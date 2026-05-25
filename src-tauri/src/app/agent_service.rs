@@ -48,6 +48,10 @@ impl AgentService {
         AiProviderRepo::list(&self.db)
     }
 
+    pub fn get_provider_by_id(&self, id: &str) -> Result<Option<AiProviderRow>, String> {
+        AiProviderRepo::get_by_id(&self.db, id)
+    }
+
     pub fn save_provider(&self, provider: AiProviderRow) -> Result<(), String> {
         AiProviderRepo::save(&self.db, &provider)
     }
@@ -58,6 +62,10 @@ impl AgentService {
 
     pub fn list_endpoints(&self) -> Result<Vec<AiEndpointRow>, String> {
         AiEndpointRepo::list(&self.db)
+    }
+
+    pub fn get_endpoint_by_id(&self, id: &str) -> Result<Option<AiEndpointRow>, String> {
+        AiEndpointRepo::get_by_id(&self.db, id)
     }
 
     pub fn list_endpoints_by_provider(&self, provider_id: &str) -> Result<Vec<AiEndpointRow>, String> {
@@ -74,6 +82,10 @@ impl AgentService {
 
     pub fn list_models(&self) -> Result<Vec<AiModelRow>, String> {
         AiModelRepo::list(&self.db)
+    }
+
+    pub fn get_model_by_id(&self, id: &str) -> Result<Option<AiModelRow>, String> {
+        AiModelRepo::get_by_id(&self.db, id)
     }
 
     pub fn list_models_by_endpoint(&self, endpoint_id: &str) -> Result<Vec<AiModelRow>, String> {
@@ -196,6 +208,10 @@ impl AgentService {
 
     pub fn list_agents(&self) -> Result<Vec<AiAgentRow>, String> {
         AiAgentRepo::list(&self.db)
+    }
+
+    pub fn get_agent_by_id(&self, id: &str) -> Result<Option<AiAgentRow>, String> {
+        AiAgentRepo::get_by_id(&self.db, id)
     }
 
     pub fn save_agent(&self, agent: AiAgentRow) -> Result<(), String> {

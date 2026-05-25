@@ -108,7 +108,10 @@ fn strip_bracket_instructions(text: &str) -> String {
             let mut bracket_content = String::new();
             bracket_content.push(c);
             while let Some(&nc) = chars.peek() {
-                bracket_content.push(chars.next().unwrap());
+                match chars.next() {
+                    Some(ch) => bracket_content.push(ch),
+                    None => break,
+                }
                 if nc == ']' { break; }
             }
             let lower = bracket_content.to_lowercase();
@@ -187,13 +190,18 @@ fn strip_absolute_paths(text: &str) -> String {
         if let Some(start) = result.find(|c: char| c.is_ascii_uppercase()) {
             if start + 2 < result.len() {
                 let slice = &result[start..start+2];
-                if slice.chars().next().unwrap().is_ascii_uppercase() && slice.chars().nth(1).unwrap() == ':' {
-                    let path_end = result[start..].find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
-                        .map(|i| start + i)
-                        .unwrap_or(result.len());
-                    let full_path = &result[start..path_end];
-                    let file_name = full_path.rsplit(|c| c == '\\' || c == '/').next().unwrap_or(full_path).to_string();
-                    Some((start..path_end, file_name))
+                let mut slice_chars = slice.chars();
+                if let (Some(first), Some(second)) = (slice_chars.next(), slice_chars.next()) {
+                    if first.is_ascii_uppercase() && second == ':' {
+                        let path_end = result[start..].find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                            .map(|i| start + i)
+                            .unwrap_or(result.len());
+                        let full_path = &result[start..path_end];
+                        let file_name = full_path.rsplit(|c| c == '\\' || c == '/').next().unwrap_or(full_path).to_string();
+                        Some((start..path_end, file_name))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }

@@ -1,4 +1,4 @@
-use crate::core::error::Result;
+use crate::core::error::{Error, Result};
 use crate::core::types::PtyConfig;
 use crate::domain::terminal::pty::Pty;
 use crate::interface::events::terminal_events;
@@ -27,8 +27,9 @@ impl TerminalService {
         }
     }
 
-    pub fn set_app_handle(&self, handle: AppHandle) {
-        *self.app_handle.lock().unwrap() = Some(handle);
+    pub fn set_app_handle(&self, handle: AppHandle) -> Result<()> {
+        *self.app_handle.lock().map_err(|e| Error::Terminal(format!("App handle lock error: {}", e)))? = Some(handle);
+        Ok(())
     }
 
     pub fn spawn(&self, session_id: &str, config: &PtyConfig) -> Result<()> {
@@ -44,14 +45,14 @@ impl TerminalService {
 
         let buffer = std::sync::Arc::new(Mutex::new(Vec::with_capacity(OUTPUT_BUFFER_MAX_LINES)));
 
-        self.sessions.lock().unwrap().insert(session_id.to_string(), SessionState {
+        self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?.insert(session_id.to_string(), SessionState {
             pty,
             output_buffer: buffer.clone(),
         });
         let buffer_clone = buffer.clone();
 
         let sid = session_id.to_string();
-        let handle = self.app_handle.lock().unwrap().clone();
+        let handle = self.app_handle.lock().map_err(|e| Error::Terminal(format!("App handle lock error: {}", e)))?.clone();
 
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -77,11 +78,12 @@ impl TerminalService {
                         drop(reader_guard);
 
                         {
-                            let mut buf = buffer_clone.lock().unwrap();
-                            for line in output.lines() {
-                                buf.push(line.to_string());
-                                if buf.len() > OUTPUT_BUFFER_MAX_LINES {
-                                    buf.remove(0);
+                            if let Ok(mut buf) = buffer_clone.lock() {
+                                for line in output.lines() {
+                                    buf.push(line.to_string());
+                                    if buf.len() > OUTPUT_BUFFER_MAX_LINES {
+                                        buf.remove(0);
+                                    }
                                 }
                             }
                         }
@@ -129,7 +131,7 @@ impl TerminalService {
     }
 
     pub fn write(&self, session_id: &str, data: &[u8]) -> Result<usize> {
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?;
         let state = sessions
             .get(session_id)
             .ok_or_else(|| crate::core::error::Error::Terminal("session not found".into()))?;
@@ -137,7 +139,7 @@ impl TerminalService {
     }
 
     pub fn kill(&self, session_id: &str) -> Result<()> {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?;
         if let Some(state) = sessions.get(session_id) {
             state.pty.kill()?;
         }
@@ -146,25 +148,25 @@ impl TerminalService {
     }
 
     pub fn resize(&self, session_id: &str, rows: u16, cols: u16) -> Result<()> {
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?;
         let state = sessions
             .get(session_id)
             .ok_or_else(|| crate::core::error::Error::Terminal("session not found".into()))?;
         state.pty.resize(rows, cols)
     }
 
-    pub fn list_sessions(&self) -> Vec<String> {
-        let sessions = self.sessions.lock().unwrap();
-        sessions.keys().cloned().collect()
+    pub fn list_sessions(&self) -> Result<Vec<String>> {
+        let sessions = self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?;
+        Ok(sessions.keys().cloned().collect())
     }
 
     pub fn get_output_buffer(&self, session_id: &str, max_lines: usize) -> Result<String> {
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?;
         let state = sessions
             .get(session_id)
             .ok_or_else(|| crate::core::error::Error::Terminal("session not found".into()))?;
 
-        let buffer = state.output_buffer.lock().unwrap();
+        let buffer = state.output_buffer.lock().map_err(|e| Error::Terminal(format!("Buffer lock error: {}", e)))?;
         let start = if buffer.len() > max_lines {
             buffer.len() - max_lines
         } else {
@@ -174,7 +176,7 @@ impl TerminalService {
     }
 
     pub fn get_cwd(&self, session_id: &str) -> Result<Option<String>> {
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?;
         let state = sessions
             .get(session_id)
             .ok_or_else(|| crate::core::error::Error::Terminal("session not found".into()))?;

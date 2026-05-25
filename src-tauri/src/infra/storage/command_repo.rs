@@ -91,26 +91,35 @@ impl CommandRepo {
         let mut notes_map: std::collections::HashMap<String, Vec<LinkedNoteInfo>> =
             std::collections::HashMap::new();
 
-        for cmd_text in &linked_commands {
-            let mut stmt = conn.prepare(
-                "SELECT cnl.id, cnl.note_id, n.title, n.category, n.group_id \
-                 FROM command_note_links cnl \
-                 JOIN notes n ON n.id = cnl.note_id \
-                 WHERE cnl.context = ?1 \
-                 ORDER BY cnl.created_at DESC"
-            )?;
-            let notes: Vec<LinkedNoteInfo> = stmt
-                .query_map(rusqlite::params![cmd_text], |row| {
-                    Ok(LinkedNoteInfo {
-                        link_id: row.get(0)?,
-                        note_id: row.get(1)?,
-                        title: row.get(2)?,
-                        category: row.get(3)?,
-                        group_id: row.get(4)?,
-                    })
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            notes_map.insert(cmd_text.clone(), notes);
+        // Build a single query with IN clause to avoid N+1
+        let placeholders: Vec<String> = linked_commands.iter().enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let sql = format!(
+            "SELECT cnl.context, cnl.id, cnl.note_id, n.title, n.category, n.group_id \
+             FROM command_note_links cnl \
+             JOIN notes n ON n.id = cnl.note_id \
+             WHERE cnl.context IN ({}) \
+             ORDER BY cnl.created_at DESC",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::types::ToSql> = linked_commands.iter()
+            .map(|c| c as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, LinkedNoteInfo {
+                link_id: row.get(1)?,
+                note_id: row.get(2)?,
+                title: row.get(3)?,
+                category: row.get(4)?,
+                group_id: row.get(5)?,
+            }))
+        })?;
+
+        for row in rows {
+            let (cmd_text, note) = row?;
+            notes_map.entry(cmd_text).or_default().push(note);
         }
 
         let result = entries

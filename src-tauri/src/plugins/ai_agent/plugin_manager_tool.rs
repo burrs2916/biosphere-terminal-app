@@ -1063,14 +1063,13 @@ impl PluginManagerTool {
     }
 
     fn parse_tools_from_params(&self, params: &Value) -> Result<Vec<PluginTool>, String> {
-        let tools_array = params["tools"].as_array();
-
-        if tools_array.is_none() || tools_array.unwrap().is_empty() {
-            return Ok(Vec::new());
-        }
+        let tools_array = match params["tools"].as_array() {
+            Some(arr) if !arr.is_empty() => arr,
+            _ => return Ok(Vec::new()),
+        };
 
         let mut tools = Vec::new();
-        for tool_val in tools_array.unwrap() {
+        for tool_val in tools_array {
             let name = tool_val["name"].as_str()
                 .ok_or_else(|| "Each tool must have a 'name'".to_string())?;
             let description = tool_val["description"].as_str()
