@@ -207,7 +207,7 @@ export function AiCopilotPage() {
     if (!input.trim()) return;
     let messageContent = input.trim();
     if (attachments.length > 0) {
-      const attachmentText = attachments.map((f) => `[附件: ${f.path}]`).join('\n');
+      const attachmentText = attachments.map((f) => t('copilot.attachment_prefix', { path: f.path })).join('\n');
       messageContent = `${attachmentText}\n\n${messageContent}`;
     }
     setInput('');
@@ -230,7 +230,7 @@ export function AiCopilotPage() {
       listen<{ triggerType: string; command: string; exitCode: number; sessionId: string }>('auto-trigger-agent', (event) => {
         if (event.payload.triggerType !== 'auto_failure') return;
         if (loading) return;
-        const autoMessage = `命令执行失败，请帮我分析原因并提供建议：\n命令: \`${event.payload.command}\`\n退出码: ${event.payload.exitCode}`;
+        const autoMessage = t('copilot.auto_failure_prompt', { command: event.payload.command, exitCode: event.payload.exitCode });
         sendMessage(autoMessage);
       }).then((fn) => { unlisteners.push(fn); });
     }
@@ -239,7 +239,8 @@ export function AiCopilotPage() {
       listen<{ triggerType: string; noteId: string; noteTitle: string; action: string }>('auto-trigger-agent', (event) => {
         if (event.payload.triggerType !== 'auto_save') return;
         if (loading) return;
-        const autoMessage = `笔记已${event.payload.action === 'create' ? '创建' : '更新'}："${event.payload.noteTitle}"，请帮我检查内容并提供改进建议。`;
+        const actionText = event.payload.action === 'create' ? t('copilot.auto_save_create') : t('copilot.auto_save_update');
+        const autoMessage = t('copilot.auto_save_prompt', { action: actionText, title: event.payload.noteTitle });
         sendMessage(autoMessage);
       }).then((fn) => { unlisteners.push(fn); });
     }

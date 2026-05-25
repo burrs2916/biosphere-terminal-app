@@ -16,6 +16,7 @@ import {
   FormControl,
   InputLabel,
 } from '@mui/material';
+import { useTranslation } from 'react-i18next';
 import {
   TrashIcon,
   ExportIcon,
@@ -38,12 +39,12 @@ interface UsageLogManagerDialogProps {
 
 type CleanupMode = 'older_7d' | 'older_30d' | 'failed_older_7d' | 'failed_older_30d' | 'all';
 
-const CLEANUP_OPTIONS: { value: CleanupMode; label: string; description: string }[] = [
-  { value: 'failed_older_7d', label: '7天前的失败日志', description: '保留最近7天的失败日志和所有成功日志' },
-  { value: 'failed_older_30d', label: '30天前的失败日志', description: '保留最近30天的失败日志和所有成功日志' },
-  { value: 'older_7d', label: '7天前的所有日志', description: '只保留最近7天的日志' },
-  { value: 'older_30d', label: '30天前的所有日志', description: '只保留最近30天的日志' },
-  { value: 'all', label: '全部日志', description: '清除所有插件的全部执行日志' },
+const CLEANUP_OPTIONS: { value: CleanupMode; labelKey: string; descriptionKey: string }[] = [
+  { value: 'failed_older_7d', labelKey: 'agent.usage_log.cleanup_option_failed_older_7d', descriptionKey: 'agent.usage_log.cleanup_desc_failed_older_7d' },
+  { value: 'failed_older_30d', labelKey: 'agent.usage_log.cleanup_option_failed_older_30d', descriptionKey: 'agent.usage_log.cleanup_desc_failed_older_30d' },
+  { value: 'older_7d', labelKey: 'agent.usage_log.cleanup_option_older_7d', descriptionKey: 'agent.usage_log.cleanup_desc_older_7d' },
+  { value: 'older_30d', labelKey: 'agent.usage_log.cleanup_option_older_30d', descriptionKey: 'agent.usage_log.cleanup_desc_older_30d' },
+  { value: 'all', labelKey: 'agent.usage_log.cleanup_option_all', descriptionKey: 'agent.usage_log.cleanup_desc_all' },
 ];
 
 function formatBytes(bytes: number): string {
@@ -56,6 +57,7 @@ export const UsageLogManagerDialog: React.FC<UsageLogManagerDialogProps> = ({
   open,
   onClose,
 }) => {
+  const { t } = useTranslation('agent');
   const [totalCount, setTotalCount] = useState<number>(0);
   const [sizeEstimate, setSizeEstimate] = useState<number>(0);
   const [loading, setLoading] = useState(true);
@@ -89,9 +91,10 @@ export const UsageLogManagerDialog: React.FC<UsageLogManagerDialogProps> = ({
     const selected = CLEANUP_OPTIONS.find((o) => o.value === cleanupMode);
     if (!selected) return;
 
+    const selectedLabel = t(selected.labelKey);
     const confirmMsg = cleanupMode === 'all'
-      ? `确定要清除所有执行日志吗？此操作不可恢复。`
-      : `确定要清除${selected.label}吗？此操作不可恢复。`;
+      ? t('agent.usage_log.confirm_clean_all')
+      : t('agent.usage_log.confirm_clean_option', { label: selectedLabel });
 
     if (!window.confirm(confirmMsg)) return;
 
@@ -121,7 +124,7 @@ export const UsageLogManagerDialog: React.FC<UsageLogManagerDialogProps> = ({
           break;
       }
 
-      setResult(`已清除 ${deleted} 条日志`);
+      setResult(t('agent.usage_log.cleared_count', { count: deleted }));
       loadStats();
     } catch (err) {
       setError(String(err));
@@ -152,7 +155,7 @@ export const UsageLogManagerDialog: React.FC<UsageLogManagerDialogProps> = ({
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, pb: 1 }}>
         <DatabaseIcon size={20} />
         <Typography variant="subtitle1" sx={{ fontWeight: 600, flex: 1 }}>
-          使用日志管理
+          {t('agent.usage_log.title')}
         </Typography>
         <IconButton size="small" onClick={onClose}>
           <XIcon size={16} />
@@ -171,17 +174,17 @@ export const UsageLogManagerDialog: React.FC<UsageLogManagerDialogProps> = ({
 
             <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
               <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                日志概览
+                {t('agent.usage_log.overview')}
               </Typography>
               <Box sx={{ display: 'flex', gap: 2 }}>
                 <Box sx={{ flex: 1, textAlign: 'center' }}>
-                  <Typography variant="caption" color="text.secondary">总记录数</Typography>
+                  <Typography variant="caption" color="text.secondary">{t('agent.usage_log.total_count')}</Typography>
                   <Typography variant="h6" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
                     {totalCount.toLocaleString()}
                   </Typography>
                 </Box>
                 <Box sx={{ flex: 1, textAlign: 'center' }}>
-                  <Typography variant="caption" color="text.secondary">预估大小</Typography>
+                  <Typography variant="caption" color="text.secondary">{t('agent.usage_log.estimated_size')}</Typography>
                   <Typography variant="h6" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
                     {formatBytes(sizeEstimate)}
                   </Typography>
@@ -191,24 +194,24 @@ export const UsageLogManagerDialog: React.FC<UsageLogManagerDialogProps> = ({
 
             <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
               <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                清理日志
+                {t('agent.usage_log.cleanup')}
               </Typography>
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
-                定期清理旧日志有助于保持 AI agent 改进插件时的分析质量，避免过时错误干扰判断
+                {t('agent.usage_log.cleanup_hint')}
               </Typography>
 
               <FormControl fullWidth size="small" sx={{ mb: 1.5 }}>
-                <InputLabel>清理范围</InputLabel>
+                <InputLabel>{t('agent.usage_log.cleanup_scope')}</InputLabel>
                 <Select
                   value={cleanupMode}
-                  label="清理范围"
+                  label={t('agent.usage_log.cleanup_scope')}
                   onChange={(e) => setCleanupMode(e.target.value as CleanupMode)}
                 >
                   {CLEANUP_OPTIONS.map((opt) => (
                     <MenuItem key={opt.value} value={opt.value}>
                       <Box>
-                        <Typography variant="body2">{opt.label}</Typography>
-                        <Typography variant="caption" color="text.secondary">{opt.description}</Typography>
+                        <Typography variant="body2">{t(opt.labelKey)}</Typography>
+                        <Typography variant="caption" color="text.secondary">{t(opt.descriptionKey)}</Typography>
                       </Box>
                     </MenuItem>
                   ))}
@@ -224,16 +227,16 @@ export const UsageLogManagerDialog: React.FC<UsageLogManagerDialogProps> = ({
                 disabled={cleaning || totalCount === 0}
                 sx={{ textTransform: 'none', fontSize: 12 }}
               >
-                {cleaning ? '清理中...' : '执行清理'}
+                {cleaning ? t('agent.usage_log.cleaning') : t('agent.usage_log.execute_cleanup')}
               </Button>
             </Paper>
 
             <Paper variant="outlined" sx={{ p: 2 }}>
               <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-                导出日志
+                {t('agent.usage_log.export')}
               </Typography>
               <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
-                导出日志可用于备份、离线分析，或作为 AI agent 改进插件的参考数据
+                {t('agent.usage_log.export_hint')}
               </Typography>
               <Button
                 size="small"
@@ -243,7 +246,7 @@ export const UsageLogManagerDialog: React.FC<UsageLogManagerDialogProps> = ({
                 disabled={totalCount === 0}
                 sx={{ textTransform: 'none', fontSize: 12 }}
               >
-                导出全部日志 (JSON)
+                {t('agent.usage_log.export_all_json')}
               </Button>
             </Paper>
           </>
@@ -252,7 +255,7 @@ export const UsageLogManagerDialog: React.FC<UsageLogManagerDialogProps> = ({
 
       <DialogActions sx={{ px: 3, pb: 2 }}>
         <Button onClick={onClose} size="small" sx={{ textTransform: 'none' }}>
-          关闭
+          {t('agent.usage_log.close')}
         </Button>
       </DialogActions>
     </Dialog>

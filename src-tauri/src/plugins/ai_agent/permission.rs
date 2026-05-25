@@ -171,8 +171,8 @@ pub fn build_permission_description(tool_name: &str, arguments: &serde_json::Val
             }
         }
         _ => {
-            let args_str = if arguments.is_object() && !arguments.as_object().unwrap().is_empty() {
-                arguments.as_object().unwrap().iter()
+            let args_str = if let Some(obj) = arguments.as_object().filter(|o| !o.is_empty()) {
+                obj.iter()
                     .map(|(k, v)| format!("  {}: {}", k, v))
                     .collect::<Vec<_>>()
                     .join("\n")

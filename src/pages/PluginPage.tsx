@@ -293,7 +293,7 @@ export function PluginPage() {
 
     let messageContent = input.trim();
     if (attachments.length > 0) {
-      const attachmentText = attachments.map((f) => `[附件: ${f.path}]`).join('\n');
+      const attachmentText = attachments.map((f) => t('plugin_page.attachment_prefix', { path: f.path })).join('\n');
       messageContent = `${attachmentText}\n\n${messageContent}`;
     }
 
@@ -459,23 +459,23 @@ export function PluginPage() {
               if (logs && logs.length > 0) {
                 const failLogs = logs.filter(l => !l.success);
                 const successLogs = logs.filter(l => l.success);
-                logContext = '\n\n## 使用日志摘要\n';
-                logContext += `- 最近执行: ${logs.length} 次，成功 ${successLogs.length} 次，失败 ${failLogs.length} 次\n`;
+                logContext = '\n\n' + t('plugin_page.log_summary_title') + '\n';
+                logContext += t('plugin_page.log_summary_recent', { total: logs.length, success: successLogs.length, fail: failLogs.length }) + '\n';
                 if (failLogs.length > 0) {
-                  logContext += '- 失败记录:\n';
+                  logContext += t('plugin_page.log_summary_fail_header') + '\n';
                   failLogs.slice(0, 5).forEach(l => {
-                    logContext += `  * [${l.toolName}] source=${l.source} duration=${l.durationMs}ms params: ${l.paramsSummary}\n`;
-                    if (l.errorMessage) logContext += `    错误: ${l.errorMessage.slice(0, 200)}\n`;
+                    logContext += t('plugin_page.log_summary_fail_item', { toolName: l.toolName, source: l.source, duration: l.durationMs, params: l.paramsSummary }) + '\n';
+                    if (l.errorMessage) logContext += t('plugin_page.log_summary_fail_error', { error: l.errorMessage.slice(0, 200) }) + '\n';
                   });
                 }
                 if (successLogs.length > 0) {
                   const avgDuration = Math.round(successLogs.reduce((s, l) => s + l.durationMs, 0) / successLogs.length);
-                  logContext += `- 成功平均耗时: ${avgDuration}ms\n`;
+                  logContext += t('plugin_page.log_summary_avg_duration', { avgDuration }) + '\n';
                   successLogs.slice(0, 3).forEach(l => {
-                    if (l.outputSummary) logContext += `  * [${l.toolName}] 输出: ${l.outputSummary.slice(0, 150)}\n`;
+                    if (l.outputSummary) logContext += t('plugin_page.log_summary_success_item', { toolName: l.toolName, output: l.outputSummary.slice(0, 150) }) + '\n';
                   });
                 }
-                logContext += '\n请根据以上使用日志数据，重点修复失败问题并优化性能。';
+                logContext += '\n' + t('plugin_page.log_summary_footer');
               }
             } catch (err) { console.error('PluginPage: operation failed', err); }
             const prompt = t('plugin_page.refine_prompt', { name: pluginName, id: pluginId }) + logContext;
@@ -508,20 +508,20 @@ export function PluginPage() {
                     if (logs && logs.length > 0) {
                       const failLogs = logs.filter(l => !l.success);
                       const successLogs = logs.filter(l => l.success);
-                      logContext = '\n\n## 使用日志摘要\n';
-                      logContext += `- 最近执行: ${logs.length} 次，成功 ${successLogs.length} 次，失败 ${failLogs.length} 次\n`;
+                      logContext = '\n\n' + t('plugin_page.log_summary_title') + '\n';
+                      logContext += t('plugin_page.log_summary_recent', { total: logs.length, success: successLogs.length, fail: failLogs.length }) + '\n';
                       if (failLogs.length > 0) {
-                        logContext += '- 失败记录:\n';
+                        logContext += t('plugin_page.log_summary_fail_header') + '\n';
                         failLogs.slice(0, 5).forEach(l => {
-                          logContext += `  * [${l.toolName}] source=${l.source} duration=${l.durationMs}ms params: ${l.paramsSummary}\n`;
-                          if (l.errorMessage) logContext += `    错误: ${l.errorMessage.slice(0, 200)}\n`;
+                          logContext += t('plugin_page.log_summary_fail_item', { toolName: l.toolName, source: l.source, duration: l.durationMs, params: l.paramsSummary }) + '\n';
+                          if (l.errorMessage) logContext += t('plugin_page.log_summary_fail_error', { error: l.errorMessage.slice(0, 200) }) + '\n';
                         });
                       }
                       if (successLogs.length > 0) {
                         const avgDuration = Math.round(successLogs.reduce((s, l) => s + l.durationMs, 0) / successLogs.length);
-                        logContext += `- 成功平均耗时: ${avgDuration}ms\n`;
+                        logContext += t('plugin_page.log_summary_avg_duration', { avgDuration }) + '\n';
                       }
-                      logContext += '\n请根据以上使用日志数据，重点修复失败问题并优化性能。';
+                      logContext += '\n' + t('plugin_page.log_summary_footer');
                     }
                   } catch (err) { console.error('PluginPage: operation failed', err); }
                   const prompt = (suggestion || t('plugin_page.refine_prompt', { name: pluginName, id: pluginId })) + logContext;
@@ -942,8 +942,8 @@ function PluginSidebar({ plugins, onToggle, onDelete, accentColor, successColor,
           </FormControl>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setAssignDialogOpen(false)}>取消</Button>
-          <Button onClick={handleSaveAssign} variant="contained">确定</Button>
+          <Button onClick={() => setAssignDialogOpen(false)}>{t('agent.cancel')}</Button>
+          <Button onClick={handleSaveAssign} variant="contained">{t('plugin_page.confirm')}</Button>
         </DialogActions>
       </Dialog>
     </Box>

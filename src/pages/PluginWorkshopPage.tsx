@@ -166,7 +166,7 @@ export function PluginWorkshopPage() {
     setError(null);
     try {
       if (!workshopAgentId) {
-        setError('请先在 Playground 模式中选择一个 Agent，才能生成使用场景');
+        setError(t('workshop.select_agent_for_scenarios'));
         return;
       }
       const result = await generatePluginScenarios(pluginId, workshopAgentId, category, replace);
@@ -528,10 +528,10 @@ export function PluginWorkshopPage() {
             <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3 }}>
               <PackageIcon size={40} weight="duotone" color={accentColor} />
               <Typography variant="body2" sx={{ color: 'text.secondary', textAlign: 'center', fontWeight: 600 }}>
-                请先在左侧选择一个插件
+                {t('workshop.select_plugin_first')}
               </Typography>
               <Typography variant="caption" sx={{ color: 'text.disabled', textAlign: 'center', maxWidth: 280 }}>
-                选择插件后，你可以直接操作工具并让 AI 分析结果
+                {t('workshop.select_plugin_hint_detail')}
               </Typography>
             </Box>
           ) : (
@@ -544,7 +544,7 @@ export function PluginWorkshopPage() {
                 }}>
                   <PackageIcon size={14} weight="duotone" color={accentColor} />
                   <Typography variant="caption" sx={{ fontWeight: 600, fontSize: 11 }}>
-                    工具操作
+                    {t('workshop.tool_operations')}
                   </Typography>
                   <Box sx={{ flex: 1 }} />
                   <Chip
@@ -576,7 +576,7 @@ export function PluginWorkshopPage() {
                     }}>
                       <RobotIcon size={14} weight="duotone" color={accentColor} />
                       <Typography variant="caption" sx={{ fontWeight: 600, fontSize: 11 }}>
-                        AI 分析
+                        {t('workshop.ai_analysis')}
                       </Typography>
                       <FormControl size="small" sx={{ minWidth: 120, flex: 1 }}>
                         <Select
@@ -591,7 +591,7 @@ export function PluginWorkshopPage() {
                             setMessages([]);
                           }}
                           renderValue={(selected) => {
-                            if (!selected) return <Typography variant="caption" sx={{ color: 'text.secondary' }}>选择 Agent</Typography>;
+                            if (!selected) return <Typography variant="caption" sx={{ color: 'text.secondary' }}>{t('workshop.select_agent_placeholder')}</Typography>;
                             const agent = agents.find((a) => a.id === selected);
                             return <Typography variant="caption" sx={{ fontWeight: 600 }}>{agent?.name || selected}</Typography>;
                           }}
@@ -615,7 +615,7 @@ export function PluginWorkshopPage() {
                           </IconButton>
                         </Tooltip>
                       )}
-                      <Tooltip title="调整分栏比例" arrow>
+                      <Tooltip title={t('workshop.adjust_split_ratio') as string} arrow>
                         <IconButton
                           size="small"
                           onClick={() => setPanelRatio((prev) => prev <= 0.4 ? 0.7 : prev - 0.15)}
@@ -630,10 +630,10 @@ export function PluginWorkshopPage() {
                       <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3 }}>
                         <RobotIcon size={32} weight="duotone" color={accentColor} />
                         <Typography variant="caption" sx={{ color: 'text.secondary', textAlign: 'center', fontWeight: 600 }}>
-                          选择一个 AI Agent
+                          {t('workshop.select_ai_agent')}
                         </Typography>
                         <Typography variant="caption" sx={{ color: 'text.disabled', textAlign: 'center', maxWidth: 240, fontSize: 10 }}>
-                          Agent 将分析你执行工具后的结果，提供见解和建议
+                          {t('workshop.agent_will_analyze')}
                         </Typography>
                       </Box>
                     ) : (
@@ -652,12 +652,13 @@ export function PluginWorkshopPage() {
                             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
                               <SparkleIcon size={12} weight="duotone" color={accentColor} />
                               <Typography variant="caption" sx={{ fontWeight: 600, fontSize: 9, color: 'text.secondary' }}>
-                                分析提示词
+                                {t('workshop.analysis_prompts')}
                               </Typography>
                               <Box sx={{ flex: 1 }} />
                               {(['all', 'practical', 'creative', 'combination'] as const).map((cat) => {
                                 const isActive = activeCategory === cat;
-                                const label = cat === 'all' ? '全部' : cat === 'practical' ? '实用' : cat === 'creative' ? '创意' : '组合';
+                                const catKey = cat === 'all' ? 'cat_all' : cat === 'practical' ? 'cat_practical' : cat === 'creative' ? 'cat_creative' : 'cat_combination';
+                                const label = t(`workshop.${catKey}`);
                                 return (
                                   <Chip
                                     key={cat}
@@ -683,7 +684,7 @@ export function PluginWorkshopPage() {
                                 disabled={generating}
                                 sx={{ textTransform: 'none', fontSize: 9, minWidth: 0, py: 0, color: accentColor }}
                               >
-                                {generating ? '生成中...' : '换一批'}
+                                {generating ? t('workshop.generating_scenarios') : t('workshop.regenerate')}
                               </Button>
                             </Box>
                             {error && (
@@ -725,7 +726,7 @@ export function PluginWorkshopPage() {
                             agentColor={accentColor}
                             userColor={isDark ? '#6C63FF' : '#5B54E0'}
                             isDark={isDark}
-                            emptyText="执行左侧工具后，结果将自动发送给 AI 分析。你也可以直接提问。"
+                            emptyText={t('workshop.chat_empty_hint')}
                             thinkingText={t('workshop.thinking')}
                           />
                         </Box>
@@ -739,7 +740,7 @@ export function PluginWorkshopPage() {
                           agentColor={accentColor}
                           userColor={isDark ? '#6C63FF' : '#5B54E0'}
                           isDark={isDark}
-                          placeholder="向 AI 提问关于工具执行结果的问题..."
+                          placeholder={t('workshop.chat_placeholder')}
                           onStop={handleStop}
                           attachments={attachments}
                           onAttachmentsChange={setAttachments}
@@ -876,11 +877,11 @@ function WorkshopPluginList({ plugins, selectedPlugin, accentColor, mutedBorder,
       </Typography>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mt: 0.25 }}>
         <Typography variant="caption" sx={{ fontSize: 8, color: 'text.disabled' }}>
-          {plugin.tools.length} 工具
+          {t('workshop.tools_count', { count: plugin.tools.length })}
         </Typography>
         {(scenarioCache[plugin.id]?.length || plugin.scenarios?.length || 0) > 0 && (
           <Typography variant="caption" sx={{ fontSize: 8, color: accentColor }}>
-            · {scenarioCache[plugin.id]?.length || plugin.scenarios?.length || 0} 场景
+            · {t('workshop.scenarios_count', { count: scenarioCache[plugin.id]?.length || plugin.scenarios?.length || 0 })}
           </Typography>
         )}
       </Box>
@@ -898,7 +899,7 @@ function WorkshopPluginList({ plugins, selectedPlugin, accentColor, mutedBorder,
             <FolderSimplePlusIcon size={12} />
           </IconButton>
         </Tooltip>
-        <Tooltip title="日志管理" arrow>
+        <Tooltip title={t('workshop.log_manager') as string} arrow>
           <IconButton size="small" onClick={() => setLogManagerOpen(true)} sx={{ p: 0.15 }}>
             <DatabaseIcon size={12} />
           </IconButton>
@@ -968,8 +969,8 @@ function WorkshopPluginList({ plugins, selectedPlugin, accentColor, mutedBorder,
           </FormControl>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setAssignDialogOpen(false)}>取消</Button>
-          <Button onClick={handleSaveAssign} variant="contained">确定</Button>
+          <Button onClick={() => setAssignDialogOpen(false)}>{t('dialog.cancel')}</Button>
+          <Button onClick={handleSaveAssign} variant="contained">{t('workshop.confirm')}</Button>
         </DialogActions>
       </Dialog>
     </Box>

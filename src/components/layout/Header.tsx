@@ -7,6 +7,7 @@ import Box from '@mui/material/Box';
 import { ListIcon } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
+import { useSettingsStore } from '../../engine';
 import logo from '../../assets/logo.svg?url';
 
 interface HeaderProps {
@@ -21,7 +22,7 @@ export function Header({ onToggleSidebar }: HeaderProps) {
 
   const toggleLanguage = () => {
     const nextLang = currentLang === 'zh-CN' ? 'en-US' : 'zh-CN';
-    localStorage.setItem('biosphere-locale', nextLang);
+    useSettingsStore.getState().update('language', nextLang);
     i18n.changeLanguage(nextLang);
   };
 
