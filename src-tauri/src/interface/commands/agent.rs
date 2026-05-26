@@ -851,6 +851,10 @@ Your workspace directory is: `{}`\n\
         let tool_calls_str = pm.tool_calls.as_ref()
             .map(|tc| serde_json::to_string(tc).unwrap_or_default())
             .unwrap_or_default();
+        let msg_created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
         let id_for_track = msg_id.clone();
         match persister_service.save_message(AiMessageRow {
             id: msg_id,
@@ -859,7 +863,7 @@ Your workspace directory is: `{}`\n\
             content: pm.content.clone(),
             tool_calls: tool_calls_str,
             is_error: if pm.is_error { 1 } else { 0 },
-            created_at: persister_run_ts,
+            created_at: msg_created_at,
         }) {
             Ok(()) => {
                 tracing::info!("[run_agent] persister: saved message id={}, role={}, conv_id={}", id_for_track, pm.role, persister_conv_id);

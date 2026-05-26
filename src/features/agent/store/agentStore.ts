@@ -62,7 +62,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const providers = await agentService.listProviders();
-      set({ providers, loading: false });
+      set({ providers, loading: false, error: null });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -91,7 +91,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   loadEndpoints: async () => {
     try {
       const endpoints = await agentService.listEndpoints();
-      set({ endpoints });
+      set({ endpoints, error: null });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -100,7 +100,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   loadEndpointsByProvider: async (providerId: string) => {
     try {
       const endpoints = await agentService.listEndpointsByProvider(providerId);
-      set({ endpoints });
+      set({ endpoints, error: null });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -128,7 +128,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   loadModels: async () => {
     try {
       const models = await agentService.listModels();
-      set({ models });
+      set({ models, error: null });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -137,7 +137,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   loadModelsByEndpoint: async (endpointId: string) => {
     try {
       const models = await agentService.listModelsByEndpoint(endpointId);
-      set({ models });
+      set({ models, error: null });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -181,7 +181,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const agents = await agentService.listAgents();
-      set({ agents, loading: false });
+      set({ agents, loading: false, error: null });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -208,7 +208,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   loadConversations: async (agentId: string) => {
     try {
       const conversations = await agentService.listConversations(agentId);
-      set({ conversations });
+      set({ conversations, error: null });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -250,7 +250,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   loadMessages: async (conversationId: string) => {
     try {
       const messages = await agentService.listMessages(conversationId);
-      set({ messages });
+      set({ messages, error: null });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -273,10 +273,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   deleteMessagesAfter: async (conversationId: string, afterMessageId: string) => {
     await agentService.deleteMessagesAfter(conversationId, afterMessageId);
-    const remaining = get().messages.filter((m) => {
-      const afterMsg = get().messages.find((msg) => msg.id === afterMessageId);
-      return afterMsg ? m.createdAt < afterMsg.createdAt : true;
-    });
+    const msgs = get().messages;
+    const afterIdx = msgs.findIndex((m) => m.id === afterMessageId);
+    if (afterIdx === -1) {
+      set({ messages: [] });
+      return;
+    }
+    const remaining = msgs.slice(0, afterIdx);
     set({ messages: remaining });
   },
 }));

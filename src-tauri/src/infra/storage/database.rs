@@ -22,6 +22,14 @@ impl Database {
 
     fn initialize(&self) -> crate::core::error::Result<()> {
         let conn = self.conn.lock().map_err(|e| Error::Internal(format!("DB lock poisoned: {}", e)))?;
+
+        // Enable foreign key enforcement (SQLite disables by default)
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        // Use WAL mode for better concurrent read performance
+        let _ = conn.execute_batch("PRAGMA journal_mode = WAL;");
+        // Set busy timeout to avoid "database is locked" under contention
+        let _ = conn.execute_batch("PRAGMA busy_timeout = 5000;");
+
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS sessions (

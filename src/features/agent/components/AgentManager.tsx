@@ -10,7 +10,7 @@ import {
 } from '@phosphor-icons/react';
 import { useAgentStore } from '../store/agentStore';
 import { usePluginStore } from '../store/pluginStore';
-import { updateAgentAllowedTools } from '../../../core/services/agent.service';
+import { updateAgentAllowedTools, listConversations } from '../../../core/services/agent.service';
 import type { AgentDto } from '../../../proto/agent';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
@@ -67,7 +67,7 @@ export function AgentManager() {
   const agentColor = isDark ? '#CE93D8' : '#7B1FA2';
 
   const [editing, setEditing] = useState<AgentFormData | null>(null);
-  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string; convCount: number } | null>(null);
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
     open: false,
     message: '',
@@ -288,7 +288,11 @@ export function AgentManager() {
                       size="small"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setDeleteConfirm(agent.id);
+                        listConversations(agent.id).then((convs) => {
+                          setDeleteConfirm({ id: agent.id, name: agent.name, convCount: convs.length });
+                        }).catch(() => {
+                          setDeleteConfirm({ id: agent.id, name: agent.name, convCount: 0 });
+                        });
                       }}
                       sx={{
                         p: 0.5,
@@ -757,7 +761,11 @@ export function AgentManager() {
         <DialogTitle>{t('agent.delete_confirm_title')}</DialogTitle>
         <DialogContent>
           <Typography variant="body2">
-            {t('agent.delete_confirm_message')}
+            {t('agent.delete_confirm_message_with_info', {
+              name: deleteConfirm?.name || '',
+              convCount: deleteConfirm?.convCount || 0,
+              defaultValue: `Are you sure you want to delete agent "${deleteConfirm?.name || ''}"?${deleteConfirm?.convCount ? ` This will also delete ${deleteConfirm.convCount} conversation(s) and all associated messages.` : ''}`,
+            })}
           </Typography>
         </DialogContent>
         <DialogActions>
@@ -768,7 +776,7 @@ export function AgentManager() {
             size="small"
             color="error"
             variant="contained"
-            onClick={() => deleteConfirm && handleDelete(deleteConfirm)}
+            onClick={() => deleteConfirm && handleDelete(deleteConfirm.id)}
           >
             {t('agent.delete')}
           </Button>

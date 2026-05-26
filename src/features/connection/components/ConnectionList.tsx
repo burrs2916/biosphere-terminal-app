@@ -59,6 +59,7 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
   const [testState, setTestState] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMsg, setTestMsg] = useState('');
   const [testResults, setTestResults] = useState<Record<string, { state: 'testing' | 'success' | 'error'; msg?: string }>>({});
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const notify = useNotify().notify;
 
   const load = () => {
@@ -104,6 +105,7 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
 
   const handleDelete = async (id: string) => {
     await deleteConnection(id);
+    setDeleteConfirm(null);
     load();
   };
 
@@ -207,7 +209,7 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
               </IconButton>
             </Tooltip>
             <Tooltip title={t('connection.delete_confirm')} arrow>
-              <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleDelete(conn.id); }}>
+              <IconButton size="small" onClick={(e) => { e.stopPropagation(); setDeleteConfirm(conn.id); }}>
                 <TrashIcon size={14} color="#FF7B72" />
               </IconButton>
             </Tooltip>
@@ -343,6 +345,24 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
           )}
           <Button onClick={handleSave} variant="contained" disabled={!name}>
             {t('connection.save')}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={deleteConfirm !== null} onClose={() => setDeleteConfirm(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>{t('connection.delete_confirm_title')}</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            {t('connection.delete_confirm_message', {
+              name: connections.find((c) => c.id === deleteConfirm)?.name || '',
+              defaultValue: 'Are you sure you want to delete this connection? This action cannot be undone.',
+            })}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteConfirm(null)}>{t('connection.cancel')}</Button>
+          <Button color="error" variant="contained" onClick={() => deleteConfirm && handleDelete(deleteConfirm)}>
+            {t('connection.delete', { defaultValue: 'Delete' })}
           </Button>
         </DialogActions>
       </Dialog>

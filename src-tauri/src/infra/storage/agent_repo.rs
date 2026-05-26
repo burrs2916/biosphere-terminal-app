@@ -480,8 +480,17 @@ impl AiModelRepo {
 
     pub fn delete(db: &Database, id: &str) -> Result<(), String> {
         let conn = db.conn();
-        conn.execute("DELETE FROM ai_models WHERE id = ?1", params![id])
+        // Unlink agents that reference this model (both model_id and fallback_model_id)
+        conn.execute("UPDATE ai_agents SET model_id = '' WHERE model_id = ?1", params![id])
             .map_err(|e| e.to_string())?;
+        conn.execute("UPDATE ai_agents SET fallback_model_id = '' WHERE fallback_model_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        // Delete the model and verify a row was actually removed
+        let rows = conn.execute("DELETE FROM ai_models WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+        if rows == 0 {
+            return Err(format!("Model {} not found", id));
+        }
         Ok(())
     }
 
@@ -569,6 +578,12 @@ impl AiAgentRepo {
 
     pub fn delete(db: &Database, id: &str) -> Result<(), String> {
         let conn = db.conn();
+        // Clean up messages for all conversations owned by this agent
+        conn.execute(
+            "DELETE FROM ai_messages WHERE conversation_id IN (SELECT id FROM ai_conversations WHERE agent_id = ?1)",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM ai_conversations WHERE agent_id = ?1", params![id])
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM ai_agents WHERE id = ?1", params![id])

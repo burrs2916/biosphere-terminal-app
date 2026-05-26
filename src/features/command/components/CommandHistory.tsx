@@ -102,6 +102,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
   const [saveMode, setSaveMode] = useState<'new' | 'existing'>('new');
   const [selectedExistingNoteId, setSelectedExistingNoteId] = useState('');
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [deleteEntryConfirm, setDeleteEntryConfirm] = useState<CommandHistoryEntry | null>(null);
 
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -329,6 +330,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
     try {
       await deleteCommandHistoryEntry(entry.id);
       setAllEntries((prev) => prev.filter((e) => e.id !== entry.id));
+      setDeleteEntryConfirm(null);
     } catch (e) {
       console.error('Failed to delete history entry:', e);
     }
@@ -637,7 +639,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
                           <Tooltip title={t('history.delete') || ''} arrow>
                             <IconButton
                               size="small"
-                              onClick={(e) => { e.stopPropagation(); handleDeleteEntry(entry); }}
+                              onClick={(e) => { e.stopPropagation(); setDeleteEntryConfirm(entry); }}
                               sx={{ flexShrink: 0 }}
                             >
                               <TrashIcon size={12} color="#FF5252" />
@@ -836,6 +838,24 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
           <Button onClick={() => setClearConfirmOpen(false)}>{tCommon('action.cancel')}</Button>
           <Button onClick={handleClearAll} variant="contained" color="error">
             {t('history.clear_all')}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={deleteEntryConfirm !== null} onClose={() => setDeleteEntryConfirm(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>{t('history.delete_entry_confirm_title', { defaultValue: 'Delete Entry' })}</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            {t('history.delete_entry_confirm_message', {
+              command: deleteEntryConfirm?.command?.slice(0, 60) || '',
+              defaultValue: 'Are you sure you want to delete this command entry? This action cannot be undone.',
+            })}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteEntryConfirm(null)}>{tCommon('action.cancel')}</Button>
+          <Button onClick={() => deleteEntryConfirm && handleDeleteEntry(deleteEntryConfirm)} variant="contained" color="error">
+            {t('history.delete', { defaultValue: 'Delete' })}
           </Button>
         </DialogActions>
       </Dialog>

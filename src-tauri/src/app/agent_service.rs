@@ -101,12 +101,10 @@ impl AgentService {
     }
 
     pub async fn test_endpoint_connection(&self, endpoint_id: &str) -> Result<String, String> {
-        let endpoints = AiEndpointRepo::list(&self.db)?;
-        let endpoint = endpoints.iter().find(|e| e.id == endpoint_id)
+        let endpoint = AiEndpointRepo::get_by_id(&self.db, endpoint_id)?
             .ok_or_else(|| "Endpoint not found".to_string())?;
 
-        let providers = AiProviderRepo::list(&self.db)?;
-        let provider = providers.iter().find(|p| p.id == endpoint.provider_id)
+        let provider = AiProviderRepo::get_by_id(&self.db, &endpoint.provider_id)?
             .ok_or_else(|| "Provider not found".to_string())?;
 
         let url = format!("{}/models", endpoint.base_url.trim_end_matches('/'));
@@ -140,16 +138,13 @@ impl AgentService {
     }
 
     pub async fn test_model_chat(&self, model_id: &str) -> Result<String, String> {
-        let models = AiModelRepo::list(&self.db)?;
-        let model = models.iter().find(|m| m.id == model_id)
+        let model = AiModelRepo::get_by_id(&self.db, model_id)?
             .ok_or_else(|| "Model not found".to_string())?;
 
-        let endpoints = AiEndpointRepo::list(&self.db)?;
-        let endpoint = endpoints.iter().find(|e| e.id == model.endpoint_id)
+        let endpoint = AiEndpointRepo::get_by_id(&self.db, &model.endpoint_id)?
             .ok_or_else(|| "Endpoint not found".to_string())?;
 
-        let providers = AiProviderRepo::list(&self.db)?;
-        let provider = providers.iter().find(|p| p.id == endpoint.provider_id)
+        let provider = AiProviderRepo::get_by_id(&self.db, &endpoint.provider_id)?
             .ok_or_else(|| "Provider not found".to_string())?;
 
         let url = match endpoint.api_type.as_str() {

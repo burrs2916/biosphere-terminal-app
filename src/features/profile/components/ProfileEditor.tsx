@@ -23,6 +23,10 @@ import {
   TrashIcon,
   FloppyDiskIcon,
 } from '@phosphor-icons/react';
+import Dialog from '@mui/material/Dialog';
+import DialogTitle from '@mui/material/DialogTitle';
+import DialogContent from '@mui/material/DialogContent';
+import DialogActions from '@mui/material/DialogActions';
 import { listProfiles, saveProfile, deleteProfile } from '../../../core/services/profile.service';
 import { useNotify } from '../../../core/notification';
 import type { TerminalProfile, AppearanceConfig } from '../../../proto';
@@ -37,6 +41,7 @@ export function ProfileEditor() {
   const [name, setName] = useState('');
   const [appearance, setAppearance] = useState<AppearanceConfig>(DEFAULT_APPEARANCE);
   const [isDefault, setIsDefault] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const notify = useNotify().notify;
 
   const load = () => {
@@ -79,6 +84,7 @@ export function ProfileEditor() {
   const handleDelete = async (id: string) => {
     await deleteProfile(id);
     if (editing?.id === id) setEditing(null);
+    setDeleteConfirm(null);
     load();
   };
 
@@ -107,7 +113,7 @@ export function ProfileEditor() {
                 slotProps={{ primary: { variant: 'body2' } }}
               />
               {p.is_default && <Chip label="default" size="small" color="primary" sx={{ height: 18, fontSize: '0.6rem' }} />}
-              <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleDelete(p.id); }}>
+              <IconButton size="small" onClick={(e) => { e.stopPropagation(); setDeleteConfirm(p.id); }}>
                 <TrashIcon size={14} color="#FF7B72" />
               </IconButton>
             </ListItemButton>
@@ -245,6 +251,24 @@ export function ProfileEditor() {
           </Box>
         )}
       </Box>
+
+      <Dialog open={deleteConfirm !== null} onClose={() => setDeleteConfirm(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>{t('profile.delete_confirm_title')}</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            {t('profile.delete_confirm_message', {
+              name: profiles.find((p) => p.id === deleteConfirm)?.name || '',
+              defaultValue: 'Are you sure you want to delete this profile? This action cannot be undone.',
+            })}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteConfirm(null)}>{t('profile.cancel', { defaultValue: 'Cancel' })}</Button>
+          <Button color="error" variant="contained" onClick={() => deleteConfirm && handleDelete(deleteConfirm)}>
+            {t('profile.delete', { defaultValue: 'Delete' })}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

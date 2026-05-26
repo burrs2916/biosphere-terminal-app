@@ -363,7 +363,15 @@ export function ModelConfigPage() {
     testEndpointConnection,
     testModelChat,
     agents,
+    error,
   } = useAgentStore();
+
+  // Show store-level errors to user
+  useEffect(() => {
+    if (error) {
+      setSnackbar({ open: true, message: error, severity: 'error' });
+    }
+  }, [error]);
 
   useEffect(() => {
     loadProviders();
@@ -595,8 +603,8 @@ export function ModelConfigPage() {
                           open: true,
                           title: t('provider.delete'),
                           message: msg,
-                          onConfirm: () => {
-                            deleteProvider(provider.id);
+                          onConfirm: async () => {
+                            await deleteProvider(provider.id);
                             setDeleteConfirm({ open: false, title: '', message: '', onConfirm: () => {} });
                           },
                         });
@@ -679,15 +687,35 @@ export function ModelConfigPage() {
                                     </IconButton>
                                   </Tooltip>
                                   <Tooltip title={t('endpoint.delete')}>
-                                    <IconButton size="small" sx={{ p: 0.25 }} onClick={() => setDeleteConfirm({
-                                      open: true,
-                                      title: t('endpoint.delete'),
-                                      message: t('endpoint.delete_confirm', { name: endpoint.name }),
-                                      onConfirm: () => {
-                                        deleteEndpoint(endpoint.id);
-                                        setDeleteConfirm({ open: false, title: '', message: '', onConfirm: () => {} });
-                                      },
-                                    })}>
+                                    <IconButton size="small" sx={{ p: 0.25 }} onClick={() => {
+                                      const endpointModels = models.filter(m => m.endpointId === endpoint.id);
+                                      const affectedAgents = agents.filter(a =>
+                                        endpointModels.some(m => m.id === a.modelId || m.id === a.fallbackModelId)
+                                      );
+                                      let msg = t('endpoint.delete_confirm', { name: endpoint.name });
+                                      if (endpointModels.length > 0) {
+                                        msg += '\n\n' + t('endpoint.delete_affected_models', {
+                                          count: endpointModels.length,
+                                          defaultValue: `This will also delete ${endpointModels.length} model(s) under this endpoint.`,
+                                        });
+                                      }
+                                      if (affectedAgents.length > 0) {
+                                        msg += '\n\n' + t('provider.delete_affected_agents', {
+                                          count: affectedAgents.length,
+                                          names: affectedAgents.map(a => a.name).join(', '),
+                                          defaultValue: `This will affect ${affectedAgents.length} agent(s): ${affectedAgents.map(a => a.name).join(', ')}`,
+                                        });
+                                      }
+                                      setDeleteConfirm({
+                                        open: true,
+                                        title: t('endpoint.delete'),
+                                        message: msg,
+                                        onConfirm: async () => {
+                                          await deleteEndpoint(endpoint.id);
+                                          setDeleteConfirm({ open: false, title: '', message: '', onConfirm: () => {} });
+                                        },
+                                      });
+                                    }}>
                                       <DeleteIcon size={12} color={errorColor} />
                                     </IconButton>
                                   </Tooltip>
@@ -766,15 +794,28 @@ export function ModelConfigPage() {
                                               <IconButton size="small" sx={{ p: 0.15 }} onClick={() => setModelDialog({ open: true, data: model, endpointId: endpoint.id })}>
                                                 <EditIcon size={10} />
                                               </IconButton>
-                                              <IconButton size="small" sx={{ p: 0.15 }} onClick={() => setDeleteConfirm({
-                                                open: true,
-                                                title: t('model.delete'),
-                                                message: t('model.delete_confirm', { name: model.name }),
-                                                onConfirm: () => {
-                                                  deleteModel(model.id);
-                                                  setDeleteConfirm({ open: false, title: '', message: '', onConfirm: () => {} });
-                                                },
-                                              })}>
+                                              <IconButton size="small" sx={{ p: 0.15 }} onClick={() => {
+                                                const affectedAgents = agents.filter(a =>
+                                                  a.modelId === model.id || a.fallbackModelId === model.id
+                                                );
+                                                let msg = t('model.delete_confirm', { name: model.name });
+                                                if (affectedAgents.length > 0) {
+                                                  msg += '\n\n' + t('provider.delete_affected_agents', {
+                                                    count: affectedAgents.length,
+                                                    names: affectedAgents.map(a => a.name).join(', '),
+                                                    defaultValue: `This will affect ${affectedAgents.length} agent(s): ${affectedAgents.map(a => a.name).join(', ')}`,
+                                                  });
+                                                }
+                                                setDeleteConfirm({
+                                                  open: true,
+                                                  title: t('model.delete'),
+                                                  message: msg,
+                                                  onConfirm: async () => {
+                                                    await deleteModel(model.id);
+                                                    setDeleteConfirm({ open: false, title: '', message: '', onConfirm: () => {} });
+                                                  },
+                                                });
+                                              }}>
                                                 <DeleteIcon size={10} color={errorColor} />
                                               </IconButton>
                                             </Box>

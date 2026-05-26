@@ -63,6 +63,7 @@ export function AgentChat() {
   const [streamingContent, setStreamingContent] = useState('');
   const [toolCalls, setToolCalls] = useState<ToolCallDisplay[]>([]);
   const [permissionRequest, setPermissionRequest] = useState<PermissionRequestPayload | null>(null);
+  const [deleteConvConfirm, setDeleteConvConfirm] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const streamingMsgIdRef = useRef<string | null>(null);
   const toolCallCounterRef = useRef(0);
@@ -280,6 +281,11 @@ export function AgentChat() {
     }
   };
 
+  const handleDeleteConversation = useCallback(async (convId: string) => {
+    await deleteConversation(convId);
+    setDeleteConvConfirm(null);
+  }, [deleteConversation]);
+
   const handleEditMessage = useCallback((_messageId: string, content: string) => {
     const cleaned = content.replace(/\[附件:.*?\]\s*/g, '').trim();
     setInput(cleaned);
@@ -432,7 +438,7 @@ export function AgentChat() {
                 variant={activeConversationId === conv.id ? 'filled' : 'outlined'}
                 color={activeConversationId === conv.id ? 'secondary' : 'default'}
                 onClick={() => useAgentStore.getState().setActiveConversation(conv.id)}
-                onDelete={conversations.length > 1 ? () => deleteConversation(conv.id) : undefined}
+                onDelete={conversations.length > 1 ? () => setDeleteConvConfirm(conv.id) : undefined}
                 deleteIcon={<TrashIcon size={12} />}
                 sx={{
                   height: 24, fontSize: 11, borderRadius: 1.5,
@@ -532,6 +538,33 @@ export function AgentChat() {
           </Button>
           <Button onClick={() => handlePermissionResponse(true, false)} color="primary" variant="contained" autoFocus>
             Allow Once
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={deleteConvConfirm !== null}
+        onClose={() => setDeleteConvConfirm(null)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>{t('chat.delete_confirm_title')}</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            {t('chat.delete_confirm_message', {
+              name: conversations.find((c) => c.id === deleteConvConfirm)?.title || '',
+              defaultValue: `Are you sure you want to delete this conversation? All messages will be permanently lost.`,
+            })}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteConvConfirm(null)}>{t('chat.cancel', { defaultValue: 'Cancel' })}</Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => deleteConvConfirm && handleDeleteConversation(deleteConvConfirm)}
+          >
+            {t('chat.delete', { defaultValue: 'Delete' })}
           </Button>
         </DialogActions>
       </Dialog>

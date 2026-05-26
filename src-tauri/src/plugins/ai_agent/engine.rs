@@ -402,6 +402,7 @@ impl AgentEngine {
 
         let mut iteration = 0;
         let mut force_tool_attempts = 0;
+        let mut tool_call_count = 0;
         tracing::info!("[AgentEngine] starting loop, max_iterations={}, tools_count={}", self.max_iterations, tools_opt.as_ref().map(|t| t.len()).unwrap_or(0));
         let result = 'outer: loop {
             if iteration >= self.max_iterations {
@@ -684,7 +685,12 @@ impl AgentEngine {
                         }
 
                         let tool_result_content = if tool_result.success {
-                            format!("{}\n\n---\nAnalyze the above data and answer the user's question based on the actual results. Do NOT use your own knowledge to override the data.", tool_result.result)
+                            tool_call_count += 1;
+                            if tool_call_count == 1 {
+                                format!("{}\n\n---\nAnalyze the above data and answer the user's question based on the actual results. Do NOT use your own knowledge to override the data.", tool_result.result)
+                            } else {
+                                tool_result.result.clone()
+                            }
                         } else {
                             format!("Tool execution failed: {}\n\nIf this tool is not suitable, try a different approach or explain the limitation to the user.", tool_result.result)
                         };
