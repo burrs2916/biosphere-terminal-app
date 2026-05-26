@@ -13,7 +13,8 @@ export default defineConfig(async () => ({
       output: {
         manualChunks: {
           vendor: ['react', 'react-dom', 'react-router-dom'],
-          mui: ['@mui/material', '@mui/icons-material', '@emotion/react', '@emotion/styled'],
+          mui: ['@mui/material', '@emotion/react', '@emotion/styled'],
+          phosphor: ['@phosphor-icons/react'],
           xterm: ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-search'],
           tiptap: ['@tiptap/core', '@tiptap/react', '@tiptap/starter-kit'],
         },
