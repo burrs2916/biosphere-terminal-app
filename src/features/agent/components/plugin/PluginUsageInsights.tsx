@@ -41,6 +41,7 @@ import {
   exportPluginUsageLogs,
 } from '../../../../core/services/plugin.service';
 import type { ExecutionMetrics, RefineSuggestion, UsageLogEntry, PluginManifest, StructuredRefineResult, FixRecipe, FixErrorType, FixPatchType } from '../../../../proto/plugin';
+import { useTranslation } from 'react-i18next';
 
 interface PluginUsageInsightsProps {
   plugin: PluginManifest;
@@ -48,33 +49,61 @@ interface PluginUsageInsightsProps {
   isDark?: boolean;
 }
 
-const ERROR_TYPE_LABELS: Record<FixErrorType, { label: string; color: string }> = {
-  MissingDependency: { label: '缺少依赖', color: '#FF9800' },
-  SyntaxError: { label: '语法错误', color: '#F44336' },
-  FileNotFound: { label: '文件未找到', color: '#9C27B0' },
-  PermissionDenied: { label: '权限不足', color: '#E91E63' },
-  Timeout: { label: '执行超时', color: '#FF5722' },
-  NetworkError: { label: '网络错误', color: '#00BCD4' },
-  RuntimeError: { label: '运行时错误', color: '#FF7043' },
-  OutputPathError: { label: '输出路径错误', color: '#795548' },
-  UnknownError: { label: '未知错误', color: '#9E9E9E' },
-};
+function getErrorTypeLabel(t: (key: string) => string, errorType: FixErrorType): string {
+  const key = `agent.plugin_usage.error_type_${errorType}`;
+  const fallback: Record<FixErrorType, string> = {
+    MissingDependency: 'Missing Dependency',
+    SyntaxError: 'Syntax Error',
+    FileNotFound: 'File Not Found',
+    PermissionDenied: 'Permission Denied',
+    Timeout: 'Timeout',
+    NetworkError: 'Network Error',
+    RuntimeError: 'Runtime Error',
+    OutputPathError: 'Output Path Error',
+    UnknownError: 'Unknown Error',
+  };
+  const result = t(key);
+  // If translation returns the key itself (missing), use fallback
+  return result === key ? fallback[errorType] : result;
+}
 
-const PATCH_TYPE_LABELS: Record<FixPatchType, { label: string; autoApply: boolean }> = {
-  ScriptReplace: { label: '替换脚本', autoApply: true },
-  ScriptPrefix: { label: '脚本前缀', autoApply: true },
-  ParameterAdd: { label: '添加参数', autoApply: true },
-  ParameterModify: { label: '修改参数', autoApply: true },
-  ManualReview: { label: '需手动审查', autoApply: false },
-};
+function getPatchTypeLabel(t: (key: string) => string, patchType: FixPatchType): string {
+  const key = `agent.plugin_usage.patch_type_${patchType}`;
+  const fallback: Record<FixPatchType, string> = {
+    ScriptReplace: 'Replace Script',
+    ScriptPrefix: 'Script Prefix',
+    ParameterAdd: 'Add Parameter',
+    ParameterModify: 'Modify Parameter',
+    ManualReview: 'Needs Manual Review',
+  };
+  const result = t(key);
+  return result === key ? fallback[patchType] : result;
+}
 
-function getHealthIcon(status: string) {
-  switch (status) {
-    case 'Healthy': return <CheckCircleIcon size={16} color="#81C784" />;
-    case 'Degraded': return <WarningIcon size={16} color="#FFB74D" />;
-    case 'Failed': return <XCircleIcon size={16} color="#E57373" />;
-    default: return null;
-  }
+function getPatchTypeAutoApply(patchType: FixPatchType): boolean {
+  const autoApply: Record<FixPatchType, boolean> = {
+    ScriptReplace: true,
+    ScriptPrefix: true,
+    ParameterAdd: true,
+    ParameterModify: true,
+    ManualReview: false,
+  };
+  return autoApply[patchType];
+}
+
+function getErrorTypeColor(errorType: FixErrorType): string {
+  const colors: Record<FixErrorType, string> = {
+    MissingDependency: '#FF9800',
+    SyntaxError: '#F44336',
+    FileNotFound: '#9C27B0',
+    PermissionDenied: '#E91E63',
+    Timeout: '#FF5722',
+    NetworkError: '#00BCD4',
+    RuntimeError: '#FF7043',
+    OutputPathError: '#795548',
+    UnknownError: '#9E9E9E',
+  };
+  return colors[errorType];
 }
 
 function formatLogContent(text: string): string {
@@ -91,6 +120,7 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
   onRefine,
   isDark = false,
 }) => {
+  const { t } = useTranslation('agent');
   const [metrics, setMetrics] = useState<ExecutionMetrics | null>(null);
   const [suggestion, setSuggestion] = useState<RefineSuggestion | null>(null);
   const [structuredRefine, setStructuredRefine] = useState<StructuredRefineResult | null>(null);
@@ -142,10 +172,10 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
       <Box sx={{ textAlign: 'center', py: 3 }}>
         <ChartBarIcon size={32} color={isDark ? '#666' : '#aaa'} />
         <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          暂无使用数据
+          {t('plugin_usage.no_data')}
         </Typography>
         <Typography variant="caption" color="text.disabled">
-          使用此插件后，这里将显示使用分析和优化建议
+          {t('plugin_usage.no_data_hint')}
         </Typography>
       </Box>
     );
@@ -162,28 +192,34 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
     return '#81C784';
   };
 
+  const healthLabels: Record<string, string> = {
+    'Failed': t('plugin_usage.health_failed'),
+    'Degraded': t('plugin_usage.health_degraded'),
+    'Healthy': t('plugin_usage.health_healthy'),
+  };
+
   return (
     <Box>
       <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
-        使用分析
+        {t('plugin_usage.title')}
       </Typography>
 
       <Paper variant="outlined" sx={{ p: 1.5, mb: 1.5 }}>
         <Stack direction="row" spacing={2} sx={{ mb: 1 }}>
           <Box sx={{ flex: 1 }}>
-            <Typography variant="caption" color="text.secondary">总执行</Typography>
+            <Typography variant="caption" color="text.secondary">{t('plugin_usage.total_executions')}</Typography>
             <Typography variant="h6" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
               {metrics.totalExecutions}
             </Typography>
           </Box>
           <Box sx={{ flex: 1 }}>
-            <Typography variant="caption" color="text.secondary">成功率</Typography>
+            <Typography variant="caption" color="text.secondary">{t('plugin_usage.success_rate')}</Typography>
             <Typography variant="h6" sx={{ fontWeight: 700, lineHeight: 1.2, color: getFailRateColor(failRate) }}>
               {successRate.toFixed(0)}%
             </Typography>
           </Box>
           <Box sx={{ flex: 1 }}>
-            <Typography variant="caption" color="text.secondary">平均耗时</Typography>
+            <Typography variant="caption" color="text.secondary">{t('plugin_usage.avg_duration')}</Typography>
             <Typography variant="h6" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
               {metrics.avgDurationMs < 1000
                 ? `${metrics.avgDurationMs.toFixed(0)}ms`
@@ -194,7 +230,7 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
 
         <Box sx={{ mb: 0.5 }}>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
-            <Typography variant="caption" color="text.secondary">成功 / 失败</Typography>
+            <Typography variant="caption" color="text.secondary">{t('plugin_usage.success_fail')}</Typography>
             <Typography variant="caption" color="text.secondary">
               {metrics.successCount} / {metrics.failCount}
             </Typography>
@@ -234,17 +270,21 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
           }}
         >
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
-            {getHealthIcon(structuredRefine.healthStatus)}
-            <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-              {structuredRefine.healthStatus === 'Failed'
-                ? '⚠️ 需要立即修复'
-                : structuredRefine.healthStatus === 'Degraded'
-                  ? '⚡ 建议优化'
-                  : '✓ 运行正常'}
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              {structuredRefine.healthStatus === 'Failed' ? (
+                <XCircleIcon size={16} color="#E57373" />
+              ) : structuredRefine.healthStatus === 'Degraded' ? (
+                <WarningIcon size={16} color="#FFB74D" />
+              ) : (
+                <CheckCircleIcon size={16} color="#81C784" />
+              )}
+              <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                {healthLabels[structuredRefine.healthStatus] || healthLabels.Healthy}
+              </Typography>
+            </Box>
             <Box sx={{ flex: 1 }} />
             <Chip
-              label={`${structuredRefine.recipes.length} 个修复方案`}
+              label={`${structuredRefine.recipes.length} ${t('plugin_usage.repair_plans').replace('{{count}}', String(structuredRefine.recipes.length))}`}
               size="small"
               sx={{ height: 20, fontSize: 10 }}
             />
@@ -259,6 +299,7 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
                 prev === `${recipe.errorType}_${recipe.toolName}` ? null : `${recipe.errorType}_${recipe.toolName}`
               )}
               isDark={isDark}
+              t={t}
             />
           ))}
 
@@ -272,12 +313,12 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
                 const autoFixable = structuredRefine.recipes.filter(
                   (r) => r.patch.patchType !== 'ManualReview'
                 );
-                const prompt = `请分析插件 "${plugin.name}" (ID: ${plugin.id}) 的使用情况并自动优化。\n\n使用 plugin_manager 工具的 analyze_usage action 查看详细分析，然后根据分析结果使用 refine action 修复问题。\n\n当前失败率: ${failRate.toFixed(1)}%，需要降低到 20% 以下。\n\n检测到 ${structuredRefine.recipes.length} 个问题，其中 ${autoFixable.length} 个可自动修复。`;
+                const prompt = `${t('plugin_usage.immediate_fix')}: "${plugin.name}" (ID: ${plugin.id}).\n\n${t('plugin_usage.optimize_suggestion')}\n\n${t('plugin_usage.fail_rate')}: ${failRate.toFixed(1)}%，${t('plugin_usage.suggest_optimize')} 20%。\n\n${t('plugin_usage.detected_issues', { count: structuredRefine.recipes.length, autoFixable: autoFixable.length })}`;
                 onRefine(plugin.id, plugin.name, prompt);
               }}
               sx={{ fontSize: 11, textTransform: 'none', mt: 1 }}
             >
-              {structuredRefine.healthStatus === 'Failed' ? '立即自动修复' : 'AI 自动优化'}
+              {structuredRefine.healthStatus === 'Failed' ? t('plugin_usage.immediate_fix') : t('plugin_usage.ai_auto_optimize')}
             </Button>
           )}
         </Paper>
@@ -300,13 +341,13 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
             <ArrowUpIcon size={14} color={getFailRateColor(failRate)} />
             <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-              {failRate > 50 ? '⚠️ 需要立即优化' : failRate > 20 ? '⚡ 建议优化' : '优化建议'}
+              {failRate > 50 ? t('plugin_usage.needs_immediate_optimize') : failRate > 20 ? t('plugin_usage.suggest_optimize') : t('plugin_usage.optimize_suggestion')}
             </Typography>
           </Box>
 
           {suggestion.commonErrors.length > 0 && (
             <Box sx={{ mb: 0.5 }}>
-              <Typography variant="caption" color="text.secondary">常见错误：</Typography>
+              <Typography variant="caption" color="text.secondary">{t('plugin_usage.common_errors')}</Typography>
               {suggestion.commonErrors.slice(0, 3).map((err, idx) => (
                 <Typography key={idx} variant="caption" sx={{ display: 'block', color: '#E57373', fontSize: 10 }}>
                   • {err.length > 80 ? err.substring(0, 80) + '...' : err}
@@ -316,7 +357,7 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
           )}
 
           <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-            失败率: {failRate.toFixed(1)}% | 近24h失败: {suggestion.recentFailCount}次
+            {t('plugin_usage.fail_rate')}: {failRate.toFixed(1)}% | {t('plugin_usage.recent_24h_fail', { count: suggestion.recentFailCount })}
           </Typography>
 
           {onRefine && (
@@ -326,12 +367,12 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
               color={failRate > 50 ? 'error' : 'primary'}
               startIcon={<LightningIcon size={12} />}
               onClick={() => {
-                const prompt = `请分析插件 "${plugin.name}" (ID: ${plugin.id}) 的使用情况并自动优化。\n\n使用 plugin_manager 工具的 analyze_usage action 查看详细分析，然后根据分析结果使用 refine action 修复问题。\n\n当前失败率: ${failRate.toFixed(1)}%，需要降低到 20% 以下。`;
+                const prompt = `${t('plugin_usage.ai_auto_optimize')}: "${plugin.name}" (ID: ${plugin.id})。\n\n${t('plugin_usage.optimize_suggestion')}\n\n${t('plugin_usage.fail_rate')}: ${failRate.toFixed(1)}%，${t('plugin_usage.suggest_optimize')} 20%。`;
                 onRefine(plugin.id, plugin.name, prompt);
               }}
               sx={{ fontSize: 11, textTransform: 'none' }}
             >
-              {failRate > 50 ? '立即自动优化' : 'AI 自动优化'}
+              {failRate > 50 ? t('plugin_usage.immediate_fix') : t('plugin_usage.ai_auto_optimize')}
             </Button>
           )}
         </Paper>
@@ -341,9 +382,9 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
         <>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
             <Typography variant="subtitle2" sx={{ fontWeight: 600, flex: 1 }}>
-              最近执行
+              {t('plugin_usage.title')}
             </Typography>
-            <Tooltip title="导出日志" arrow>
+            <Tooltip title={t('plugin_usage.export_logs')} arrow>
               <IconButton
                 size="small"
                 onClick={async () => {
@@ -365,11 +406,11 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
                 <ExportIcon size={12} />
               </IconButton>
             </Tooltip>
-            <Tooltip title="清除日志" arrow>
+            <Tooltip title={t('plugin_usage.clear_logs')} arrow>
               <IconButton
                 size="small"
                 onClick={async () => {
-                  if (!window.confirm(`确定要清除插件 "${plugin.name}" 的所有执行日志吗？此操作不可恢复。`)) return;
+                  if (!window.confirm(t('plugin_usage.confirm_clear_logs', { name: plugin.name }))) return;
                   try {
                     await clearPluginUsageLogs(plugin.id);
                     loadData();
@@ -425,7 +466,7 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
       <Dialog open={!!selectedLog} onClose={() => setSelectedLog(null)} maxWidth="md" fullWidth>
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, pb: 1 }}>
           <Typography variant="subtitle1" sx={{ fontWeight: 600, flex: 1 }}>
-            日志详情
+            {t('plugin_usage.log_detail')}
           </Typography>
           <IconButton size="small" onClick={() => setSelectedLog(null)}>
             <XIcon size={16} />
@@ -435,20 +476,20 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
           {selectedLog && (
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
               <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                <Chip label={selectedLog.success ? '成功' : '失败'} color={selectedLog.success ? 'success' : 'error'} size="small" sx={{ fontWeight: 600 }} />
-                <Chip label={selectedLog.source === 'user' ? '手动执行' : 'AI 执行'} variant="outlined" size="small" />
+                <Chip label={selectedLog.success ? t('plugin_usage.success_label') : t('plugin_usage.fail_label')} color={selectedLog.success ? 'success' : 'error'} size="small" sx={{ fontWeight: 600 }} />
+                <Chip label={selectedLog.source === 'user' ? t('plugin_usage.manual_exec') : t('plugin_usage.ai_exec')} variant="outlined" size="small" />
                 <Chip label={`${selectedLog.durationMs}ms`} variant="outlined" size="small" />
               </Box>
 
               <Box>
-                <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>工具</Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{t('plugin_usage.tool_label') || 'Tool'}</Typography>
                 <Typography variant="body2">{selectedLog.toolName}</Typography>
               </Box>
 
               {selectedLog.paramsSummary && (
                 <Box>
-                  <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>参数</Typography>
-                  <Paper variant="outlined" sx={{ p: 1, mt: 0.5, bgcolor: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', maxHeight: 200, overflow: 'auto' }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{t('plugin_usage.params_label')}</Typography>
+                  <Paper variant="outlined" sx={{ p: 1, mt: 0.5, bgcolor: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0,0.02)', maxHeight: 200, overflow: 'auto' }}>
                     <Typography variant="caption" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 11, fontFamily: 'monospace' }}>
                       {formatLogContent(selectedLog.paramsSummary)}
                     </Typography>
@@ -458,8 +499,8 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
 
               {selectedLog.outputSummary && (
                 <Box>
-                  <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>输出</Typography>
-                  <Paper variant="outlined" sx={{ p: 1, mt: 0.5, bgcolor: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)', maxHeight: 400, overflow: 'auto' }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{t('plugin_usage.output_label')}</Typography>
+                  <Paper variant="outlined" sx={{ p: 1, mt: 0.5, bgcolor: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0,0.02)', maxHeight: 400, overflow: 'auto' }}>
                     <Typography variant="caption" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 11, fontFamily: 'monospace' }}>
                       {formatLogContent(selectedLog.outputSummary)}
                     </Typography>
@@ -469,7 +510,7 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
 
               {selectedLog.errorMessage && (
                 <Box>
-                  <Typography variant="caption" color="error" sx={{ fontWeight: 600 }}>错误信息</Typography>
+                  <Typography variant="caption" color="error" sx={{ fontWeight: 600 }}>{t('plugin_usage.error_label')}</Typography>
                   <Paper variant="outlined" sx={{ p: 1, mt: 0.5, bgcolor: isDark ? 'rgba(229,115,115,0.05)' : 'rgba(229,115,115,0.03)', borderColor: isDark ? 'rgba(229,115,115,0.2)' : 'rgba(229,115,115,0.15)', maxHeight: 200, overflow: 'auto' }}>
                     <Typography variant="caption" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 11, fontFamily: 'monospace', color: '#E57373' }}>
                       {formatLogContent(selectedLog.errorMessage)}
@@ -479,7 +520,7 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
               )}
 
               <Box>
-                <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>执行时间</Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600 }}>{t('plugin_usage.exec_time')}</Typography>
                 <Typography variant="body2" sx={{ fontSize: 12 }}>
                   {new Date(selectedLog.createdAt).toLocaleString()}
                 </Typography>
@@ -489,7 +530,7 @@ export const PluginUsageInsights: React.FC<PluginUsageInsightsProps> = ({
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
           <Button size="small" onClick={() => setSelectedLog(null)} sx={{ textTransform: 'none' }}>
-            关闭
+            {t('plugin_usage.close')}
           </Button>
         </DialogActions>
       </Dialog>
@@ -502,12 +543,14 @@ interface RecipeCardProps {
   expanded: boolean;
   onToggle: () => void;
   isDark: boolean;
+  t: (key: string) => string;
 }
 
-const RecipeCard: React.FC<RecipeCardProps> = ({ recipe, expanded, onToggle, isDark }) => {
-  const errorInfo = ERROR_TYPE_LABELS[recipe.errorType] || ERROR_TYPE_LABELS.UnknownError;
-  const patchInfo = PATCH_TYPE_LABELS[recipe.patch.patchType] || PATCH_TYPE_LABELS.ManualReview;
-  const isAutoFixable = patchInfo.autoApply && recipe.confidence >= 0.7;
+const RecipeCard: React.FC<RecipeCardProps> = ({ recipe, expanded, onToggle, isDark, t }) => {
+  const errorColor = getErrorTypeColor(recipe.errorType);
+  const errorLabel = getErrorTypeLabel(t, recipe.errorType);
+  const patchLabel = getPatchTypeLabel(t, recipe.patch.patchType);
+  const isAutoFixable = getPatchTypeAutoApply(recipe.patch.patchType) && recipe.confidence >= 0.7;
 
   return (
     <Paper
@@ -517,22 +560,22 @@ const RecipeCard: React.FC<RecipeCardProps> = ({ recipe, expanded, onToggle, isD
         mb: 0.5,
         borderRadius: 1.5,
         borderColor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)',
-        bgcolor: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.01)',
+        bgcolor: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.08)',
       }}
     >
       <Box
         sx={{ display: 'flex', alignItems: 'center', gap: 0.5, cursor: 'pointer' }}
         onClick={onToggle}
       >
-        <WrenchIcon size={12} color={errorInfo.color} />
+        <WrenchIcon size={12} color={errorColor} />
         <Chip
-          label={errorInfo.label}
+          label={errorLabel}
           size="small"
           sx={{
             height: 18,
             fontSize: 9,
-            bgcolor: `${errorInfo.color}20`,
-            color: errorInfo.color,
+            bgcolor: `${errorColor}20`,
+            color: errorColor,
             '& .MuiChip-label': { px: 0.5 },
           }}
         />
@@ -540,7 +583,7 @@ const RecipeCard: React.FC<RecipeCardProps> = ({ recipe, expanded, onToggle, isD
           {recipe.toolName}
         </Typography>
         <Chip
-          label={isAutoFixable ? '可自动修复' : '需审查'}
+          label={isAutoFixable ? t('plugin_usage.auto_fixable') : t('plugin_usage.needs_review')}
           size="small"
           sx={{
             height: 18,
@@ -565,13 +608,13 @@ const RecipeCard: React.FC<RecipeCardProps> = ({ recipe, expanded, onToggle, isD
           </Typography>
           <Box sx={{ display: 'flex', gap: 0.5, mb: 0.5 }}>
             <Chip
-              label={`修复方式: ${patchInfo.label}`}
+              label={`${t('plugin_usage.fix_method')}: ${patchLabel}`}
               size="small"
               variant="outlined"
               sx={{ height: 16, fontSize: 9, '& .MuiChip-label': { px: 0.5 } }}
             />
             <Chip
-              label={`置信度: ${Math.round(recipe.confidence * 100)}%`}
+              label={`${t('plugin_usage.confidence')}: ${Math.round(recipe.confidence * 100)}%`}
               size="small"
               variant="outlined"
               sx={{ height: 16, fontSize: 9, '& .MuiChip-label': { px: 0.5 } }}

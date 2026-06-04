@@ -633,7 +633,7 @@ export function AgentManager() {
                         <Box sx={{ mb: 3 }}>
                           {groups.length > 0 && (
                             <Typography variant="caption" sx={{ fontSize: 10, color: 'text.disabled', fontWeight: 600, mb: 0.5, display: 'block' }}>
-                              未分组
+                              {t('ungrouped')}
                             </Typography>
                           )}
                           <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>

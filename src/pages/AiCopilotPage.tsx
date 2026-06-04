@@ -112,7 +112,7 @@ export function AiCopilotPage() {
           setMessages(allMsgs);
           const firstUserMsg = allMsgs.find((m) => m.role === 'user');
           if (firstUserMsg) {
-            const autoTitle = firstUserMsg.content.replace(/\[附件:.*?\]\s*/g, '').trim().slice(0, 40);
+            const autoTitle = firstUserMsg.content.replace(/\[(?:附件|Attachment):.*?\]\s*/g, '').trim().slice(0, 40);
             if (autoTitle) {
               updateConversationTitle(conversationId, autoTitle).catch((e) => notify(String(e)));
             }

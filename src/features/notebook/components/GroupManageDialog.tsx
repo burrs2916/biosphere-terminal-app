@@ -499,7 +499,7 @@ export function GroupManageDialog({ open, onClose }: GroupManageDialogProps) {
         </DialogTitle>
         <DialogContent>
           <Typography variant="body2">
-            {t('category.delete_confirm_desc', { name: categoryToDelete?.name }) || `确定要删除分类「${categoryToDelete?.name}」吗？此操作不可撤销。`}
+            {t('category.delete_confirm_desc', { name: categoryToDelete?.name })}
           </Typography>
         </DialogContent>
         <DialogActions>

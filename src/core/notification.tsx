@@ -29,7 +29,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     severity: 'error',
   });
 
-  const notify = useCallback((message: string, severity: Severity = 'error') => {
+  const notify = useCallback((message: string, severity: Severity = 'info') => {
     setState({ open: true, message, severity });
   }, []);
 

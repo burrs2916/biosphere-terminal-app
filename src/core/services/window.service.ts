@@ -42,6 +42,56 @@ export async function openCategoryNotesWindow(groupId: string, categoryName: str
   return webview;
 }
 
+export async function openRemoteDesktopWindow(sshParams?: {
+  host: string;
+  port?: number;
+  username: string;
+  authMethod: string;
+  privateKeyPath?: string;
+  password?: string;
+}): Promise<WebviewWindow | null> {
+  const id = Date.now().toString(36);
+  const key = `remote-desktop-${id}`;
+
+  let url = '/remote-desktop';
+  if (sshParams) {
+    const params = new URLSearchParams();
+    params.set('host', sshParams.host);
+    if (sshParams.port) params.set('port', String(sshParams.port));
+    params.set('username', sshParams.username);
+    params.set('authMethod', sshParams.authMethod);
+    if (sshParams.privateKeyPath) params.set('privateKeyPath', sshParams.privateKeyPath);
+    if (sshParams.password) params.set('password', sshParams.password);
+    url += `?${params.toString()}`;
+  }
+
+  const webview = new WebviewWindow(key, {
+    url,
+    title: 'Remote Desktop',
+    width: 1200,
+    height: 800,
+    minWidth: 800,
+    minHeight: 600,
+    center: true,
+    resizable: true,
+    decorations: true,
+    focus: true,
+  });
+
+  openWindows.set(key, webview);
+
+  webview.once('tauri://destroyed', () => {
+    openWindows.delete(key);
+  });
+
+  webview.once('tauri://error', (e) => {
+    console.error('[window] failed to create remote desktop window:', e);
+    openWindows.delete(key);
+  });
+
+  return webview;
+}
+
 export async function openPluginScriptViewerWindow(pluginId: string, pluginName: string): Promise<WebviewWindow | null> {
   const key = `plugin-script-${pluginId}`;
 

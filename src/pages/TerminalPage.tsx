@@ -32,7 +32,7 @@ import { spawnTerminal, killTerminal, writeToTerminal, getTerminalCwd } from '..
 import { parseCommand } from '../core/services/command.service';
 import { generateId } from '../core/utils';
 import type { PtyConfig } from '../proto';
-import { openNotesReferenceWindow, openAiCopilotWindow, openPluginWorkshopWindow } from '../core/services/window.service';
+import { openNotesReferenceWindow, openAiCopilotWindow, openPluginWorkshopWindow, openRemoteDesktopWindow } from '../core/services/window.service';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '../engine';
 import { useNotify } from '../core/notification';
@@ -43,7 +43,7 @@ interface Tab {
   title: string;
   isActive: boolean;
   connectionType: 'local' | 'ssh';
-  ssh?: { host: string; port: number; username: string; authMethod: string; privateKeyPath?: string };
+  ssh?: { host: string; port: number; username: string; authMethod: string; privateKeyPath?: string; password?: string };
   disconnected?: boolean;
   profileId?: string;
 }
@@ -151,6 +151,7 @@ export function TerminalPage() {
           username: result.ssh.username,
           authMethod: result.ssh.auth_method,
           privateKeyPath: result.ssh.private_key_path,
+          password: result.ssh.password,
         } : undefined,
       },
     ]);
@@ -230,6 +231,7 @@ export function TerminalPage() {
           username: tab.ssh.username,
           auth_method: tab.ssh.authMethod as 'none' | 'password' | 'private_key',
           private_key_path: tab.ssh.privateKeyPath,
+          password: tab.ssh.password,
         },
       };
       spawnTerminal(newId, config).catch((e) => { console.error(e); notify(String(e)); });
@@ -264,6 +266,19 @@ export function TerminalPage() {
   const handleOpenWorkshop = useCallback(() => {
     openPluginWorkshopWindow().catch((e) => { console.error(e); notify(String(e)); });
   }, []);
+
+  const handleOpenRemoteDesktop = useCallback(() => {
+    const activeTab = tabsRef.current.find((t) => t.isActive);
+    const sshParams = activeTab?.ssh ? {
+      host: activeTab.ssh.host,
+      port: activeTab.ssh.port,
+      username: activeTab.ssh.username,
+      authMethod: activeTab.ssh.authMethod,
+      privateKeyPath: activeTab.ssh.privateKeyPath,
+      password: activeTab.ssh.password,
+    } : undefined;
+    openRemoteDesktopWindow(sshParams).catch((e) => { console.error(e); notify(String(e)); });
+  }, [notify]);
 
   const handleClearBuffer = useCallback(() => {
     getActiveTerminal()?.clearBuffer();
@@ -603,131 +618,15 @@ export function TerminalPage() {
         onOpenNotes={handleOpenNotes}
         onOpenAiCopilot={handleOpenAiCopilot}
         onOpenWorkshop={handleOpenWorkshop}
+        onOpenRemoteDesktop={handleOpenRemoteDesktop}
         onClearBuffer={handleClearBuffer}
         onCopy={handleCopy}
         onPaste={handlePaste}
         onFind={handleFind}
+        findOpen={findOpen}
+        isSshSession={!!activeTab?.ssh}
       />
       <TabBar tabs={tabs} onSelect={handleSelectTab} onClose={handleCloseTab} />
-
-      {findOpen && (
-        <Box
-          sx={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 1,
-            px: 2,
-            py: 0.5,
-            borderBottom: '1px solid',
-            borderColor: 'divider',
-            bgcolor: isDark ? '#1C2128' : '#fafafa',
-          }}
-        >
-          <TextField
-            autoFocus
-            size="small"
-            placeholder={t('find') + '...'}
-            value={findQuery}
-            onChange={(e) => {
-              const q = e.target.value;
-              setFindQuery(q);
-              if (q) {
-                getActiveTerminal()?.findNext(q, getFindOptions());
-              } else {
-                getActiveTerminal()?.clearSearchDecorations();
-                setFindResultCount(null);
-              }
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                if (e.shiftKey) handleFindPrevious();
-                else handleFindNext();
-              } else if (e.key === 'Escape') {
-                getActiveTerminal()?.clearSearchDecorations();
-                setFindOpen(false);
-                setFindQuery('');
-                setFindResultCount(null);
-              }
-            }}
-            variant="standard"
-            slotProps={{
-              input: {
-                startAdornment: (
-                  <InputAdornment position="start">
-                    <MagnifyingGlassIcon size={16} color={isDark ? '#8B949E' : '#6B7280'} />
-                  </InputAdornment>
-                ),
-                sx: { fontSize: '0.85rem' },
-              },
-            }}
-            sx={{ flex: 1, maxWidth: 300 }}
-          />
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <IconButton
-              size="small"
-              onClick={() => setFindCaseSensitive((v) => !v)}
-              sx={{
-                bgcolor: findCaseSensitive ? 'rgba(108,99,255,0.15)' : 'transparent',
-                borderRadius: 1,
-                fontSize: '0.7rem',
-                fontWeight: 600,
-                width: 28,
-                height: 28,
-              }}
-            >
-              <Typography variant="caption" sx={{ fontSize: '0.7rem', fontWeight: 700 }}>Aa</Typography>
-            </IconButton>
-            <IconButton
-              size="small"
-              onClick={() => setFindWholeWord((v) => !v)}
-              sx={{
-                bgcolor: findWholeWord ? 'rgba(108,99,255,0.15)' : 'transparent',
-                borderRadius: 1,
-                width: 28,
-                height: 28,
-              }}
-            >
-              <Typography variant="caption" sx={{ fontSize: '0.7rem', fontWeight: 700 }}>W</Typography>
-            </IconButton>
-            <IconButton
-              size="small"
-              onClick={() => setFindRegex((v) => !v)}
-              sx={{
-                bgcolor: findRegex ? 'rgba(108,99,255,0.15)' : 'transparent',
-                borderRadius: 1,
-                width: 28,
-                height: 28,
-              }}
-            >
-              <Typography variant="caption" sx={{ fontSize: '0.7rem', fontWeight: 700 }}>.*</Typography>
-            </IconButton>
-          </Box>
-          {findResultCount != null && findQuery && (
-            <Typography variant="caption" sx={{ color: 'text.secondary', minWidth: 40, textAlign: 'center' }}>
-              {findResultCount.resultCount === 0
-                ? t('find_no_results')
-                : t('find_results', { current: findResultCount.resultIndex + 1, total: findResultCount.resultCount })}
-            </Typography>
-          )}
-          <Box sx={{ display: 'flex', alignItems: 'center' }}>
-            <IconButton size="small" onClick={handleFindPrevious}>
-              <ArrowUpIcon size={14} />
-            </IconButton>
-            <IconButton size="small" onClick={handleFindNext}>
-              <ArrowDownIcon size={14} />
-            </IconButton>
-          </Box>
-          <IconButton size="small" onClick={() => {
-            getActiveTerminal()?.clearSearchDecorations();
-            setFindOpen(false);
-            setFindQuery('');
-            setFindResultCount(null);
-          }}>
-            <XIcon size={14} />
-          </IconButton>
-        </Box>
-      )}
 
       <Box sx={{ flex: 1, overflow: 'hidden', position: 'relative' }} data-terminal-container onContextMenu={handleContextMenu}>
         {tabs.map((tab) => (

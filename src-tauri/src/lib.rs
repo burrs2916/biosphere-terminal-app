@@ -15,6 +15,7 @@ use app::agent_service::AgentService;
 use app::plugin_service::PluginService;
 use app::linker_service::LinkerService;
 use app::icon_service::IconService;
+use app::remote_desktop_service::RemoteDesktopService;
 use domain::command::executor::CommandExecutor;
 
 fn get_project_root() -> std::path::PathBuf {
@@ -100,6 +101,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let command_executor = Arc::new(CommandExecutor::new(db_arc.clone()));
             let icons_dir = data_dir.join("icons");
             let icon_service = Arc::new(IconService::new(db_arc.clone(), icons_dir));
+            let remote_desktop_service = Arc::new(RemoteDesktopService::new());
 
             app_handle.manage(db_arc);
             app_handle.manage(notebook_service);
@@ -108,6 +110,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             app_handle.manage(linker_service);
             app_handle.manage(command_executor);
             app_handle.manage(icon_service);
+            app_handle.manage(remote_desktop_service);
 
             Ok(())
         })
@@ -228,6 +231,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::icon::delete_custom_icon,
             interface::commands::icon::get_custom_icon_urls,
             interface::commands::notebook::unlink_command_note,
+            interface::commands::remote_desktop::create_remote_desktop,
+            interface::commands::remote_desktop::close_remote_desktop,
+            interface::commands::remote_desktop::setup_remote_desktop,
         ])
         .run(tauri::generate_context!())?;
 

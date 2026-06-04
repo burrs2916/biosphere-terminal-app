@@ -170,17 +170,25 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         clearTimeout(resizeTimerRef.current);
       }
       resizeTimerRef.current = setTimeout(() => {
-        if (!fitAddonRef.current || !terminalRef.current || !containerRef.current) return;
+        if (isDisposedRef.current) return;
+        const term = terminalRef.current;
+        const fit = fitAddonRef.current;
+        const container = containerRef.current;
+        if (!fit || !term || !container) return;
+        if (terminalRef.current !== term) return;
+        if (!term.element) return;
         if (!visible) return;
-        const rect = containerRef.current.getBoundingClientRect();
+        const rect = container.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) return;
         try {
-          fitAddonRef.current.fit();
+          fit.fit();
         } catch (err) {
-          console.error('TerminalEmulator: fitAddon.fit in handleResize', err);
+          // Silently ignore fit errors during cleanup
         }
       }, 50);
     }, [visible]);
+
+    const isDisposedRef = useRef(false);
 
     useEffect(() => {
       if (!containerRef.current) return;
@@ -275,16 +283,15 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       });
 
       requestAnimationFrame(() => {
-        if (fitAddonRef.current && containerRef.current) {
+        if (fitAddonRef.current && containerRef.current && terminalRef.current && terminalRef.current.element) {
           const rect = containerRef.current.getBoundingClientRect();
           if (rect.width > 0 && rect.height > 0) {
             try {
-              fitAddon.fit();
-              const cols = terminal.cols;
-              const rows = terminal.rows;
+              fitAddonRef.current.fit();
+              const cols = terminalRef.current.cols;
+              const rows = terminalRef.current.rows;
               resizeTerminal(sessionId, rows, cols).catch((e) => notify(String(e)));
             } catch (err) {
-              console.error('TerminalEmulator: fitAddon.fit in requestAnimationFrame', err);
             }
           }
         }
@@ -429,6 +436,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       window.addEventListener('resize', handleResize);
 
       return () => {
+        isDisposedRef.current = true;
         if (resizeTimerRef.current) {
           clearTimeout(resizeTimerRef.current);
         }
@@ -448,7 +456,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
           unlisten();
         }
         unlistenersRef.current = [];
-        terminal.dispose();
+        try { terminal.dispose(); } catch {}
         terminalRef.current = null;
         fitAddonRef.current = null;
         searchAddonRef.current = null;
@@ -509,14 +517,16 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
 
     useEffect(() => {
       if (visible && terminalRef.current && fitAddonRef.current && containerRef.current) {
+        const term = terminalRef.current;
+        const fit = fitAddonRef.current;
+        const container = containerRef.current;
         requestAnimationFrame(() => {
-          if (fitAddonRef.current && containerRef.current) {
-            const rect = containerRef.current.getBoundingClientRect();
+          if (fit && container && term && terminalRef.current === term && term.element) {
+            const rect = container.getBoundingClientRect();
             if (rect.width > 0 && rect.height > 0) {
               try {
-                fitAddonRef.current.fit();
+                fit.fit();
               } catch (err) {
-                console.error('TerminalEmulator: fitAddon.fit in visible effect', err);
               }
             }
           }

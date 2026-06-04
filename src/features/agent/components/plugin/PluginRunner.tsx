@@ -37,6 +37,7 @@ import { UiSchemaRenderer } from './UiSchemaRenderer';
 import { PluginUsageInsights } from './PluginUsageInsights';
 import { useNotify } from '../../../../core/notification';
 import { ResultViewRenderer } from './ResultViewRenderer';
+import { useTranslation } from 'react-i18next';
 
 interface PluginRunnerProps {
   plugin: PluginManifest;
@@ -88,7 +89,7 @@ function loadParamMemory(pluginId: string, toolName: string): Record<string, unk
     const key = `${PARAM_MEMORY_PREFIX}${pluginId}_${toolName}`;
     const stored = localStorage.getItem(key);
     if (stored) return JSON.parse(stored);
-  } catch { console.error('PluginRunner: saveParamMemory failed'); }
+  } catch { console.error('PluginRunner: loadParamMemory failed'); }
   return null;
 }
 
@@ -113,6 +114,7 @@ function getFieldsForStep(uiSchema: UiSchema | null, step: InteractionStep): UiS
 }
 
 export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, onToolResult, workspaceDir }) => {
+  const { t } = useTranslation('agent');
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
   const [activeTab, setActiveTab] = useState(0);
@@ -193,7 +195,7 @@ export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, on
 
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => {
-        reject(new Error(`执行超时（${EXECUTION_TIMEOUT_MS / 1000}秒），插件可能无响应或后端发生错误`));
+        reject(new Error(t('plugin_usage.timeout_error', { seconds: EXECUTION_TIMEOUT_MS / 1000 })));
       }, EXECUTION_TIMEOUT_MS);
     });
 
@@ -284,7 +286,7 @@ export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, on
   if (toolTabs.length === 0) {
     return (
       <Box sx={{ p: 2, textAlign: 'center' }}>
-        <Typography color="text.secondary">此插件没有可用的工具</Typography>
+        <Typography color="text.secondary">{t('plugin_usage.no_tools')}</Typography>
       </Box>
     );
   }
@@ -308,7 +310,7 @@ export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, on
             {plugin.description}
           </Typography>
         </Box>
-        <Tooltip title={showHistory ? '隐藏历史' : '执行历史'} arrow>
+        <Tooltip title={showHistory ? t('plugin_usage.close') : t('plugin_usage.title')} arrow>
           <IconButton
             size="small"
             onClick={() => setShowHistory(!showHistory)}
@@ -369,6 +371,7 @@ export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, on
                   onSubmit={() => handleExecute(activeTab)}
                   loading={currentTab.executing}
                   isDark={isDark}
+                  t={t}
                 />
               ) : (
                 <UiSchemaRenderer
@@ -388,6 +391,7 @@ export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, on
                 onChange={(v) => handleValuesChange(activeTab, v)}
                 onSubmit={() => handleExecute(activeTab)}
                 loading={currentTab.executing}
+                t={t}
               />
             )}
 
@@ -404,7 +408,7 @@ export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, on
               >
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
                   <Chip
-                    label={currentTab.result.success ? '成功' : '失败'}
+                    label={currentTab.result.success ? t('plugin_usage.success_label') : t('plugin_usage.fail_label')}
                     color={currentTab.result.success ? 'success' : 'error'}
                     size="small"
                     sx={{ fontWeight: 600, fontSize: 12 }}
@@ -419,12 +423,12 @@ export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, on
                     {currentTab.result.durationMs}ms
                   </Typography>
                   <Box sx={{ flex: 1 }} />
-                  <Tooltip title="复制结果" arrow>
+                  <Tooltip title={t('plugin_usage.output_prefix').trim() || 'Copy Result'} arrow>
                     <IconButton size="small" onClick={() => handleCopyResult(currentTab.result!.output)} sx={{ color: 'text.secondary', p: 0.25 }}>
                       <CopyIcon size={14} />
                     </IconButton>
                   </Tooltip>
-                  <Tooltip title="导出结果" arrow>
+                  <Tooltip title={t('plugin_usage.export_logs').trim() || 'Export Result'} arrow>
                     <IconButton size="small" onClick={() => handleExportResult(currentTab.result!.output, currentTab.tool.name)} sx={{ color: 'text.secondary', p: 0.25 }}>
                       <DownloadSimpleIcon size={14} />
                     </IconButton>
@@ -452,7 +456,7 @@ export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, on
                           color: isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.6)',
                           '&:hover': {
                             borderColor: isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.3)',
-                            bgcolor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
+                            bgcolor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0.03)',
                           },
                         }}
                       >
@@ -468,7 +472,7 @@ export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, on
               <Box sx={{ mt: 2 }}>
                 <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 0.5 }}>
                   <ClockCounterClockwiseIcon size={14} />
-                  执行历史
+                  {t('plugin_usage.title')}
                 </Typography>
                 {currentTab.history.slice(0, 10).map((entry) => (
                   <Paper
@@ -490,26 +494,26 @@ export const PluginRunner: React.FC<PluginRunnerProps> = ({ plugin, onRefine, on
                         sx={{ height: 18, fontSize: 10, minWidth: 24, '& .MuiChip-label': { px: 0.5 } }}
                       />
                       <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
-                        {entry.source === 'user' ? '手动' : 'AI'} · {entry.durationMs}ms
+                        {entry.source === 'user' ? t('plugin_usage.manual_exec') : t('plugin_usage.ai_exec')} · {entry.durationMs}ms
                       </Typography>
                       <Box sx={{ flex: 1 }} />
                       <Typography variant="caption" sx={{ color: 'text.disabled', fontSize: 9 }}>
-                        {formatTimestamp(entry.createdAt)}
+                        {formatTimestamp(t, entry.createdAt)}
                       </Typography>
                     </Box>
                     {entry.paramsSummary && (
                       <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10, display: 'block', mb: 0.25 }} noWrap>
-                        参数: {entry.paramsSummary}
+                        {t('plugin_usage.params_prefix')}{entry.paramsSummary}
                       </Typography>
                     )}
                     {entry.outputSummary && (
                       <Typography variant="caption" sx={{ color: isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)', fontSize: 10, display: 'block' }} noWrap>
-                        输出: {entry.outputSummary}
+                        {t('plugin_usage.output_prefix')}{entry.outputSummary}
                       </Typography>
                     )}
                     {entry.errorMessage && (
                       <Typography variant="caption" sx={{ color: '#E57373', fontSize: 10, display: 'block' }} noWrap>
-                        错误: {entry.errorMessage}
+                        {t('plugin_usage.error_prefix')}{entry.errorMessage}
                       </Typography>
                     )}
                   </Paper>
@@ -546,10 +550,11 @@ interface WizardFormProps {
   onSubmit: () => void;
   loading?: boolean;
   isDark: boolean;
+  t: (key: string, options?: Record<string, unknown>) => string;
 }
 
 const WizardForm: React.FC<WizardFormProps> = ({
-  uiSchema, steps, currentStep, values, onChange, onStepChange, onSubmit, loading, isDark,
+  uiSchema, steps, currentStep, values, onChange, onStepChange, onSubmit, loading, isDark, t,
 }) => {
   const step = steps[currentStep];
   const isLastStep = currentStep === steps.length - 1;
@@ -558,8 +563,8 @@ const WizardForm: React.FC<WizardFormProps> = ({
   const stepUiSchema: UiSchema = useMemo(() => ({
     ...uiSchema,
     fields: stepFields,
-    submitLabel: isLastStep ? '执行' : '下一步',
-  }), [uiSchema, stepFields, isLastStep]);
+    submitLabel: isLastStep ? t('plugin_usage.execute') : t('plugin_usage.next_step'),
+  }), [uiSchema, stepFields, isLastStep, t]);
 
   const handleNext = useCallback(() => {
     if (isLastStep) {
@@ -625,7 +630,7 @@ const WizardForm: React.FC<WizardFormProps> = ({
               color: isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.6)',
             }}
           >
-            上一步
+            {t('plugin_usage.prev_step')}
           </Button>
         )}
         {!isLastStep && (
@@ -640,7 +645,7 @@ const WizardForm: React.FC<WizardFormProps> = ({
               '&:hover': { bgcolor: isDark ? '#29B6F6' : '#1565C0' },
             }}
           >
-            下一步
+            {t('plugin_usage.next_step')}
           </Button>
         )}
         {isLastStep && !loading && (
@@ -655,7 +660,7 @@ const WizardForm: React.FC<WizardFormProps> = ({
               '&:hover': { bgcolor: isDark ? '#29B6F6' : '#1565C0' },
             }}
           >
-            执行
+            {t('plugin_usage.execute')}
           </Button>
         )}
       </Box>
@@ -682,17 +687,17 @@ async function loadExecutionHistory(pluginId: string): Promise<ExecutionHistoryE
   }
 }
 
-function formatTimestamp(ms: number): string {
+function formatTimestamp(t: (key: string, options?: Record<string, unknown>) => string, ms: number): string {
   const d = new Date(ms);
   const now = new Date();
   const diffMs = now.getTime() - d.getTime();
   const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return '刚刚';
-  if (diffMin < 60) return `${diffMin}分钟前`;
+  if (diffMin < 1) return t('plugin_usage.just_now');
+  if (diffMin < 60) return t('plugin_usage.minutes_ago', { count: diffMin });
   const diffHour = Math.floor(diffMin / 60);
-  if (diffHour < 24) return `${diffHour}小时前`;
+  if (diffHour < 24) return t('plugin_usage.hours_ago', { count: diffHour });
   const diffDay = Math.floor(diffHour / 24);
-  if (diffDay < 7) return `${diffDay}天前`;
+  if (diffDay < 7) return t('plugin_usage.days_ago', { count: diffDay });
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
@@ -712,9 +717,10 @@ interface FallbackFormProps {
   onChange: (values: Record<string, unknown>) => void;
   onSubmit: () => void;
   loading?: boolean;
+  t?: (key: string, options?: Record<string, unknown>) => string;
 }
 
-const FallbackForm: React.FC<FallbackFormProps> = ({ tool, values, onChange, onSubmit, loading }) => {
+const FallbackForm: React.FC<FallbackFormProps> = ({ tool, values, onChange, onSubmit, loading, t }) => {
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
 
@@ -743,7 +749,7 @@ const FallbackForm: React.FC<FallbackFormProps> = ({ tool, values, onChange, onS
               bgcolor: isDark ? 'rgba(255,255,255,0.05)' : 'transparent',
               color: 'text.primary',
               '&:focus': { borderColor: 'primary.main' },
-              '&::placeholder': { color: isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.38)' },
+              '&::placeholder': { color: isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0.38)' },
             }}
           />
         </Box>
@@ -768,7 +774,7 @@ const FallbackForm: React.FC<FallbackFormProps> = ({ tool, values, onChange, onS
           transition: 'background 0.2s',
         }}
       >
-        {loading ? '执行中...' : '执行'}
+        {loading ? t?.('plugin_usage.executing') || 'Executing...' : t?.('plugin_usage.execute') || 'Execute'}
       </button>
     </Box>
   );

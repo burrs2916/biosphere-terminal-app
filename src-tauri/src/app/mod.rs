@@ -9,3 +9,4 @@ pub mod plugin_service;
 pub mod linker_service;
 pub mod environment_service;
 pub mod icon_service;
+pub mod remote_desktop_service;

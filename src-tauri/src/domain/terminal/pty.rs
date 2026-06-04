@@ -56,7 +56,7 @@ impl Pty {
 
         if conn_type == "ssh" {
             if let Some(ssh) = &config.ssh {
-                return Self::build_ssh_command(ssh);
+                return Self::build_ssh_command(ssh, config.x11_forwarding.unwrap_or(false));
             }
         }
 
@@ -82,11 +82,15 @@ impl Pty {
         cmd
     }
 
-    fn build_ssh_command(ssh: &SshConnectionInfo) -> CommandBuilder {
+    fn build_ssh_command(ssh: &SshConnectionInfo, x11_forwarding: bool) -> CommandBuilder {
         let mut args: Vec<String> = Vec::new();
 
         args.push("-o".to_string());
         args.push("StrictHostKeyChecking=accept-new".to_string());
+
+        if x11_forwarding {
+            args.push("-X".to_string());
+        }
 
         if ssh.port != 22 {
             args.push("-p".to_string());

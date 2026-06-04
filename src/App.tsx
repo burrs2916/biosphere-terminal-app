@@ -21,6 +21,7 @@ import { NotesReferencePage } from './features/notebook/components/NotesReferenc
 import { AiCopilotPage } from './pages/AiCopilotPage';
 import { PluginWorkshopPage } from './pages/PluginWorkshopPage';
 import { PluginScriptViewerPage } from './pages/PluginScriptViewerPage';
+import { RemoteDesktopPage } from './pages/RemoteDesktopPage';
 
 function AppLayout() {
   const sidebarOpen = useLayoutStore((s) => s.sidebarOpen);
@@ -99,6 +100,7 @@ function StandaloneLayout() {
       <Route path="/ai-copilot" element={<AiCopilotPage />} />
       <Route path="/plugin-workshop" element={<PluginWorkshopPage />} />
       <Route path="/plugin-script-viewer" element={<PluginScriptViewerPage />} />
+      <Route path="/remote-desktop" element={<RemoteDesktopPage />} />
       <Route path="*" element={<NotFoundPage />} />
     </Routes>
   );
@@ -106,7 +108,7 @@ function StandaloneLayout() {
 
 function RootRouter() {
   const location = useLocation();
-  const isStandalone = location.pathname.startsWith('/category-notes') || location.pathname.startsWith('/notes-reference') || location.pathname.startsWith('/ai-copilot') || location.pathname.startsWith('/plugin-workshop') || location.pathname.startsWith('/plugin-script-viewer');
+  const isStandalone = location.pathname.startsWith('/category-notes') || location.pathname.startsWith('/notes-reference') || location.pathname.startsWith('/ai-copilot') || location.pathname.startsWith('/plugin-workshop') || location.pathname.startsWith('/plugin-script-viewer') || location.pathname.startsWith('/remote-desktop');
 
   return isStandalone ? <StandaloneLayout /> : <AppLayout />;
 }

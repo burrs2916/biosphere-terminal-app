@@ -395,12 +395,16 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
             onChange={(_, v) => v && setViewMode(v)}
             sx={{ '& .MuiToggleButton-root': { py: 0.25, px: 0.75, fontSize: '0.65rem', border: 'none', borderRadius: 1.5 } }}
           >
+            <Tooltip title={t('history.view_list') || ''} arrow>
             <ToggleButton value="list" sx={{ '&.Mui-selected': { bgcolor: 'rgba(108,99,255,0.12)' } }}>
               <ListIcon size={14} />
             </ToggleButton>
+          </Tooltip>
+          <Tooltip title={t('history.view_frequent') || ''} arrow>
             <ToggleButton value="frequent" sx={{ '&.Mui-selected': { bgcolor: 'rgba(108,99,255,0.12)' } }}>
               <ChartBarIcon size={14} />
             </ToggleButton>
+          </Tooltip>
           </ToggleButtonGroup>
           <Tooltip title={t('history.refresh') || ''} arrow>
             <IconButton size="small" onClick={loadHistory} disabled={loading}>
@@ -529,6 +533,25 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
                       }}
                       primary={
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                          {viewMode === 'frequent' && (
+                            <Chip
+                              label={`#${groupedEntries.findIndex(g => g.key === group.key) + 1}`}
+                              size="small"
+                              sx={{
+                                height: 16,
+                                fontSize: '0.55rem',
+                                flexShrink: 0,
+                                fontWeight: 700,
+                                ...(groupedEntries.findIndex(g => g.key === group.key) === 0
+                                  ? { bgcolor: '#FFD700', color: '#000' }
+                                  : groupedEntries.findIndex(g => g.key === group.key) === 1
+                                  ? { bgcolor: '#C0C0C0', color: '#000' }
+                                  : groupedEntries.findIndex(g => g.key === group.key) === 2
+                                  ? { bgcolor: '#CD7F32', color: '#fff' }
+                                  : { bgcolor: 'rgba(108,99,255,0.12)', color: '#6C63FF' }),
+                              }}
+                            />
+                          )}
                           <Box
                             component="span"
                             sx={{

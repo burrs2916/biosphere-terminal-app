@@ -15,6 +15,7 @@ import {
   Stack,
   useTheme,
 } from '@mui/material';
+import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
 import type { UiSchema, UiField, QuickAction } from '../../../../proto/plugin';
 
@@ -33,6 +34,7 @@ export const UiSchemaRenderer: React.FC<UiSchemaRendererProps> = ({
   onSubmit,
   loading = false,
 }) => {
+  const { t } = useTranslation('agent');
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
 
@@ -160,7 +162,7 @@ export const UiSchemaRenderer: React.FC<UiSchemaRendererProps> = ({
                   }
                 }}
               >
-                {field.placeholder || '选择文件'}
+                {field.placeholder || t('select_file')}
               </Button>
               {val !== undefined && val !== null && (
                 <Typography variant="caption" sx={{ ml: 1, maxWidth: 300 }} noWrap>
@@ -262,7 +264,7 @@ export const UiSchemaRenderer: React.FC<UiSchemaRendererProps> = ({
         onClick={onSubmit}
         disabled={loading}
       >
-        {loading ? '执行中...' : uiSchema.submitLabel || '执行'}
+        {loading ? t('executing') : uiSchema.submitLabel || t('execute')}
       </Button>
     </Box>
   );

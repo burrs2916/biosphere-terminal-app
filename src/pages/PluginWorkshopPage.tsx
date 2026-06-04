@@ -194,7 +194,7 @@ export function PluginWorkshopPage() {
     }
 
     const analysisPrompt = lastToolExecution
-      ? `基于工具「${lastToolExecution.toolName}」的执行结果分析：\n\n${lastToolExecution.output.slice(0, 2000)}${lastToolExecution.output.length > 2000 ? '\n...(结果已截断)' : ''}\n\n${sanitizeExamplePrompt(prompt)}`
+      ? t('workshop.analysis_with_result', { toolName: lastToolExecution.toolName, output: lastToolExecution.output.slice(0, 2000), truncated: lastToolExecution.output.length > 2000 ? t('workshop.result_truncated') : '', prompt: sanitizeExamplePrompt(prompt) })
       : sanitizeExamplePrompt(prompt);
 
     setInput(analysisPrompt);
@@ -445,14 +445,14 @@ export function PluginWorkshopPage() {
     if (!workshopAgentId) return;
 
     const summary = result.success
-      ? `我执行了插件工具「${toolName}」，执行成功（耗时 ${result.durationMs}ms），结果如下：\n\n${result.output.slice(0, 3000)}${result.output.length > 3000 ? '\n...(结果已截断)' : ''}`
-      : `我执行了插件工具「${toolName}」但执行失败了（耗时 ${result.durationMs}ms），错误信息：\n\n${result.output.slice(0, 2000)}`;
+      ? t('workshop.exec_success_summary', { toolName, duration: result.durationMs, output: result.output.slice(0, 3000), truncated: result.output.length > 3000 ? t('workshop.result_truncated') : '' })
+      : t('workshop.exec_fail_summary', { toolName, duration: result.durationMs, output: result.output.slice(0, 2000) });
 
     const paramSummary = Object.keys(params).length > 0
-      ? `\n\n使用的参数：${JSON.stringify(params, null, 2).slice(0, 500)}`
+      ? t('workshop.params_used', { params: JSON.stringify(params, null, 2).slice(0, 500) })
       : '';
 
-    const analysisPrompt = `${summary}${paramSummary}\n\n请分析这个执行结果，给出你的见解和建议。`;
+    const analysisPrompt = `${summary}${paramSummary}\n\n${t('workshop.analyze_prompt')}`;
 
     await sendToAgent(analysisPrompt);
   }, [workshopAgentId, sendToAgent]);

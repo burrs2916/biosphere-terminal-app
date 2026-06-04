@@ -380,20 +380,20 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
         </Typography>
         {saveStatus === 'unsaved' && (
           <Typography variant="caption" sx={{ color: 'warning.main', fontSize: 10 }}>
-            {t('editor.unsaved') || '未保存'}
+            {t('editor.unsaved')}
           </Typography>
         )}
         {saveStatus === 'saving' && (
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
             <ArrowsClockwiseIcon size={10} className="spin" />
             <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
-              {t('editor.saving') || '保存中...'}
+              {t('editor.saving')}
             </Typography>
           </Box>
         )}
         {saveStatus === 'saved' && !isNew && (
           <Typography variant="caption" sx={{ color: 'success.main', fontSize: 10 }}>
-            {t('editor.saved') || '已保存'}
+            {t('editor.saved')}
           </Typography>
         )}
         <Button
@@ -410,7 +410,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
           {tCommon('action.save')}
         </Button>
         {!isNew && selectedNote?.note.filePath && (
-          <Tooltip title={t('editor.open_folder') || '打开文件夹'} arrow>
+          <Tooltip title={t('editor.open_folder')} arrow>
             <IconButton
               size="small"
               onClick={() => {
@@ -427,7 +427,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             </IconButton>
           </Tooltip>
         )}
-        <Tooltip title={aiOptimizing ? (t('editor.ai_cancel') || '取消 AI 优化') : t('editor.ai_optimize')} arrow>
+        <Tooltip title={aiOptimizing ? t('editor.ai_cancel') : t('editor.ai_optimize')} arrow>
           <IconButton
             size="small"
             onClick={aiOptimizing ? handleAiCancel : handleAiOptimize}

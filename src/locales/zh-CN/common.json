@@ -1,7 +1,9 @@
 {
   "app": {
     "name": "Biosphere 终端",
-    "version": "0.1.0"
+    "version": "0.1.0",
+    "lang_en": "EN",
+    "lang_zh": "中文"
   },
   "menu": {
     "navigation": "导航",

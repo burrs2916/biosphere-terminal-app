@@ -17,6 +17,7 @@ export interface PtyConfig {
   env?: Record<string, string>;
   connection_type?: 'local' | 'ssh';
   ssh?: SshConnectionInfo;
+  x11_forwarding?: boolean;
 }
 
 export interface TerminalSize {

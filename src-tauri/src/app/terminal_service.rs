@@ -43,6 +43,14 @@ impl TerminalService {
             .and_then(|s| s.password.clone())
             .filter(|p| !p.is_empty());
 
+        tracing::info!(
+            "[terminal] spawn session={}, conn_type={}, auth_method={}, has_password={}",
+            session_id,
+            config.connection_type.as_deref().unwrap_or("local"),
+            config.ssh.as_ref().map(|s| s.auth_method.as_str()).unwrap_or("n/a"),
+            password.is_some()
+        );
+
         let buffer = std::sync::Arc::new(Mutex::new(Vec::with_capacity(OUTPUT_BUFFER_MAX_LINES)));
 
         self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?.insert(session_id.to_string(), SessionState {
@@ -105,6 +113,7 @@ impl TerminalService {
                                         && trailing.trim_end().ends_with(':');
 
                                 if needs_password {
+                                    tracing::info!("[terminal] Detected password prompt for session {}, auto-filling...", sid);
                                     let pw_bytes = format!("{}\n", pwd);
                                     if let Ok(mut w) = writer.lock() {
                                         let _ = w.write_all(pw_bytes.as_bytes());

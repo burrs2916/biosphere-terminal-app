@@ -93,6 +93,9 @@
     "ai_cancel": "取消",
     "ai_optimize_done": "笔记优化完成",
     "ai_optimize_error": "AI 优化失败",
+    "unsaved": "未保存",
+    "saving": "保存中...",
+    "saved": "已保存",
     "toolbar": {
       "paragraph": "正文",
       "bold": "粗体",

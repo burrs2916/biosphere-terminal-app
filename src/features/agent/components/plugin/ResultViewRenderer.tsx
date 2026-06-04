@@ -13,6 +13,7 @@ import {
   Link,
   useTheme,
 } from '@mui/material';
+import { useTranslation } from 'react-i18next';
 import type { ResultViewSpec, TableColumn } from '../../../../proto/plugin';
 
 interface ResultViewRendererProps {
@@ -26,6 +27,7 @@ export const ResultViewRenderer: React.FC<ResultViewRendererProps> = ({
   output,
   success,
 }) => {
+  const { t } = useTranslation('agent');
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
 
@@ -66,11 +68,11 @@ export const ResultViewRenderer: React.FC<ResultViewRendererProps> = ({
   }
 
   if (resultView && resultView.viewType !== 'text') {
-    return renderByViewType(resultView, output, parsed, isDark, monoColor, codeBg, codeBorder, tableHeaderBg, tableRowHover, inlineCodeBg, listItemBg, listItemBorder);
+    return renderByViewType(resultView, output, parsed, isDark, monoColor, codeBg, codeBorder, tableHeaderBg, tableRowHover, inlineCodeBg, listItemBg, listItemBorder, t);
   }
 
   if (parsed !== null) {
-    return renderAutoDetected(parsed, output, isDark, monoColor, codeBg, codeBorder, tableHeaderBg, tableRowHover, inlineCodeBg, listItemBg, listItemBorder);
+    return renderAutoDetected(parsed, output, isDark, monoColor, codeBg, codeBorder, tableHeaderBg, tableRowHover, inlineCodeBg, listItemBg, listItemBorder, t);
   }
 
   return (
@@ -101,12 +103,13 @@ function renderByViewType(
   _inlineCodeBg: string,
   listItemBg: string,
   listItemBorder: string,
+  t: (key: string, opts?: Record<string, unknown>) => string,
 ) {
   switch (spec.viewType) {
     case 'table':
       return renderTableView(spec.columns || [], parsed, rawOutput, isDark, monoColor, tableHeaderBg, tableRowHover);
     case 'list':
-      return renderListView(parsed, rawOutput, isDark, monoColor, listItemBg, listItemBorder);
+      return renderListView(parsed, rawOutput, isDark, monoColor, listItemBg, listItemBorder, t);
     case 'json':
       return renderJsonView(parsed, rawOutput, isDark, monoColor, codeBg, codeBorder);
     case 'markdown':
@@ -246,6 +249,7 @@ function renderListView(
   monoColor: string,
   listItemBg: string,
   listItemBorder: string,
+  t: (key: string, opts?: Record<string, unknown>) => string,
 ) {
   let items: unknown[] = [];
 
@@ -299,7 +303,7 @@ function renderListView(
       ))}
       {items.length > 50 && (
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1 }}>
-          显示前 50 条，共 {items.length} 条
+          {t('result_showing_first', { count: 50, total: items.length })}
         </Typography>
       )}
     </Box>
@@ -464,12 +468,13 @@ function renderAutoDetected(
   _inlineCodeBg: string,
   listItemBg: string,
   listItemBorder: string,
+  t: (key: string, opts?: Record<string, unknown>) => string,
 ) {
   if (Array.isArray(parsed)) {
     if (parsed.length > 0 && typeof parsed[0] === 'object' && parsed[0] !== null) {
       return renderTableView([], parsed, rawOutput, isDark, monoColor, tableHeaderBg, tableRowHover);
     }
-    return renderListView(parsed, rawOutput, isDark, monoColor, listItemBg, listItemBorder);
+    return renderListView(parsed, rawOutput, isDark, monoColor, listItemBg, listItemBorder, t);
   }
 
   if (typeof parsed === 'object' && parsed !== null) {
@@ -481,7 +486,7 @@ function renderAutoDetected(
       if (arr.length > 0 && typeof arr[0] === 'object' && arr[0] !== null) {
         return renderTableView([], parsed, rawOutput, isDark, monoColor, tableHeaderBg, tableRowHover);
       }
-      return renderListView(parsed, rawOutput, isDark, monoColor, listItemBg, listItemBorder);
+      return renderListView(parsed, rawOutput, isDark, monoColor, listItemBg, listItemBorder, t);
     }
 
     return renderJsonView(parsed, rawOutput, isDark, monoColor, codeBg, codeBorder);

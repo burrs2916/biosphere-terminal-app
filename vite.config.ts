@@ -9,6 +9,7 @@ export default defineConfig(async () => ({
   
   // 构建优化：代码分割
   build: {
+    target: 'es2022',
     rollupOptions: {
       output: {
         manualChunks: {
@@ -30,6 +31,9 @@ export default defineConfig(async () => ({
       '@mui/material',
       '@xterm/xterm',
     ],
+    esbuildOptions: {
+      target: 'es2022',
+    },
   },
   
   server: {

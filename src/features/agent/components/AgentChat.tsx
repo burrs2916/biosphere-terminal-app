@@ -123,7 +123,7 @@ export function AgentChat() {
               const msgs = useAgentStore.getState().messages;
               const firstUserMsg = msgs.find((m) => m.role === 'user');
               if (firstUserMsg) {
-                const autoTitle = firstUserMsg.content.replace(/\[附件:.*?\]\s*/g, '').trim().slice(0, 40);
+                const autoTitle = firstUserMsg.content.replace(/\[(?:附件|Attachment):.*?\]\s*/g, '').trim().slice(0, 40);
                 if (autoTitle) {
                   updateConversationTitle(activeConversationId, autoTitle).catch((e) => notify(String(e)));
                 }
@@ -216,7 +216,7 @@ export function AgentChat() {
 
     let messageContent = input.trim();
     if (attachments.length > 0) {
-      const attachmentText = attachments.map((f) => `[附件: ${f.path}]`).join('\n');
+      const attachmentText = attachments.map((f) => `[${t('attachment')}: ${f.path}]`).join('\n');
       messageContent = `${attachmentText}\n\n${messageContent}`;
     }
 
@@ -287,7 +287,7 @@ export function AgentChat() {
   }, [deleteConversation]);
 
   const handleEditMessage = useCallback((_messageId: string, content: string) => {
-    const cleaned = content.replace(/\[附件:.*?\]\s*/g, '').trim();
+    const cleaned = content.replace(/\[(?:附件|Attachment):.*?\]\s*/g, '').trim();
     setInput(cleaned);
   }, []);
 
@@ -316,7 +316,7 @@ export function AgentChat() {
     addMessage(assistantMsg);
     setStreamingContent('');
     try {
-      await runAgent(activeAgentId, prevUserMsg.content.replace(/\[附件:.*?\]\s*/g, '').trim(), activeConversationId);
+      await runAgent(activeAgentId, prevUserMsg.content.replace(/\[(?:附件|Attachment):.*?\]\s*/g, '').trim(), activeConversationId);
     } catch (e) {
       updateMessage(newAssistantMsgId, `❌ ${String(e)}`);
       setStreamingContent('');

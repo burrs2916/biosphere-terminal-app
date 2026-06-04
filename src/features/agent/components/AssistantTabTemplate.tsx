@@ -208,7 +208,7 @@ export function createAssistantTab(config: AssistantTabConfig) {
               bgcolor: accentColor, '&:hover': { bgcolor: accentGradientEnd },
             }}
           >
-            {t('assistant.start_chat', { defaultValue: '开始对话' })}
+            {t('assistant.start_chat')}
           </Button>
         )}
 

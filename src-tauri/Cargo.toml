@@ -24,6 +24,7 @@ encoding_rs = "0.8"
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+tokio-tungstenite = "0.24"
 futures = "0.3"
 bytes = "1"
 

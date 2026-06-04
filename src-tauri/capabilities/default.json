@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for the main window",
-  "windows": ["main", "category-notes-*", "note-editor-*", "notes-ref-*", "ai-copilot-*", "plugin-workshop-*"],
+  "windows": ["main", "category-notes-*", "note-editor-*", "notes-ref-*", "ai-copilot-*", "plugin-workshop-*", "remote-desktop-*"],
   "permissions": [
     "core:default",
     "core:window:default",

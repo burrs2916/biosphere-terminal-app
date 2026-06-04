@@ -93,6 +93,9 @@
     "ai_cancel": "Cancel",
     "ai_optimize_done": "Note optimization completed",
     "ai_optimize_error": "AI optimization failed",
+    "unsaved": "Unsaved",
+    "saving": "Saving...",
+    "saved": "Saved",
     "toolbar": {
       "paragraph": "Paragraph",
       "bold": "Bold",

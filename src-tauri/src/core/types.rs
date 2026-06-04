@@ -21,6 +21,7 @@ pub struct PtyConfig {
     pub env: Option<std::collections::HashMap<String, String>>,
     pub connection_type: Option<String>,
     pub ssh: Option<SshConnectionInfo>,
+    pub x11_forwarding: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

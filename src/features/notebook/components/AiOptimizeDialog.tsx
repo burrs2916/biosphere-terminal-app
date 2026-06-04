@@ -121,9 +121,9 @@ export function AiOptimizeDialog({ open, onClose, onCancel, chunks, status, erro
             color: isDark ? '#F0F6FC' : '#1A1A2E',
           }}
         >
-          {status === 'running' && (t('editor.ai_optimizing') || 'AI 正在优化笔记...')}
-          {status === 'done' && (t('editor.ai_optimize_done') || 'AI 优化完成')}
-          {status === 'error' && (t('editor.ai_optimize_error') || 'AI 优化出错')}
+          {status === 'running' && t('editor.ai_optimizing')}
+          {status === 'done' && t('editor.ai_optimize_done')}
+          {status === 'error' && t('editor.ai_optimize_error')}
         </Typography>
         {status === 'running' && (
           <Button
@@ -141,7 +141,7 @@ export function AiOptimizeDialog({ open, onClose, onCancel, chunks, status, erro
               '&:hover': { bgcolor: 'rgba(255,82,82,0.08)' },
             }}
           >
-            {t('editor.ai_cancel') || '取消'}
+            {t('editor.ai_cancel')}
           </Button>
         )}
         {status !== 'running' && (
@@ -174,7 +174,7 @@ export function AiOptimizeDialog({ open, onClose, onCancel, chunks, status, erro
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 2 }}>
             <Sparkle size={14} color={primaryColor} weight="fill" />
             <Typography sx={{ fontSize: 12, color: isDark ? '#8B949E' : '#6B7280' }}>
-              {t('editor.ai_thinking') || 'AI 正在思考...'}
+              {t('editor.ai_thinking')}
             </Typography>
           </Box>
         )}
