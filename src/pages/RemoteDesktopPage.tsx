@@ -85,6 +85,19 @@ export function RemoteDesktopPage() {
   const textColor = isDark ? '#c9d1d9' : '#24292f';
   const accentColor = '#6C63FF';
 
+  const getPasswordStrength = useCallback((pwd: string): { level: 'weak' | 'medium' | 'strong'; color: string } => {
+    if (pwd.length < 6) return { level: 'weak', color: '#ff5252' };
+    let score = 0;
+    if (pwd.length >= 8) score++;
+    if (pwd.length >= 12) score++;
+    if (/[a-z]/.test(pwd) && /[A-Z]/.test(pwd)) score++;
+    if (/\d/.test(pwd)) score++;
+    if (/[!@#$%^&*(),.?":{}|<>]/.test(pwd)) score++;
+    if (score <= 1) return { level: 'weak', color: '#ff5252' };
+    if (score <= 3) return { level: 'medium', color: '#ffb74d' };
+    return { level: 'strong', color: '#4caf50' };
+  }, []);
+
   const updateStep = useCallback((id: SetupPhase, updates: Partial<SetupStep>) => {
     setSetupSteps(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
   }, []);
@@ -630,12 +643,34 @@ export function RemoteDesktopPage() {
                     )}
 
                     {showPasswordInput && (
-                      <Box sx={{ ml: 3.2, mt: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <Box sx={{ ml: 3.2, mt: 1.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                        <Paper variant="outlined" sx={{ p: 1.5, bgcolor: isDark ? 'rgba(108,99,255,0.05)' : 'rgba(108,99,255,0.02)', borderColor: isDark ? 'rgba(108,99,255,0.2)' : 'rgba(108,99,255,0.1)' }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
+                            <LockIcon size={14} weight="fill" color={accentColor} />
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: accentColor }}>
+                              {t('password_setup_title')}
+                            </Typography>
+                          </Box>
+                          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 1 }}>
+                            {t('password_setup_desc')}
+                          </Typography>
+                          <Box component="ul" sx={{ m: 0, pl: 2, li: { mb: 0.3 } }}>
+                            <Typography component="li" variant="caption" sx={{ color: 'text.secondary' }}>
+                              {t('password_stored_remotely')}
+                            </Typography>
+                            <Typography component="li" variant="caption" sx={{ color: 'text.secondary' }}>
+                              {t('password_required_on_connect')}
+                            </Typography>
+                            <Typography component="li" variant="caption" sx={{ color: 'text.secondary' }}>
+                              {t('password_min_length')}
+                            </Typography>
+                          </Box>
+                        </Paper>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                           <TextField
                             size="small"
                             type="password"
-                            placeholder="Enter VNC password (6+ chars)"
+                            placeholder={t('password_placeholder_set')}
                             value={vncPassword}
                             onChange={(e) => setVncPassword(e.target.value)}
                             sx={{
@@ -666,22 +701,46 @@ export function RemoteDesktopPage() {
                               whiteSpace: 'nowrap',
                             }}
                           >
-                            Set Password
+                            {t('set_password')}
                           </Button>
                         </Box>
-                        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
-                          This password will be used to authenticate your VNC connection.
-                        </Typography>
+                        {vncPassword.length > 0 && (
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
+                              {t('password_strength_hint')}:
+                            </Typography>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                              <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: getPasswordStrength(vncPassword).color }} />
+                              <Typography variant="caption" sx={{ color: getPasswordStrength(vncPassword).color, fontWeight: 600, fontSize: 10 }}>
+                                {t(`password_strength_${getPasswordStrength(vncPassword).level}`)}
+                              </Typography>
+                            </Box>
+                          </Box>
+                        )}
                       </Box>
                     )}
 
                     {showConnect && (
-                      <Box sx={{ ml: 3.2, mt: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <Box sx={{ ml: 3.2, mt: 1.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                        <Paper variant="outlined" sx={{ p: 1.5, bgcolor: isDark ? 'rgba(76,175,80,0.05)' : 'rgba(76,175,80,0.02)', borderColor: isDark ? 'rgba(76,175,80,0.2)' : 'rgba(76,175,80,0.1)' }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
+                            <LockIcon size={14} weight="fill" color="#4caf50" />
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: '#4caf50' }}>
+                              {t('password_connect_title')}
+                            </Typography>
+                          </Box>
+                          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 0.5 }}>
+                            {t('password_connect_desc')}
+                          </Typography>
+                          <Typography variant="caption" sx={{ color: 'text.secondary', fontStyle: 'italic' }}>
+                            {t('password_connect_hint')}
+                          </Typography>
+                        </Paper>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                           <TextField
                             size="small"
                             type="password"
-                            placeholder="Enter VNC password"
+                            placeholder={t('password_placeholder_connect')}
                             value={vncPassword}
                             onChange={(e) => setVncPassword(e.target.value)}
                             onKeyDown={(e) => {
@@ -713,9 +772,6 @@ export function RemoteDesktopPage() {
                             Connect Now
                           </Button>
                         </Box>
-                        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
-                          Enter the VNC password you set on the remote server.
-                        </Typography>
                       </Box>
                     )}
                   </Paper>

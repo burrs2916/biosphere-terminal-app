@@ -37,5 +37,22 @@
   "x11_mode_hint": "X11 Forwarding: No VNC required, forwards graphical apps directly. Requires XQuartz on macOS. Best for running single graphical programs.",
   "vnc_mode_hint": "VNC Desktop: Requires VNC server on remote, provides full desktop environment. Best for complete GUI sessions.",
   "x11_session": "X11 Session",
-  "x11_hint": "Run graphical applications in this terminal (e.g. xclock, firefox). Windows will appear on your local X11 server."
+  "x11_hint": "Run graphical applications in this terminal (e.g. xclock, firefox). Windows will appear on your local X11 server.",
+  "password_setup_title": "Set VNC Password",
+  "password_setup_desc": "VNC password protects your remote desktop connection from unauthorized access.",
+  "password_stored_remotely": "Password will be stored in ~/.vnc/passwd on the remote server",
+  "password_required_on_connect": "You'll need this password every time you connect",
+  "password_min_length": "Password must be at least 6 characters (TigerVNC requirement)",
+  "password_security_tip": "Use a strong password with letters, numbers, and special characters",
+  "password_connect_title": "Enter VNC Password",
+  "password_connect_desc": "Enter the VNC password set on the remote server to establish connection.",
+  "password_connect_hint": "This password was set via vncpasswd command on the remote server.",
+  "password_placeholder_set": "Enter new password (6+ chars)",
+  "password_placeholder_connect": "Enter VNC password",
+  "password_strength_weak": "Weak",
+  "password_strength_medium": "Medium",
+  "password_strength_strong": "Strong",
+  "password_strength_hint": "Password strength",
+  "set_password": "Set Password",
+  "remember_password": "Remember password (saved locally)"
 }
