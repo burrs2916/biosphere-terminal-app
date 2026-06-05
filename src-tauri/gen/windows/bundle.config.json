@@ -1,0 +1,14 @@
+{
+  "publisher": "CN=Biosphere",
+  "publisherDisplayName": "Biosphere Team",
+  "capabilities": {
+    "general": ["internetClient", "internetClientServer", "privateNetworkClientServer"],
+    "device": [],
+    "restricted": []
+  },
+  "signing": null,
+  "resourceIndex": {
+    "enabled": false,
+    "keepConfig": false
+  }
+}
