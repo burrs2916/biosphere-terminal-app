@@ -86,6 +86,7 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
       rfb.addEventListener('disconnect', (e: any) => {
         if (!disposed) {
           const clean = e.detail?.clean;
+          const reason = e.detail?.reason || '';
           console.error('[VncViewer] disconnect event, clean:', clean, 'detail:', JSON.stringify(e.detail));
           // Don't override error state set by securityfailure
           if (authFailedRef.current) {
@@ -99,7 +100,14 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
             return clean ? 'disconnected' : 'error';
           });
           if (!clean) {
-            setErrorMessage(t('connection_lost'));
+            // Provide more specific error messages
+            if (reason) {
+              setErrorMessage(`${t('connection_lost')}: ${reason}`);
+            } else {
+              setErrorMessage(t('connection_lost_detailed', {
+                defaultValue: 'Connection lost. Possible causes:\n• VNC server not running\n• SSH tunnel disconnected\n• Network issue'
+              }));
+            }
           }
           rfbRef.current = null;
           rfbInstance = null;

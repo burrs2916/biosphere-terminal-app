@@ -9,6 +9,7 @@
   "connection_failed": "连接失败",
   "connection_failed_hint": "请确认远程服务器已安装并运行 VNC 服务（如 TigerVNC、x11vnc），且 SSH 连接信息正确。",
   "connection_lost": "连接已断开",
+  "connection_lost_detailed": "连接已断开。可能原因：\n• VNC 服务器未运行\n• SSH 隧道已断开\n• 网络问题",
   "credentials_required": "需要 VNC 密码",
   "fullscreen": "全屏",
   "close": "关闭",

@@ -9,6 +9,7 @@
   "connection_failed": "Connection Failed",
   "connection_failed_hint": "Make sure the remote server has a VNC server running (e.g. TigerVNC, x11vnc) and the SSH connection details are correct.",
   "connection_lost": "Connection lost",
+  "connection_lost_detailed": "Connection lost. Possible causes:\n• VNC server not running\n• SSH tunnel disconnected\n• Network issue",
   "credentials_required": "VNC password required",
   "fullscreen": "Fullscreen",
   "close": "Close",
