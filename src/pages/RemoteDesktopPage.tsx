@@ -371,8 +371,22 @@ export function RemoteDesktopPage() {
     if (result && !result.needsPassword) {
       updateStep('password', { status: 'done', description: 'VNC password set successfully' });
       setVncPassword(password);
-      // If VNC is already running, go directly to connect; otherwise go to start
-      if (result.vncRunning) {
+
+      // If this is a password reset (VNC was already running), need to restart VNC
+      if (showResetPassword && result.vncRunning) {
+        // Construct stop command based on display
+        const stopCmd = result.display ? `vncserver -kill ${result.display}` : 'pkill -f vncserver || true';
+        updateStep('start', {
+          status: 'pending',
+          description: t('restart_vnc_after_password_reset', {
+            defaultValue: 'Password changed. VNC server needs to restart to use the new password. Click to restart.',
+          }),
+          command: `${stopCmd} && sleep 2 && ${result.startHint}`,
+        });
+        setCurrentPhase('start');
+        setShowResetPassword(false);
+      } else if (result.vncRunning) {
+        // VNC is running and this is initial setup, go to connect
         updateStep('start', { status: 'done', description: 'Already running' });
         updateStep('ready', {
           status: 'pending',
@@ -397,7 +411,7 @@ export function RemoteDesktopPage() {
     } else {
       updateStep('password', { status: 'failed', description: 'Failed to set password. Try again or set it manually via vncpasswd.' });
     }
-  }, [updateStep, executeInTerminal, checkVncStatus]);
+  }, [updateStep, executeInTerminal, checkVncStatus, showResetPassword, t]);
 
   const handleConnectVnc = useCallback(async () => {
     if (!sshRef.current) return;
