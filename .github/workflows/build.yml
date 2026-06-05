@@ -181,6 +181,28 @@ jobs:
           args: --target ${{ matrix.target }}
 
       # ---- Build MSIX (Windows only) ----
+      - name: Find built exe
+        if: runner.os == 'Windows'
+        id: find_exe
+        shell: pwsh
+        run: |
+          $exeDir = "src-tauri/target/x86_64-pc-windows-msvc/release"
+          echo "=== Listing exe files ==="
+          Get-ChildItem -Path $exeDir -Filter "*.exe" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.Name }
+          $exe = Get-ChildItem -Path $exeDir -Filter "*.exe" -Exclude "*.installer.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($exe) {
+            echo "Found exe: $($exe.Name)"
+            echo "exe_name=$($exe.Name)" >> $env:GITHUB_OUTPUT
+            # Copy to BiosphereTerminal.exe if name differs
+            $expectedName = "BiosphereTerminal.exe"
+            if ($exe.Name -ne $expectedName) {
+              Copy-Item $exe.FullName -Destination (Join-Path $exeDir $expectedName)
+              echo "Copied $($exe.Name) -> $expectedName"
+            }
+          } else {
+            echo "No exe found!"
+          }
+
       - name: Install msixbundle-cli
         if: runner.os == 'Windows'
         run: cargo install msixbundle-cli 2>&1 || echo "msixbundle-cli install skipped, will be auto-installed by tauri-windows-bundle"
