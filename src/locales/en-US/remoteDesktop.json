@@ -55,5 +55,10 @@
   "password_strength_strong": "Strong",
   "password_strength_hint": "Password strength",
   "set_password": "Set Password",
-  "remember_password": "Remember password (saved locally)"
+  "remember_password": "Remember password (saved locally)",
+  "dont_know_password": "Don't know the password?",
+  "reset_password": "Reset Password",
+  "reset_password_desc": "Set a new VNC password on the remote server.",
+  "reset_password_warning_title": "Resetting VNC Password",
+  "reset_password_warning_desc": "This will overwrite the existing VNC password on the remote server. After setting, use the new password to connect."
 }

@@ -19,6 +19,7 @@ import {
   PlayIcon,
   ArrowRightIcon,
   LockIcon,
+  WarningIcon,
 } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
@@ -71,6 +72,7 @@ export function RemoteDesktopPage() {
   const [vncPort, setVncPort] = useState('5900');
   const [vncPassword, setVncPassword] = useState('');
   const [session, setSession] = useState<RemoteDesktopSession | null>(null);
+  const [showResetPassword, setShowResetPassword] = useState(false);
 
   const [setupSteps, setSetupSteps] = useState<SetupStep[]>([]);
   const [currentPhase, setCurrentPhase] = useState<SetupPhase>('checking');
@@ -644,6 +646,19 @@ export function RemoteDesktopPage() {
 
                     {showPasswordInput && (
                       <Box sx={{ ml: 3.2, mt: 1.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                        {showResetPassword && (
+                          <Paper variant="outlined" sx={{ p: 1.5, bgcolor: isDark ? 'rgba(255,152,0,0.05)' : 'rgba(255,152,0,0.02)', borderColor: isDark ? 'rgba(255,152,0,0.3)' : 'rgba(255,152,0,0.2)' }}>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
+                              <WarningIcon size={14} weight="fill" color="#ff9800" />
+                              <Typography variant="caption" sx={{ fontWeight: 600, color: '#ff9800' }}>
+                                {t('reset_password_warning_title', { defaultValue: 'Resetting VNC Password' })}
+                              </Typography>
+                            </Box>
+                            <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                              {t('reset_password_warning_desc', { defaultValue: 'This will overwrite the existing VNC password on the remote server. After setting, use the new password to connect.' })}
+                            </Typography>
+                          </Paper>
+                        )}
                         <Paper variant="outlined" sx={{ p: 1.5, bgcolor: isDark ? 'rgba(108,99,255,0.05)' : 'rgba(108,99,255,0.02)', borderColor: isDark ? 'rgba(108,99,255,0.2)' : 'rgba(108,99,255,0.1)' }}>
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
                             <LockIcon size={14} weight="fill" color={accentColor} />
@@ -770,6 +785,33 @@ export function RemoteDesktopPage() {
                             }}
                           >
                             Connect Now
+                          </Button>
+                        </Box>
+                        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
+                            {t('dont_know_password', { defaultValue: "Don't know the password?" })}
+                          </Typography>
+                          <Button
+                            size="small"
+                            variant="text"
+                            startIcon={<LockIcon size={12} />}
+                            onClick={() => {
+                              setShowResetPassword(true);
+                              setCurrentPhase('password');
+                              updateStep('password', {
+                                status: 'pending',
+                                description: t('reset_password_desc', { defaultValue: 'Set a new VNC password on the remote server.' }),
+                              });
+                            }}
+                            sx={{
+                              textTransform: 'none',
+                              fontSize: 10,
+                              color: accentColor,
+                              py: 0.2,
+                              minWidth: 'auto',
+                            }}
+                          >
+                            {t('reset_password', { defaultValue: 'Reset Password' })}
                           </Button>
                         </Box>
                       </Box>
