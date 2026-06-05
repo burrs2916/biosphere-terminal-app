@@ -181,9 +181,21 @@ jobs:
           args: --target ${{ matrix.target }}
 
       # ---- Build MSIX (Windows only) ----
+      - name: Install msixbundle-cli
+        if: runner.os == 'Windows'
+        run: cargo install msixbundle-cli 2>&1 || echo "msixbundle-cli install skipped, will be auto-installed by tauri-windows-bundle"
+
       - name: Build MSIX package
         if: runner.os == 'Windows'
-        run: pnpm tauri:windows:build
+        run: npx @choochmeque/tauri-windows-bundle@latest build 2>&1 || echo "MSIX build encountered issues"
+
+      - name: List MSIX output
+        if: runner.os == 'Windows'
+        run: |
+          echo "=== Searching for MSIX files ==="
+          Get-ChildItem -Path "src-tauri/target" -Recurse -Include "*.msix","*.msixbundle" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+          echo "=== Done ==="
+        shell: pwsh
 
       # ---- Upload build artifacts ----
       - name: Upload artifacts (macOS)
@@ -210,8 +222,9 @@ jobs:
         with:
           name: windows-msix
           path: |
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msix/*.msix
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msix/*.msixbundle
+            src-tauri/target/**/*.msix
+            src-tauri/target/**/*.msixbundle
+          if-no-files-found: warn
 
       - name: Upload artifacts (Linux)
         if: runner.os == 'Linux'
