@@ -7,15 +7,8 @@ import DialogContent from '@mui/material/DialogContent';
 import DialogContentText from '@mui/material/DialogContentText';
 import DialogActions from '@mui/material/DialogActions';
 import Button from '@mui/material/Button';
-import TextField from '@mui/material/TextField';
-import InputAdornment from '@mui/material/InputAdornment';
-import IconButton from '@mui/material/IconButton';
 import { useTheme } from '@mui/material/styles';
 import {
-  MagnifyingGlassIcon,
-  ArrowUpIcon,
-  ArrowDownIcon,
-  XIcon,
   PlusIcon,
 } from '@phosphor-icons/react';
 import {
@@ -57,11 +50,8 @@ export function TerminalPage() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [confirmCloseId, setConfirmCloseId] = useState<string | null>(null);
   const [findOpen, setFindOpen] = useState(false);
-  const [findQuery, setFindQuery] = useState('');
-  const [findRegex, setFindRegex] = useState(false);
-  const [findWholeWord, setFindWholeWord] = useState(false);
-  const [findCaseSensitive, setFindCaseSensitive] = useState(false);
-  const [findResultCount, setFindResultCount] = useState<{ resultIndex: number; resultCount: number } | null>(null);
+  const [, setFindQuery] = useState('');
+  const [, setFindResultCount] = useState<{ resultIndex: number; resultCount: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ mouseX: number; mouseY: number; hasSelection: boolean } | null>(null);
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const tabsRef = useRef<Tab[]>([]);
@@ -329,20 +319,6 @@ export function TerminalPage() {
       hasSelection: terminal?.hasSelection() ?? false,
     });
   }, [getActiveTerminal]);
-
-  const getFindOptions = useCallback(() => ({
-    regex: findRegex,
-    wholeWord: findWholeWord,
-    caseSensitive: findCaseSensitive,
-  }), [findRegex, findWholeWord, findCaseSensitive]);
-
-  const handleFindNext = useCallback(() => {
-    if (findQuery) getActiveTerminal()?.findNext(findQuery, getFindOptions());
-  }, [findQuery, getFindOptions, getActiveTerminal]);
-
-  const handleFindPrevious = useCallback(() => {
-    if (findQuery) getActiveTerminal()?.findPrevious(findQuery, getFindOptions());
-  }, [findQuery, getFindOptions, getActiveTerminal]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
