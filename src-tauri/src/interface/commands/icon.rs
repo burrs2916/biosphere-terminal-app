@@ -115,3 +115,11 @@ pub fn delete_custom_icon(service: State<'_, Arc<IconService>>, id: String) -> R
 pub fn get_custom_icon_urls(service: State<'_, Arc<IconService>>) -> Result<std::collections::HashMap<String, String>, String> {
     service.get_all_icon_urls()
 }
+
+#[tauri::command]
+pub fn get_custom_icon_url(
+    service: State<'_, Arc<IconService>>,
+    id: String,
+) -> Result<Option<String>, String> {
+    service.get_icon_url_by_id(&id)
+}

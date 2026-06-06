@@ -32,3 +32,7 @@ export async function deleteCustomIcon(id: string): Promise<void> {
 export async function getCustomIconUrls(): Promise<Record<string, string>> {
   return invoke('get_custom_icon_urls');
 }
+
+export async function getCustomIconUrl(id: string): Promise<string | null> {
+  return invoke('get_custom_icon_url', { id });
+}

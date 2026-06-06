@@ -13,6 +13,7 @@ interface IconRendererProps {
 
 let cachedIconUrls: Record<string, string> | null = null;
 let fetchPromise: Promise<Record<string, string>> | null = null;
+const singleFetchInFlight = new Map<string, Promise<string | null>>();
 
 async function getIconUrls(): Promise<Record<string, string>> {
   if (cachedIconUrls) return cachedIconUrls;
@@ -22,6 +23,21 @@ async function getIconUrls(): Promise<Record<string, string>> {
   });
   cachedIconUrls = await fetchPromise;
   return cachedIconUrls;
+}
+
+async function getIconUrlById(id: string): Promise<string | null> {
+  // Deduplicate concurrent requests for the same icon id.
+  const existing = singleFetchInFlight.get(id);
+  if (existing) return existing;
+  const p = iconService.getCustomIconUrl(id).finally(() => {
+    singleFetchInFlight.delete(id);
+  });
+  singleFetchInFlight.set(id, p);
+  const url = await p;
+  if (url && cachedIconUrls) {
+    cachedIconUrls[id] = url;
+  }
+  return url;
 }
 
 export function invalidateIconUrlCache() {
@@ -39,7 +55,22 @@ export function IconRenderer({ value, size = 20, iconUrls: externalUrls, sx = {}
       return;
     }
     if (isCustomIconValue(value)) {
-      getIconUrls().then(setResolvedUrls).catch((e) => notify(String(e)));
+      const id = value.replace('custom:', '');
+      getIconUrls()
+        .then(async (urls) => {
+          if (urls[id]) {
+            setResolvedUrls(urls);
+            return;
+          }
+          // Icon missing from batch (likely oversized) — lazy fetch single icon.
+          const url = await getIconUrlById(id);
+          if (url) {
+            setResolvedUrls({ ...urls, [id]: url });
+          } else {
+            setResolvedUrls(urls);
+          }
+        })
+        .catch((e) => notify(String(e)));
     }
   }, [value, externalUrls]);
 

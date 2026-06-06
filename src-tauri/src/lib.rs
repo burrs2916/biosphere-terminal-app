@@ -240,6 +240,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::icon::upload_custom_icon,
             interface::commands::icon::delete_custom_icon,
             interface::commands::icon::get_custom_icon_urls,
+            interface::commands::icon::get_custom_icon_url,
             interface::commands::notebook::unlink_command_note,
             interface::commands::remote_desktop::create_remote_desktop,
             interface::commands::remote_desktop::close_remote_desktop,
