@@ -61,5 +61,7 @@
   "reset_password_desc": "在远程服务器上设置新的 VNC 密码。",
   "reset_password_warning_title": "重置 VNC 密码",
   "reset_password_warning_desc": "这将覆盖远程服务器上现有的 VNC 密码。设置后，请使用新密码连接。",
-  "restart_vnc_after_password_reset": "密码已更改。VNC 服务器需要重启才能使用新密码。点击重启。"
+  "restart_vnc_after_password_reset": "密码已更改。VNC 服务器需要重启才能使用新密码。点击重启。",
+  "setup_guide_title": "设置指南",
+  "setup_guide_desc": "按步骤完成 VNC 配置"
 }

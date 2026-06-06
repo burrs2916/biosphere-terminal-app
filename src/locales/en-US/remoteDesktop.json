@@ -61,5 +61,7 @@
   "reset_password_desc": "Set a new VNC password on the remote server.",
   "reset_password_warning_title": "Resetting VNC Password",
   "reset_password_warning_desc": "This will overwrite the existing VNC password on the remote server. After setting, use the new password to connect.",
-  "restart_vnc_after_password_reset": "Password changed. VNC server needs to restart to use the new password. Click to restart."
+  "restart_vnc_after_password_reset": "Password changed. VNC server needs to restart to use the new password. Click to restart.",
+  "setup_guide_title": "Setup Guide",
+  "setup_guide_desc": "Follow the steps to set up VNC"
 }

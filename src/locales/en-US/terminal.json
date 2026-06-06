@@ -164,7 +164,11 @@
     "testing": "Testing connection...",
     "test": "Test",
     "save": "Save",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "delete_confirm_title": "Delete Connection",
+    "delete_confirm_message": "Are you sure you want to delete connection \"{{name}}\"? This action cannot be undone.",
+    "connected_to": "Connected to {{name}}"
   },
   "profile": {
     "title": "Profiles",

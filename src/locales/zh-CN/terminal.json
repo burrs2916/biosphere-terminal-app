@@ -164,7 +164,11 @@
     "testing": "正在测试连接...",
     "test": "测试",
     "save": "保存",
-    "cancel": "取消"
+    "cancel": "取消",
+    "delete": "删除",
+    "delete_confirm_title": "删除连接",
+    "delete_confirm_message": "确定要删除连接「{{name}}」吗？此操作不可撤销。",
+    "connected_to": "已连接到 {{name}}"
   },
   "profile": {
     "title": "配置",

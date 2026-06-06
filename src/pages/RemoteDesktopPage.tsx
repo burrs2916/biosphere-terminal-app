@@ -544,10 +544,10 @@ export function RemoteDesktopPage() {
           <Box sx={{ width: 340, display: 'flex', flexDirection: 'column', bgcolor: cardBg, overflow: 'auto' }}>
             <Box sx={{ px: 2, py: 1.5, borderBottom: '1px solid', borderColor: 'divider' }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 700, color: textColor }}>
-                Setup Guide
+                {t('setup_guide_title')}
               </Typography>
               <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                Follow the steps to set up VNC
+                {t('setup_guide_desc')}
               </Typography>
             </Box>
 
