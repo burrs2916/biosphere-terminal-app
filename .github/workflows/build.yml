@@ -181,18 +181,23 @@ jobs:
           args: --target ${{ matrix.target }}
 
       # ---- Build MSIX (Windows only) ----
-      - name: Verify exe for MSIX
+      - name: Prepare exe for MSIX
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $exeDir = "src-tauri/target/x86_64-pc-windows-msvc/release"
           Write-Host "=== Listing all exe files in $exeDir ==="
           Get-ChildItem -Path $exeDir -Filter "*.exe" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.Name }
-          $expectedExe = Join-Path $exeDir "biosphere-ai-terminal.exe"
-          if (Test-Path $expectedExe) {
-            Write-Host "✓ Found expected exe: biosphere-ai-terminal.exe"
+          
+          # Copy exe with correct name for MSIX
+          $sourceExe = Join-Path $exeDir "biosphere-terminal-app.exe"
+          $targetExe = Join-Path $exeDir "biosphere-ai-terminal.exe"
+          
+          if (Test-Path $sourceExe) {
+            Copy-Item -Path $sourceExe -Destination $targetExe -Force
+            Write-Host "✓ Copied 'biosphere-terminal-app.exe' to 'biosphere-ai-terminal.exe'"
           } else {
-            Write-Host "✗ Expected exe not found: biosphere-ai-terminal.exe"
+            Write-Host "✗ Source exe not found: $sourceExe"
             exit 1
           }
 
