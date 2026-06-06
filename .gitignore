@@ -39,7 +39,9 @@ Thumbs.db
 .workbuddy/
 
 # Tauri generated schemas (auto-generated on build)
-src-tauri/gen/
+src-tauri/gen/schemas/
+src-tauri/gen/apple/
+src-tauri/gen/android/
 
 # Notes data (runtime generated)
 src-tauri/notes/

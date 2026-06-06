@@ -1,6 +1,6 @@
 {
   "publisher": "CN=Biosphere",
-  "publisherDisplayName": "Biosphere Team",
+  "publisherDisplayName": "BURRS",
   "capabilities": {
     "general": ["internetClient", "internetClientServer", "privateNetworkClientServer"],
     "device": [],
