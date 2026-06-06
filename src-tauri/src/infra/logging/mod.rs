@@ -55,8 +55,38 @@ impl RollingFileAppender {
     }
 
     fn check_rotation(&self, file: &mut std::fs::File) {
-        if let Ok(metadata) = std::fs::metadata(&self.path) {
-            if metadata.len() >= MAX_LOG_SIZE {
+        // Use the live file handle's metadata (avoid race with concurrent writers).
+        let len = match file.metadata() {
+            Ok(m) => m.len(),
+            Err(_) => return,
+        };
+        if len < MAX_LOG_SIZE {
+            return;
+        }
+
+        // Rotate: <name> -> <name>.1 (overwrite old backup), then truncate current.
+        // We rename via filesystem to keep history. If rename fails (e.g. open
+        // handle on Windows), fall back to truncating in-place.
+        let backup = self.path.with_extension(
+            self.path
+                .extension()
+                .map(|e| format!("{}.1", e.to_string_lossy()))
+                .unwrap_or_else(|| "1".to_string()),
+        );
+        let _ = std::fs::remove_file(&backup);
+        match std::fs::rename(&self.path, &backup) {
+            Ok(()) => {
+                // Reopen a fresh file at the original path and swap the handle.
+                if let Ok(new_file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)
+                {
+                    *file = new_file;
+                }
+            }
+            Err(_) => {
+                // Fallback: truncate in place.
                 let _ = file.set_len(0);
                 let _ = file.rewind();
             }
@@ -66,7 +96,7 @@ impl RollingFileAppender {
 
 impl io::Write for RollingFileAppender {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut file = self.file.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("log lock poisoned: {}", e)))?;
+        let mut file = self.file.lock().map_err(|e| io::Error::other(format!("log lock poisoned: {}", e)))?;
         self.check_rotation(&mut file);
         let result = file.write(buf);
         let _ = file.flush();
@@ -76,7 +106,7 @@ impl io::Write for RollingFileAppender {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let mut file = self.file.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("log lock poisoned: {}", e)))?;
+        let mut file = self.file.lock().map_err(|e| io::Error::other(format!("log lock poisoned: {}", e)))?;
         file.flush()?;
         io::stdout().flush()
     }
@@ -86,7 +116,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RollingFileAppender {
     type Writer = RollingFileAppenderGuard<'a>;
 
     fn make_writer(&'a self) -> Self::Writer {
-        let mut file = self.file.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("log lock poisoned: {}", e))).expect("log lock poisoned");
+        let mut file = self.file.lock().map_err(|e| io::Error::other(format!("log lock poisoned: {}", e))).expect("log lock poisoned");
         self.check_rotation(&mut file);
         RollingFileAppenderGuard(file)
     }

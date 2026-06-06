@@ -18,51 +18,22 @@ use app::icon_service::IconService;
 use app::remote_desktop_service::RemoteDesktopService;
 use domain::command::executor::CommandExecutor;
 
-fn get_project_root() -> std::path::PathBuf {
+fn get_dev_data_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(".data")
+        .join("dev")
+}
+
+fn get_dev_log_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf()
-}
-
-fn get_data_dir() -> std::path::PathBuf {
-    if cfg!(debug_assertions) {
-        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        manifest_dir.join(".data").join("dev")
-    } else {
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        exe_dir.join("data")
-    }
-}
-
-fn get_log_dir() -> std::path::PathBuf {
-    if cfg!(debug_assertions) {
-        get_project_root().join("logs")
-    } else {
-        get_data_dir().join("logs")
-    }
+        .join("logs")
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let data_dir = get_data_dir();
-    let log_dir = get_log_dir();
-
-    if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        eprintln!("Warning: could not create data dir {:?}: {}", data_dir, e);
-    }
-    if let Err(e) = std::fs::create_dir_all(&log_dir) {
-        eprintln!("Warning: could not create log dir {:?}: {}", log_dir, e);
-    }
-
-    infra::logging::init(&log_dir);
-
-    tracing::info!("[app] data directory: {:?}", data_dir);
-    tracing::info!("[app] log directory: {:?}", log_dir);
-
     let terminal_service = Arc::new(TerminalService::new());
 
     tauri::Builder::default()
@@ -71,6 +42,33 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .manage(terminal_service.clone())
         .setup(move |app| {
             let app_handle = app.handle();
+
+            // Resolve data/log directory based on environment.
+            // In production we MUST use a user-writable location (app_data_dir),
+            // because exe_dir is read-only on macOS (.app), Windows (Program Files)
+            // and Linux package installs.
+            let (data_dir, log_dir) = if cfg!(debug_assertions) {
+                (get_dev_data_dir(), get_dev_log_dir())
+            } else {
+                let data = app_handle
+                    .path()
+                    .app_data_dir()
+                    .map_err(|e| format!("failed to resolve app_data_dir: {}", e))?;
+                let logs = data.join("logs");
+                (data, logs)
+            };
+
+            if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                eprintln!("Warning: could not create data dir {:?}: {}", data_dir, e);
+            }
+            if let Err(e) = std::fs::create_dir_all(&log_dir) {
+                eprintln!("Warning: could not create log dir {:?}: {}", log_dir, e);
+            }
+
+            infra::logging::init(&log_dir);
+
+            tracing::info!("[app] data directory: {:?}", data_dir);
+            tracing::info!("[app] log directory: {:?}", log_dir);
 
             terminal_service.set_app_handle(app_handle.clone())?;
 
@@ -82,10 +80,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let db = match Database::open(&db_path) {
                 Ok(db) => db,
                 Err(e) => {
-                    tracing::error!("[app] failed to open database: {}", e);
-                    return Err(Box::new(tauri::Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("failed to open database: {}", e),
+                    tracing::error!("[app] failed to open database at {:?}: {}", db_path, e);
+                    // Show user-friendly error dialog before exiting.
+                    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                    let _ = app_handle
+                        .dialog()
+                        .message(format!(
+                            "Biosphere Terminal failed to start.\n\nUnable to open the local database at:\n{}\n\nReason: {}\n\nPlease check folder permissions and try again.",
+                            db_path.display(),
+                            e
+                        ))
+                        .title("Database initialization failed")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                    return Err(Box::new(std::io::Error::other(format!(
+                        "failed to open database at {:?}: {}",
+                        db_path, e
                     ))));
                 }
             };

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Allow JIT for webview / Rust runtime -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- Allow unsigned executable memory (required for some webview features) -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Disable library validation so we can load dynamic system libraries (libssh, openssl etc.) -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Disable executable page protection: needed for PTY spawn of /bin/zsh, ssh, vncviewer, etc. -->
+    <key>com.apple.security.cs.disable-executable-page-protection</key>
+    <true/>
+
+    <!-- Allow this app to inherit privileges of its parent process and spawn child processes (ssh, shell) -->
+    <key>com.apple.security.inherit</key>
+    <true/>
+
+    <!-- Network client (HTTP/SSH/VNC outbound) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Network server (local VNC websocket proxy listening) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- File system access for user-selected files (notes, plugins, icons) -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- Allow JIT for Apple Silicon (required by some webview2 backends) -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>

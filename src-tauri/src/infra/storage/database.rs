@@ -10,7 +10,28 @@ pub struct Database {
 impl Database {
     pub fn open(path: &Path) -> crate::core::error::Result<Self> {
         tracing::info!("[Database::open] opening database at: {:?}", path);
-        let conn = Connection::open(path)?;
+
+        // Make sure the parent directory exists. Production app_data_dir
+        // typically exists, but be defensive when paths contain Unicode/spaces.
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    "[Database::open] could not create parent dir {:?}: {}",
+                    parent,
+                    e
+                );
+            }
+        }
+
+        let conn = Connection::open(path).map_err(|e| {
+            tracing::error!(
+                "[Database::open] sqlite open failed (path={:?}, exists={}): {}",
+                path,
+                path.exists(),
+                e
+            );
+            e
+        })?;
         let db = Database {
             conn: Mutex::new(conn),
         };
