@@ -383,6 +383,8 @@ fn start_ssh_tunnel_pty(
         })
         .map_err(|e| format!("openpty failed: {}", e))?;
 
+    let ssh_bin = crate::core::platform::resolve_ssh_binary()?;
+
     let mut args: Vec<String> = Vec::new();
 
     args.push("-o".to_string());
@@ -409,9 +411,9 @@ fn start_ssh_tunnel_pty(
 
     args.push(format!("{}@{}", ssh.username, ssh.host));
 
-    tracing::info!("[remote-desktop] Starting SSH tunnel PTY: ssh {}", args.join(" "));
+    tracing::info!("[remote-desktop] Starting SSH tunnel PTY: {} {}", &ssh_bin, args.join(" "));
 
-    let mut cmd = CommandBuilder::new("ssh");
+    let mut cmd = CommandBuilder::new(ssh_bin);
     cmd.args(&args);
     cmd.env("TERM", "xterm-256color");
 
@@ -558,6 +560,8 @@ fn run_ssh_command_with_timeout(ssh: &SshConnectionInfo, command: &str, timeout_
         })
         .map_err(|e| format!("openpty failed: {}", e))?;
 
+    let ssh_bin = crate::core::platform::resolve_ssh_binary()?;
+
     let mut args: Vec<String> = Vec::new();
     args.push("-o".to_string());
     args.push("StrictHostKeyChecking=accept-new".to_string());
@@ -579,7 +583,7 @@ fn run_ssh_command_with_timeout(ssh: &SshConnectionInfo, command: &str, timeout_
     args.push(format!("{}@{}", ssh.username, ssh.host));
     args.push(command.to_string());
 
-    let mut cmd = CommandBuilder::new("ssh");
+    let mut cmd = CommandBuilder::new(ssh_bin);
     cmd.args(&args);
     cmd.env("TERM", "xterm-256color");
 

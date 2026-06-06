@@ -25,7 +25,8 @@ impl Pty {
             })
             .map_err(|e| crate::core::error::Error::Terminal(format!("openpty failed: {}", e)))?;
 
-        let cmd = Self::build_command(config);
+        let cmd = Self::build_command(config)
+            .map_err(|e| crate::core::error::Error::Terminal(e))?;
 
         let child = pair
             .slave
@@ -51,7 +52,7 @@ impl Pty {
         })
     }
 
-    fn build_command(config: &PtyConfig) -> CommandBuilder {
+    fn build_command(config: &PtyConfig) -> std::result::Result<CommandBuilder, String> {
         let conn_type = config.connection_type.as_deref().unwrap_or("local");
 
         if conn_type == "ssh" {
@@ -60,12 +61,15 @@ impl Pty {
             }
         }
 
-        Self::build_local_command(config)
+        Ok(Self::build_local_command(config))
     }
 
     fn build_local_command(config: &PtyConfig) -> CommandBuilder {
-        let shell = config.shell.as_deref().unwrap_or("/bin/zsh");
-        let mut cmd = CommandBuilder::new(shell);
+        let shell = config
+            .shell
+            .clone()
+            .unwrap_or_else(crate::core::platform::default_shell);
+        let mut cmd = CommandBuilder::new(&shell);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
 
@@ -82,7 +86,9 @@ impl Pty {
         cmd
     }
 
-    fn build_ssh_command(ssh: &SshConnectionInfo, x11_forwarding: bool) -> CommandBuilder {
+    fn build_ssh_command(ssh: &SshConnectionInfo, x11_forwarding: bool) -> std::result::Result<CommandBuilder, String> {
+        let ssh_bin = crate::core::platform::resolve_ssh_binary()?;
+
         let mut args: Vec<String> = Vec::new();
 
         args.push("-o".to_string());
@@ -106,11 +112,11 @@ impl Pty {
 
         args.push(format!("{}@{}", ssh.username, ssh.host));
 
-        let mut cmd = CommandBuilder::new("ssh");
+        let mut cmd = CommandBuilder::new(ssh_bin);
         cmd.args(&args);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd
+        Ok(cmd)
     }
 
     pub fn reader(&self) -> Arc<Mutex<Box<dyn Read + Send>>> {
