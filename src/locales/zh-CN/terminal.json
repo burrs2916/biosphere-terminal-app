@@ -80,6 +80,8 @@
     "linked_to_existing": "已关联到已有笔记",
     "clear_all": "清空历史",
     "clear_all_confirm": "确认清空所有命令历史记录？此操作不可撤销。",
+    "delete_entry_confirm_title": "删除命令记录",
+    "delete_entry_confirm_message": "确定要删除该命令记录吗？\n\n命令：{{command}}\n\n此操作不可撤销。",
     "save_dialog": {
       "title": "保存命令到笔记",
       "note_title": "笔记标题",

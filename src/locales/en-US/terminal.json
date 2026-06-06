@@ -80,6 +80,8 @@
     "linked_to_existing": "Linked to existing note",
     "clear_all": "Clear History",
     "clear_all_confirm": "Clear all command history? This cannot be undone.",
+    "delete_entry_confirm_title": "Delete Command Entry",
+    "delete_entry_confirm_message": "Are you sure you want to delete this command entry?\n\nCommand: {{command}}\n\nThis action cannot be undone.",
     "save_dialog": {
       "title": "Save Command to Notebook",
       "note_title": "Note Title",

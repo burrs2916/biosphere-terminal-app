@@ -12,7 +12,7 @@ export function ConnectionPage() {
       <Typography variant="h5" sx={{ mb: 2, fontWeight: 700 }}>
         {t('connection.title')}
       </Typography>
-      <ConnectionList onConnect={(conn) => notify(t('connection.connected_to', { name: conn.name, defaultValue: `Connected to ${conn.name}` }))} />
+      <ConnectionList onConnect={(conn) => notify(t('connection.connected_to', { name: conn.name }))} />
     </Box>
   );
 }

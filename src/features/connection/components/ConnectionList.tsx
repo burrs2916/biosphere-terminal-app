@@ -355,14 +355,13 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
           <Typography variant="body2" color="text.secondary">
             {t('connection.delete_confirm_message', {
               name: connections.find((c) => c.id === deleteConfirm)?.name || '',
-              defaultValue: 'Are you sure you want to delete this connection? This action cannot be undone.',
             })}
           </Typography>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setDeleteConfirm(null)}>{t('connection.cancel')}</Button>
           <Button color="error" variant="contained" onClick={() => deleteConfirm && handleDelete(deleteConfirm)}>
-            {t('connection.delete', { defaultValue: 'Delete' })}
+            {t('connection.delete')}
           </Button>
         </DialogActions>
       </Dialog>

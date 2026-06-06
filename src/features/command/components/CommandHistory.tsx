@@ -375,7 +375,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
       <Box sx={{ p: 3, textAlign: 'center' }}>
         <ArrowClockwiseIcon size={24} color="#6C63FF" className="spin" />
         <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          {tCommon('loading') || 'Loading...'}
+          {tCommon('status.loading')}
         </Typography>
       </Box>
     );
@@ -866,19 +866,18 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
       </Dialog>
 
       <Dialog open={deleteEntryConfirm !== null} onClose={() => setDeleteEntryConfirm(null)} maxWidth="xs" fullWidth>
-        <DialogTitle>{t('history.delete_entry_confirm_title', { defaultValue: 'Delete Entry' })}</DialogTitle>
+        <DialogTitle>{t('history.delete_entry_confirm_title')}</DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary">
+          <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: 'pre-line' }}>
             {t('history.delete_entry_confirm_message', {
               command: deleteEntryConfirm?.command?.slice(0, 60) || '',
-              defaultValue: 'Are you sure you want to delete this command entry? This action cannot be undone.',
             })}
           </Typography>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setDeleteEntryConfirm(null)}>{tCommon('action.cancel')}</Button>
           <Button onClick={() => deleteEntryConfirm && handleDeleteEntry(deleteEntryConfirm)} variant="contained" color="error">
-            {t('history.delete', { defaultValue: 'Delete' })}
+            {t('history.delete')}
           </Button>
         </DialogActions>
       </Dialog>
