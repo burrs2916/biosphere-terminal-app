@@ -182,10 +182,12 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         if (rect.width === 0 || rect.height === 0) return;
         try {
           fit.fit();
+          // Ensure terminal is focused after resize
+          term.focus();
         } catch (err) {
           // Silently ignore fit errors during cleanup
         }
-      }, 50);
+      }, 100); // Increased delay to prevent rapid resize issues
     }, [visible]);
 
     const isDisposedRef = useRef(false);
@@ -526,13 +528,19 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
             if (rect.width > 0 && rect.height > 0) {
               try {
                 fit.fit();
+                const cols = term.cols;
+                const rows = term.rows;
+                resizeTerminal(sessionId, rows, cols).catch((e) => notify(String(e)));
+                // Ensure terminal regains focus when becoming visible
+                term.focus();
               } catch (err) {
+                // Silently ignore fit errors
               }
             }
           }
         });
       }
-    }, [visible]);
+    }, [visible, sessionId, notify]);
 
     return (
       <Box
