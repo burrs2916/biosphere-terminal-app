@@ -160,68 +160,76 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let _ = write_debug_log(&debug_log_path, "[setup] all services registered with app_handle");
 
             // Inspect the webview: log if main window exists and its URL.
+            // NOTE: During setup the webview URL may still be about:blank because
+            // Tauri navigates to the embedded frontend AFTER setup completes.
+            // Do NOT manually navigate here – on Windows, navigating to
+            // tauri://localhost/ overrides Tauri's own navigation and WebView2
+            // does not support the tauri:// scheme (it uses https://tauri.localhost/).
             if let Some(window) = app_handle.get_webview_window("main") {
                 let _ = write_debug_log(&debug_log_path, "[setup] main webview window found");
                 match window.url() {
                     Ok(url) => {
-                        let _ = write_debug_log(&debug_log_path, &format!("[setup] main webview URL: {}", url));
+                        let _ = write_debug_log(&debug_log_path, &format!("[setup] main webview URL at setup time: {} (may change after setup)", url));
                     }
                     Err(e) => {
                         let _ = write_debug_log(&debug_log_path, &format!("[setup] FAILED to get main webview URL: {}", e));
                     }
                 }
-
-                // Try to navigate explicitly to the index.html in frontendDist.
-                // In Tauri 2.0, on production builds the WebView should already
-                // be configured to load the embedded index.html. If it shows
-                // about:blank, something went wrong during bundle embedding.
-                // We log additional context to help diagnose.
-                let _ = write_debug_log(&debug_log_path, "[setup] webview current URL protocol analysis:");
-                if let Ok(url) = window.url() {
-                    let url_str = url.to_string();
-                    let _ = write_debug_log(&debug_log_path, &format!("[setup]   url.as_str() = {}", url_str));
-                    let _ = write_debug_log(&debug_log_path, &format!("[setup]   url.scheme() = {:?}", url.scheme()));
-                }
-
-                // Force the webview to navigate to the main page if it is blank.
-                // This is a fallback for the about:blank issue.
-                if let Ok(url) = window.url() {
-                    if url.scheme() == "about" {
-                        let _ = write_debug_log(&debug_log_path, "[setup] WARNING: webview is about:blank, attempting to navigate to index");
-                        // Try common Tauri 2.0 internal URLs.
-                        // The embedded frontend is usually served at tauri://localhost/
-                        // or https://tauri.localhost/
-                        let candidates = [
-                            "tauri://localhost/index.html",
-                            "https://tauri.localhost/index.html",
-                            "tauri://localhost/",
-                            "https://tauri.localhost/",
-                        ];
-                        for candidate in &candidates {
-                            let target_url_str = candidate.to_string();
-                            match tauri::Url::parse(candidate) {
-                                Ok(target_url) => {
-                                    let _ = write_debug_log(&debug_log_path, &format!("[setup]   trying to navigate to: {}", target_url_str));
-                                    match window.navigate(target_url) {
-                                        Ok(()) => {
-                                            let _ = write_debug_log(&debug_log_path, &format!("[setup]   navigate to {} succeeded", target_url_str));
-                                            break;
-                                        }
-                                        Err(e) => {
-                                            let _ = write_debug_log(&debug_log_path, &format!("[setup]   navigate to {} failed: {}", target_url_str, e));
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    let _ = write_debug_log(&debug_log_path, &format!("[setup]   failed to parse {}: {}", target_url_str, e));
-                                }
-                            }
-                        }
-                    }
-                }
             } else {
                 let _ = write_debug_log(&debug_log_path, "[setup] WARNING: no main webview window found");
             }
+
+            // Delayed check: verify the webview URL after Tauri's own navigation
+            // should have completed.  If it is still about:blank, navigate to
+            // the platform-correct URL as a fallback.
+            let app_handle_delayed = app_handle.clone();
+            let debug_log_path_delayed = debug_log_path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                let _ = write_debug_log(&debug_log_path_delayed, "[delayed] checking webview URL after 3s");
+                if let Some(window) = app_handle_delayed.get_webview_window("main") {
+                    match window.url() {
+                        Ok(url) => {
+                            let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] webview URL: {}", url));
+                            if url.scheme() == "about" {
+                                let _ = write_debug_log(&debug_log_path_delayed, "[delayed] webview still about:blank, attempting platform-specific navigation");
+                                // Tauri 2.0 uses different protocols per platform:
+                                //   Windows : https://tauri.localhost/
+                                //   macOS   : tauri://localhost/
+                                //   Linux   : tauri://localhost/
+                                let target_url_str = if cfg!(target_os = "windows") {
+                                    "https://tauri.localhost/"
+                                } else {
+                                    "tauri://localhost/"
+                                };
+                                match tauri::Url::parse(target_url_str) {
+                                    Ok(target_url) => {
+                                        let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] navigating to: {}", target_url_str));
+                                        match window.navigate(target_url) {
+                                            Ok(()) => {
+                                                let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] navigate to {} succeeded", target_url_str));
+                                            }
+                                            Err(e) => {
+                                                let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] navigate to {} failed: {}", target_url_str, e));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] failed to parse URL {}: {}", target_url_str, e));
+                                    }
+                                }
+                            } else {
+                                let _ = write_debug_log(&debug_log_path_delayed, "[delayed] webview has valid URL, no action needed");
+                            }
+                        }
+                        Err(e) => {
+                            let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] failed to get webview URL: {}", e));
+                        }
+                    }
+                } else {
+                    let _ = write_debug_log(&debug_log_path_delayed, "[delayed] no main webview window found");
+                }
+            });
 
             let _ = write_debug_log(&debug_log_path, "[setup] setup completed successfully");
             Ok(())
