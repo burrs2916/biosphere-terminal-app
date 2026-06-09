@@ -34,14 +34,37 @@ fn get_dev_log_dir() -> std::path::PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Early debug log: write to debug.log next to the executable.
+    // This runs BEFORE the Tauri builder so we can capture startup failures
+    // (e.g. panic during setup, data dir failure, etc.) even when the UI
+    // never loads (white screen).
+    let exe_path = std::env::current_exe().ok();
+    let debug_log_path = exe_path
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|d| d.join("debug.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("debug.log"));
+
+    let _ = write_debug_log(&debug_log_path, "=== Biosphere Terminal started ===");
+    let _ = write_debug_log(&debug_log_path, &format!("exe: {:?}", exe_path));
+    let _ = write_debug_log(&debug_log_path, &format!("args: {:?}", std::env::args().collect::<Vec<_>>()));
+    let _ = write_debug_log(&debug_log_path, &format!("cwd: {:?}", std::env::current_dir().ok()));
+    let _ = write_debug_log(&debug_log_path, &format!("debug.log: {:?}", debug_log_path));
+
+    // Share the debug log path with the setup closure (Tauri setup is Fn once, not FnMut).
+    let debug_log_for_setup = std::sync::Arc::new(debug_log_path.clone());
+    let debug_log_path_for_after = debug_log_path.clone();
+
     let terminal_service = Arc::new(TerminalService::new());
 
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(terminal_service.clone())
         .setup(move |app| {
             let app_handle = app.handle();
+            let debug_log_path = (*debug_log_for_setup).clone();
+            let _ = write_debug_log(&debug_log_path, "[setup] Tauri setup started");
 
             // Resolve data/log directory based on environment.
             // In production we MUST use a user-writable location (app_data_dir),
@@ -58,28 +81,40 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 (data, logs)
             };
 
+            let _ = write_debug_log(&debug_log_path, &format!("[setup] data_dir: {:?}", data_dir));
+            let _ = write_debug_log(&debug_log_path, &format!("[setup] log_dir: {:?}", log_dir));
+
             if let Err(e) = std::fs::create_dir_all(&data_dir) {
                 eprintln!("Warning: could not create data dir {:?}: {}", data_dir, e);
+                let _ = write_debug_log(&debug_log_path, &format!("[setup] FAILED to create data dir: {}", e));
             }
             if let Err(e) = std::fs::create_dir_all(&log_dir) {
                 eprintln!("Warning: could not create log dir {:?}: {}", log_dir, e);
+                let _ = write_debug_log(&debug_log_path, &format!("[setup] FAILED to create log dir: {}", e));
             }
 
             infra::logging::init(&log_dir);
+            let _ = write_debug_log(&debug_log_path, "[setup] logging initialized");
 
             tracing::info!("[app] data directory: {:?}", data_dir);
             tracing::info!("[app] log directory: {:?}", log_dir);
 
             terminal_service.set_app_handle(app_handle.clone())?;
+            let _ = write_debug_log(&debug_log_path, "[setup] terminal_service initialized");
 
             let db_path = data_dir.join("biosphere.db");
             let notes_dir = data_dir.join("notes");
+            let _ = write_debug_log(&debug_log_path, &format!("[setup] db_path: {:?}", db_path));
 
             let _ = std::fs::create_dir_all(&notes_dir);
 
             let db = match Database::open(&db_path) {
-                Ok(db) => db,
+                Ok(db) => {
+                    let _ = write_debug_log(&debug_log_path, "[setup] database opened successfully");
+                    db
+                }
                 Err(e) => {
+                    let _ = write_debug_log(&debug_log_path, &format!("[setup] FAILED to open database: {}", e));
                     tracing::error!("[app] failed to open database at {:?}: {}", db_path, e);
                     // Show user-friendly error dialog before exiting.
                     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -246,7 +281,35 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::remote_desktop::close_remote_desktop,
             interface::commands::remote_desktop::setup_remote_desktop,
         ])
-        .run(tauri::generate_context!())?;
+        .run(tauri::generate_context!());
 
+    match &result {
+        Ok(()) => {
+            let _ = write_debug_log(&debug_log_path_for_after, "=== Biosphere Terminal exited cleanly ===");
+        }
+        Err(e) => {
+            let _ = write_debug_log(&debug_log_path_for_after, &format!("=== Biosphere Terminal failed: {} ===", e));
+        }
+    }
+
+    result.map_err(Into::into)
+}
+
+/// Append a line to the debug log next to the executable.
+/// Best-effort: ignores errors so it never breaks startup.
+fn write_debug_log(path: &std::path::Path, message: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    writeln!(file, "[{}] {}", timestamp, message)?;
     Ok(())
 }
