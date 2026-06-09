@@ -122,12 +122,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             app_handle.manage(icon_service);
             app_handle.manage(remote_desktop_service);
 
-            // Open DevTools for debugging (including production builds)
-            if let Some(window) = app_handle.get_webview_window("main") {
-                window.open_devtools();
-                tracing::info!("[app] DevTools opened for debugging");
-            }
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
