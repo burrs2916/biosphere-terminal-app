@@ -7,6 +7,7 @@ mod plugins;
 
 use std::sync::Arc;
 use tauri::Manager;
+use tauri::Listener;
 
 use infra::storage::database::Database;
 use app::terminal_service::TerminalService;
@@ -349,6 +350,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Delayed check: verify the webview URL after Tauri's own navigation
             // should have completed.  If it is still about:blank, navigate to
             // the platform-correct URL as a fallback.
+            // Also inject JS error listeners to capture frontend errors.
             let app_handle_delayed = app_handle.clone();
             let debug_log_path_delayed = debug_log_path.clone();
             std::thread::spawn(move || {
@@ -362,10 +364,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] webview host: {:?}", url.host_str()));
                             if url.scheme() == "about" {
                                 let _ = write_debug_log(&debug_log_path_delayed, "[delayed] webview still about:blank, attempting platform-specific navigation");
-                                // Tauri 2.0 uses different protocols per platform:
-                                //   Windows : https://tauri.localhost/
-                                //   macOS   : tauri://localhost/
-                                //   Linux   : tauri://localhost/
                                 let target_url_str = if cfg!(target_os = "windows") {
                                     "https://tauri.localhost/"
                                 } else {
@@ -396,18 +394,93 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    // Second delayed check after 8s total to see final state
+                    // Inject JS to capture frontend errors and report via Tauri events
+                    let _ = write_debug_log(&debug_log_path_delayed, "[delayed] injecting JS error listeners");
+                    let js_err = r#"
+                        (function(){
+                            window.__biosphere_errors = [];
+                            window.onerror = function(msg, src, line, col, err) {
+                                window.__biosphere_errors.push('onerror: ' + msg + ' at ' + src + ':' + line + ':' + col);
+                            };
+                            window.addEventListener('unhandledrejection', function(e) {
+                                window.__biosphere_errors.push('unhandledrejection: ' + (e.reason && e.reason.stack || e.reason || e));
+                            });
+                            document.addEventListener('securitypolicyviolation', function(e) {
+                                window.__biosphere_errors.push('CSP violation: ' + e.violatedDirective + ' blocked ' + e.blockedURI);
+                            });
+                        })();
+                    "#;
+                    match window.eval(js_err) {
+                        Ok(()) => {
+                            let _ = write_debug_log(&debug_log_path_delayed, "[delayed] JS error listeners injected successfully");
+                        }
+                        Err(e) => {
+                            let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] FAILED to inject JS error listeners: {}", e));
+                        }
+                    }
+
+                    // Inject JS to check DOM content
+                    let js_dom = r#"
+                        (function(){
+                            var bodyLen = document.body ? document.body.innerHTML.length : -1;
+                            var scripts = document.querySelectorAll('script');
+                            window.__biosphere_dom_info = 'bodyLen=' + bodyLen + ' scripts=' + scripts.length;
+                        })();
+                    "#;
+                    match window.eval(js_dom) {
+                        Ok(()) => {
+                            let _ = write_debug_log(&debug_log_path_delayed, "[delayed] JS DOM check injected");
+                        }
+                        Err(e) => {
+                            let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] FAILED to inject JS DOM check: {}", e));
+                        }
+                    }
+
+                    // Listen for JS diagnostic events
+                    let debug_log_for_listener = debug_log_path_delayed.clone();
+                    let _listener_id = app_handle_delayed.listen("js-diagnostic", move |event| {
+                        let payload = event.payload().to_string();
+                        let _ = write_debug_log(&debug_log_for_listener, &format!("[js-diagnostic] {}", payload));
+                    });
+
+                    // Second delayed check after 8s total to collect error info and see final state
                     let window_8s = window;
                     let debug_log_8s = debug_log_path_delayed.clone();
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_secs(5));
-                        let _ = write_debug_log(&debug_log_8s, "[delayed-8s] final webview URL check");
+                        let _ = write_debug_log(&debug_log_8s, "[delayed-8s] final webview check");
+
                         match window_8s.url() {
                             Ok(url) => {
                                 let _ = write_debug_log(&debug_log_8s, &format!("[delayed-8s] webview URL: {}", url));
                             }
                             Err(e) => {
                                 let _ = write_debug_log(&debug_log_8s, &format!("[delayed-8s] failed to get URL: {}", e));
+                            }
+                        }
+
+                        // Collect JS errors and DOM info via Tauri event
+                        let js_collect = r#"
+                            (function(){
+                                var errs = window.__biosphere_errors || [];
+                                var domInfo = window.__biosphere_dom_info || '(not set)';
+                                var bodyPreview = document.body ? document.body.innerHTML.substring(0, 500) : '(no body)';
+                                var result = 'domInfo=' + domInfo + ' errors=' + errs.length;
+                                if(errs.length > 0) {
+                                    result += ' | ' + errs.join(' | ');
+                                }
+                                result += ' | bodyPreview=' + bodyPreview;
+                                if(window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.emit) {
+                                    window.__TAURI__.event.emit('js-diagnostic', result);
+                                }
+                            })();
+                        "#;
+                        match window_8s.eval(js_collect) {
+                            Ok(()) => {
+                                let _ = write_debug_log(&debug_log_8s, "[delayed-8s] JS diagnostics collection triggered (result via event)");
+                            }
+                            Err(e) => {
+                                let _ = write_debug_log(&debug_log_8s, &format!("[delayed-8s] FAILED to trigger JS diagnostics: {}", e));
                             }
                         }
                     });
