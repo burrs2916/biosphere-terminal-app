@@ -51,6 +51,136 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _ = write_debug_log(&debug_log_path, &format!("cwd: {:?}", std::env::current_dir().ok()));
     let _ = write_debug_log(&debug_log_path, &format!("debug.log: {:?}", debug_log_path));
 
+    // ---- System & Environment diagnostics ----
+    let _ = write_debug_log(&debug_log_path, &format!("os: {}", std::env::consts::OS));
+    let _ = write_debug_log(&debug_log_path, &format!("arch: {}", std::env::consts::ARCH));
+    let _ = write_debug_log(&debug_log_path, &format!("family: {}", std::env::consts::FAMILY));
+
+    // Key environment variables that affect WebView2 / Tauri
+    for key in &[
+        "WEBVIEW2_BROWSER_EXECUTABLE_FOLDER",
+        "TAURI_ENV_DEBUG",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PATH",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "HOMEDRIVE",
+        "HOMEPATH",
+    ] {
+        match std::env::var(key) {
+            Ok(val) => {
+                // Truncate PATH to avoid bloating the log
+                if key == &"PATH" {
+                    let truncated = if val.len() > 300 { &val[..300] } else { &val };
+                    let _ = write_debug_log(&debug_log_path, &format!("env {} = {}...", truncated, if val.len() > 300 { " (truncated)" } else { "" }));
+                } else {
+                    let _ = write_debug_log(&debug_log_path, &format!("env {} = {}", key, val));
+                }
+            }
+            Err(_) => {
+                let _ = write_debug_log(&debug_log_path, &format!("env {} = (not set)", key));
+            }
+        }
+    }
+
+    // On Windows: check WebView2 Runtime availability
+    #[cfg(target_os = "windows")]
+    {
+        let _ = write_debug_log(&debug_log_path, "[diag] checking WebView2 Runtime...");
+        // WebView2 runtime is typically at:
+        //   C:\Program Files (x86)\Microsoft\EdgeWebView\Application
+        // or bundled in the app
+        let possible_paths = [
+            std::path::PathBuf::from(r"C:\Program Files (x86)\Microsoft\EdgeWebView\Application"),
+            std::path::PathBuf::from(r"C:\Program Files\Microsoft\EdgeWebView\Application"),
+            std::path::PathBuf::from(r"C:\Program Files (x86)\Microsoft\Edge\Application"),
+            std::path::PathBuf::from(r"C:\Program Files\Microsoft\Edge\Application"),
+        ];
+        for p in &possible_paths {
+            if p.exists() {
+                let _ = write_debug_log(&debug_log_path, &format!("[diag] WebView2/Edge found at: {:?}", p));
+                // Try to list subdirectories (version folders)
+                if let Ok(entries) = std::fs::read_dir(p) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if name.starts_with(|c: char| c.is_ascii_digit()) {
+                            let _ = write_debug_log(&debug_log_path, &format!("[diag]   version dir: {}", name));
+                        }
+                    }
+                }
+            } else {
+                let _ = write_debug_log(&debug_log_path, &format!("[diag] WebView2/Edge NOT found at: {:?}", p));
+            }
+        }
+
+        // Check registry for WebView2 version
+        let _ = write_debug_log(&debug_log_path, "[diag] checking registry for WebView2...");
+        if let Ok(output) = std::process::Command::new("reg")
+            .args(["query", r"HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEB-22B8B6B3A6D1}", "/v", "pv"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _ = write_debug_log(&debug_log_path, &format!("[diag] reg query HKLM WOW6432Node stdout: {}", stdout.trim()));
+            if !stderr.trim().is_empty() {
+                let _ = write_debug_log(&debug_log_path, &format!("[diag] reg query HKLM WOW6432Node stderr: {}", stderr.trim()));
+            }
+        }
+        if let Ok(output) = std::process::Command::new("reg")
+            .args(["query", r"HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEB-22B8B6B3A6D1}", "/v", "pv"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _ = write_debug_log(&debug_log_path, &format!("[diag] reg query HKLM stdout: {}", stdout.trim()));
+            if !stderr.trim().is_empty() {
+                let _ = write_debug_log(&debug_log_path, &format!("[diag] reg query HKLM stderr: {}", stderr.trim()));
+            }
+        }
+        if let Ok(output) = std::process::Command::new("reg")
+            .args(["query", r"HKCU\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEB-22B8B6B3A6D1}", "/v", "pv"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _ = write_debug_log(&debug_log_path, &format!("[diag] reg query HKCU stdout: {}", stdout.trim()));
+            if !stderr.trim().is_empty() {
+                let _ = write_debug_log(&debug_log_path, &format!("[diag] reg query HKCU stderr: {}", stderr.trim()));
+            }
+        }
+
+        // Check if msedgewebview2.exe exists in PATH or common locations
+        if let Ok(output) = std::process::Command::new("where")
+            .arg("msedgewebview2.exe")
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !stdout.trim().is_empty() {
+                let _ = write_debug_log(&debug_log_path, &format!("[diag] msedgewebview2.exe found: {}", stdout.trim()));
+            } else {
+                let _ = write_debug_log(&debug_log_path, "[diag] msedgewebview2.exe NOT found in PATH");
+            }
+        }
+    }
+
+    // Check if the exe directory is writable (for debug.log itself)
+    if let Some(exe_dir) = exe_path.as_ref().and_then(|p| p.parent()) {
+        let test_file = exe_dir.join(".biosphere_write_test");
+        match std::fs::write(&test_file, b"test") {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&test_file);
+                let _ = write_debug_log(&debug_log_path, &format!("[diag] exe directory is writable: {:?}", exe_dir));
+            }
+            Err(e) => {
+                let _ = write_debug_log(&debug_log_path, &format!("[diag] exe directory is NOT writable: {:?} ({})", exe_dir, e));
+            }
+        }
+    }
+
     // Share the debug log path with the setup closure (Tauri setup is Fn once, not FnMut).
     let debug_log_for_setup = std::sync::Arc::new(debug_log_path.clone());
     let debug_log_path_for_after = debug_log_path.clone();
@@ -175,8 +305,45 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = write_debug_log(&debug_log_path, &format!("[setup] FAILED to get main webview URL: {}", e));
                     }
                 }
+
+                // Log window properties
+                let _ = write_debug_log(&debug_log_path, &format!("[setup] window label: {}", window.label()));
+                let _ = write_debug_log(&debug_log_path, &format!("[setup] window is_visible: {}", window.is_visible().unwrap_or(false)));
+                let _ = write_debug_log(&debug_log_path, &format!("[setup] window is_decorated: {}", window.is_decorated().unwrap_or(false)));
+                if let Ok(size) = window.inner_size() {
+                    let _ = write_debug_log(&debug_log_path, &format!("[setup] window inner_size: {}x{}", size.width, size.height));
+                }
+                if let Ok(pos) = window.outer_position() {
+                    let _ = write_debug_log(&debug_log_path, &format!("[setup] window position: ({}, {})", pos.x, pos.y));
+                }
             } else {
                 let _ = write_debug_log(&debug_log_path, "[setup] WARNING: no main webview window found");
+            }
+
+            // Log all available windows
+            let all_windows = app_handle.webview_windows();
+            let _ = write_debug_log(&debug_log_path, &format!("[setup] total webview windows: {}", all_windows.len()));
+            for (label, win) in &all_windows {
+                let url_str = win.url().map(|u| u.to_string()).unwrap_or_else(|e| format!("(error: {})", e));
+                let _ = write_debug_log(&debug_log_path, &format!("[setup]   window '{}': {}", label, url_str));
+            }
+
+            // Log Tauri app info
+            let _ = write_debug_log(&debug_log_path, &format!("[setup] app identifier: {}", app_handle.config().identifier));
+            let _ = write_debug_log(&debug_log_path, &format!("[setup] app product_name: {:?}", app_handle.config().product_name));
+            let _ = write_debug_log(&debug_log_path, &format!("[setup] app version: {:?}", app_handle.config().version));
+            if let Some(frontend_dist) = &app_handle.config().build.frontend_dist {
+                let _ = write_debug_log(&debug_log_path, &format!("[setup] config frontendDist: {:?}", frontend_dist));
+            } else {
+                let _ = write_debug_log(&debug_log_path, "[setup] config frontendDist: (not set)");
+            }
+            if let Some(dev_url) = &app_handle.config().build.dev_url {
+                let _ = write_debug_log(&debug_log_path, &format!("[setup] config devUrl: {}", dev_url));
+            }
+            if let Some(csp) = &app_handle.config().app.security.csp {
+                let _ = write_debug_log(&debug_log_path, &format!("[setup] config CSP: {}", csp));
+            } else {
+                let _ = write_debug_log(&debug_log_path, "[setup] config CSP: (not set)");
             }
 
             // Delayed check: verify the webview URL after Tauri's own navigation
@@ -191,6 +358,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     match window.url() {
                         Ok(url) => {
                             let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] webview URL: {}", url));
+                            let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] webview scheme: {:?}", url.scheme()));
+                            let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] webview host: {:?}", url.host_str()));
                             if url.scheme() == "about" {
                                 let _ = write_debug_log(&debug_log_path_delayed, "[delayed] webview still about:blank, attempting platform-specific navigation");
                                 // Tauri 2.0 uses different protocols per platform:
@@ -226,6 +395,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] failed to get webview URL: {}", e));
                         }
                     }
+
+                    // Second delayed check after 8s total to see final state
+                    let window_8s = window;
+                    let debug_log_8s = debug_log_path_delayed.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        let _ = write_debug_log(&debug_log_8s, "[delayed-8s] final webview URL check");
+                        match window_8s.url() {
+                            Ok(url) => {
+                                let _ = write_debug_log(&debug_log_8s, &format!("[delayed-8s] webview URL: {}", url));
+                            }
+                            Err(e) => {
+                                let _ = write_debug_log(&debug_log_8s, &format!("[delayed-8s] failed to get URL: {}", e));
+                            }
+                        }
+                    });
                 } else {
                     let _ = write_debug_log(&debug_log_path_delayed, "[delayed] no main webview window found");
                 }
