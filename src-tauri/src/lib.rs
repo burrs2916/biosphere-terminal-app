@@ -170,6 +170,55 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = write_debug_log(&debug_log_path, &format!("[setup] FAILED to get main webview URL: {}", e));
                     }
                 }
+
+                // Try to navigate explicitly to the index.html in frontendDist.
+                // In Tauri 2.0, on production builds the WebView should already
+                // be configured to load the embedded index.html. If it shows
+                // about:blank, something went wrong during bundle embedding.
+                // We log additional context to help diagnose.
+                let _ = write_debug_log(&debug_log_path, "[setup] webview current URL protocol analysis:");
+                if let Ok(url) = window.url() {
+                    let url_str = url.to_string();
+                    let _ = write_debug_log(&debug_log_path, &format!("[setup]   url.as_str() = {}", url_str));
+                    let _ = write_debug_log(&debug_log_path, &format!("[setup]   url.scheme() = {:?}", url.scheme()));
+                }
+
+                // Force the webview to navigate to the main page if it is blank.
+                // This is a fallback for the about:blank issue.
+                if let Ok(url) = window.url() {
+                    if url.scheme() == "about" {
+                        let _ = write_debug_log(&debug_log_path, "[setup] WARNING: webview is about:blank, attempting to navigate to index");
+                        // Try common Tauri 2.0 internal URLs.
+                        // The embedded frontend is usually served at tauri://localhost/
+                        // or https://tauri.localhost/
+                        let candidates = [
+                            "tauri://localhost/index.html",
+                            "https://tauri.localhost/index.html",
+                            "tauri://localhost/",
+                            "https://tauri.localhost/",
+                        ];
+                        for candidate in &candidates {
+                            let target_url_str = candidate.to_string();
+                            match tauri::Url::parse(candidate) {
+                                Ok(target_url) => {
+                                    let _ = write_debug_log(&debug_log_path, &format!("[setup]   trying to navigate to: {}", target_url_str));
+                                    match window.navigate(target_url) {
+                                        Ok(()) => {
+                                            let _ = write_debug_log(&debug_log_path, &format!("[setup]   navigate to {} succeeded", target_url_str));
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            let _ = write_debug_log(&debug_log_path, &format!("[setup]   navigate to {} failed: {}", target_url_str, e));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = write_debug_log(&debug_log_path, &format!("[setup]   failed to parse {}: {}", target_url_str, e));
+                                }
+                            }
+                        }
+                    }
+                }
             } else {
                 let _ = write_debug_log(&debug_log_path, "[setup] WARNING: no main webview window found");
             }
