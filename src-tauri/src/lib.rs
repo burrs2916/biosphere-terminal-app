@@ -147,6 +147,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let icons_dir = data_dir.join("icons");
             let icon_service = Arc::new(IconService::new(db_arc.clone(), icons_dir));
             let remote_desktop_service = Arc::new(RemoteDesktopService::new());
+            let _ = write_debug_log(&debug_log_path, "[setup] all services initialized");
 
             app_handle.manage(db_arc);
             app_handle.manage(notebook_service);
@@ -156,7 +157,24 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             app_handle.manage(command_executor);
             app_handle.manage(icon_service);
             app_handle.manage(remote_desktop_service);
+            let _ = write_debug_log(&debug_log_path, "[setup] all services registered with app_handle");
 
+            // Inspect the webview: log if main window exists and its URL.
+            if let Some(window) = app_handle.get_webview_window("main") {
+                let _ = write_debug_log(&debug_log_path, "[setup] main webview window found");
+                match window.url() {
+                    Ok(url) => {
+                        let _ = write_debug_log(&debug_log_path, &format!("[setup] main webview URL: {}", url));
+                    }
+                    Err(e) => {
+                        let _ = write_debug_log(&debug_log_path, &format!("[setup] FAILED to get main webview URL: {}", e));
+                    }
+                }
+            } else {
+                let _ = write_debug_log(&debug_log_path, "[setup] WARNING: no main webview window found");
+            }
+
+            let _ = write_debug_log(&debug_log_path, "[setup] setup completed successfully");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
