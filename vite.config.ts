@@ -7,6 +7,10 @@ export default defineConfig(async () => ({
   plugins: [react()],
   clearScreen: false,
   
+  // Use relative paths for cross-platform compatibility (Tauri WebView)
+  // This ensures assets work correctly in production builds on Windows/macOS/Linux
+  base: '',
+  
   // 构建优化：代码分割
   build: {
     target: 'es2022',
