@@ -1,5 +1,5 @@
 import Box from '@mui/material/Box';
-import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { HashRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { useEffect } from 'react';
 import { AppTheme } from './theme';
 import { AppShell, Sidebar, Header, StatusBar } from './components/layout';
@@ -128,7 +128,7 @@ export default function App() {
   }, [language]);
 
   return (
-    <BrowserRouter>
+    <HashRouter>
       <AppTheme>
         <NotificationProvider>
           <ErrorBoundary>
@@ -136,6 +136,6 @@ export default function App() {
           </ErrorBoundary>
         </NotificationProvider>
       </AppTheme>
-    </BrowserRouter>
+    </HashRouter>
   );
 }
