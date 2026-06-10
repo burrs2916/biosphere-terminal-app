@@ -13,7 +13,11 @@ export default defineConfig(async () => ({
   
   // 构建优化：代码分割
   build: {
-    target: 'es2022',
+    // Tauri 2.0 跨平台目标：
+    // - Windows WebView2: Chromium 105+ (支持 esnext 全部特性)
+    // - macOS/Linux WebKit: Safari 16+ (支持 esnext 全部特性)
+    // 使用 esnext 让 Vite 不转译语法，由 WebView 自己处理
+    target: 'esnext',
     rollupOptions: {
       output: {
         manualChunks: {
@@ -36,7 +40,7 @@ export default defineConfig(async () => ({
       '@xterm/xterm',
     ],
     esbuildOptions: {
-      target: 'es2022',
+      target: 'esnext',
     },
   },
   
