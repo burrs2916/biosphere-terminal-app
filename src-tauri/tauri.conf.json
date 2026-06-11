@@ -43,6 +43,11 @@
     "macOS": {
       "entitlements": "Entitlements.plist",
       "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
     }
   }
 }

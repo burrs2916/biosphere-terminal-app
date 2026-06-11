@@ -21,8 +21,15 @@ export default defineConfig(async () => ({
     rollupOptions: {
       output: {
         manualChunks: {
-          vendor: ['react', 'react-dom', 'react-router-dom'],
-          mui: ['@mui/material', '@emotion/react', '@emotion/styled'],
+          // Keep React + MUI together to avoid vendor <-> mui circular chunk init failures
+          'react-vendor': [
+            'react',
+            'react-dom',
+            'react-router-dom',
+            '@mui/material',
+            '@emotion/react',
+            '@emotion/styled',
+          ],
           phosphor: ['@phosphor-icons/react'],
           xterm: ['@xterm/xterm', '@xterm/addon-fit', '@xterm/addon-search'],
           tiptap: ['@tiptap/core', '@tiptap/react', '@tiptap/starter-kit'],
