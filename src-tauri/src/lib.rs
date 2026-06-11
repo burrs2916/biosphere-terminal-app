@@ -33,29 +33,272 @@ fn get_dev_log_dir() -> std::path::PathBuf {
         .join("logs")
 }
 
+type DebugLogPaths = std::sync::Arc<Vec<std::path::PathBuf>>;
+
+/// Writable log locations (AppData first, exe dir as fallback).
+fn resolve_debug_log_paths(exe_path: &Option<std::path::PathBuf>) -> DebugLogPaths {
+    let mut paths = Vec::new();
+
+    if let Some(local) = dirs_next::data_local_dir() {
+        paths.push(
+            local
+                .join("BURRS.biosphere-ai-terminal")
+                .join("debug.log"),
+        );
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let p = std::path::PathBuf::from(appdata)
+            .join("BURRS.biosphere-ai-terminal")
+            .join("debug.log");
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+    }
+    if cfg!(debug_assertions) {
+        paths.push(get_dev_log_dir().join("debug.log"));
+    }
+    if let Some(exe) = exe_path.as_ref().and_then(|p| p.parent()) {
+        let exe_log = exe.join("debug.log");
+        if !paths.contains(&exe_log) {
+            paths.push(exe_log);
+        }
+    }
+    if paths.is_empty() {
+        paths.push(std::path::PathBuf::from("debug.log"));
+    }
+
+    std::sync::Arc::new(paths)
+}
+
+fn write_debug_log_all(paths: &DebugLogPaths, message: &str) {
+    for path in paths.iter() {
+        let _ = write_debug_log(path, message);
+    }
+}
+
+fn install_panic_hook(paths: DebugLogPaths) {
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("[panic] {}", info);
+        write_debug_log_all(&paths, &msg);
+        eprintln!("{msg}");
+    }));
+}
+
+const JS_ERROR_HOOKS: &str = r#"
+(function(){
+    if (window.__biosphere_hooks_installed) return;
+    window.__biosphere_hooks_installed = true;
+    window.__biosphere_errors = window.__biosphere_errors || [];
+    window.onerror = function(msg, src, line, col, err) {
+        var entry = 'onerror: ' + msg + ' at ' + src + ':' + line + ':' + col;
+        if (err && err.stack) entry += ' stack=' + err.stack;
+        window.__biosphere_errors.push(entry);
+    };
+    window.addEventListener('unhandledrejection', function(e) {
+        window.__biosphere_errors.push('unhandledrejection: ' + (e.reason && e.reason.stack || e.reason || e));
+    });
+    document.addEventListener('securitypolicyviolation', function(e) {
+        window.__biosphere_errors.push('CSP violation: ' + e.violatedDirective + ' blocked ' + e.blockedURI);
+    });
+    Array.from(document.querySelectorAll('script[src]')).forEach(function(node, index) {
+        node.addEventListener('error', function() {
+            window.__biosphere_errors.push('script.load.failed[' + index + ']=' + (node.src || node.getAttribute('src')));
+        });
+    });
+})();
+"#;
+
+const JS_COLLECT_SNAPSHOT: &str = r#"
+(function(){
+    var errs = window.__biosphere_errors || [];
+    var scripts = Array.from(document.querySelectorAll('script')).map(function(s, i) {
+        return i + ':' + (s.src || s.getAttribute('src') || 'inline') + ' type=' + (s.type || '');
+    }).join('; ');
+    var styles = Array.from(document.querySelectorAll('link[rel="stylesheet"]')).map(function(l) {
+        return l.href;
+    }).join('; ');
+    var root = document.getElementById('root');
+    var payload = {
+        href: String(location.href),
+        readyState: String(document.readyState),
+        title: String(document.title),
+        bodyLen: document.body ? document.body.innerHTML.length : -1,
+        rootChildren: root ? root.childElementCount : -1,
+        rootInnerLen: root ? root.innerHTML.length : -1,
+        scriptCount: document.querySelectorAll('script').length,
+        scripts: scripts,
+        stylesheets: styles,
+        errorCount: errs.length,
+        errors: errs,
+        userAgent: String(navigator.userAgent),
+        hasTauriInternals: !!window.__TAURI_INTERNALS__,
+        hasTauriGlobal: !!window.__TAURI__
+    };
+    var msg = JSON.stringify(payload);
+    window.__biosphere_last_diag = msg;
+    try {
+        if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {
+            window.__TAURI_INTERNALS__.invoke('write_frontend_log', {
+                level: 'info',
+                tag: 'js-snapshot',
+                message: msg
+            });
+        }
+    } catch (e) {
+        window.__biosphere_errors.push('invoke.write_frontend_log.failed: ' + e);
+    }
+    return msg;
+})();
+"#;
+
+fn eval_webview_snapshot(
+    window: &tauri::WebviewWindow,
+    paths: &DebugLogPaths,
+    label: &str,
+) {
+    match window.eval(JS_COLLECT_SNAPSHOT) {
+        Ok(()) => {
+            write_debug_log_all(paths, &format!("[{label}] JS snapshot eval submitted (see js-snapshot in logs)"));
+        }
+        Err(e) => {
+            write_debug_log_all(paths, &format!("[{label}] FAILED JS snapshot eval: {e}"));
+        }
+    }
+}
+
+fn inject_js_error_hooks(
+    window: &tauri::WebviewWindow,
+    paths: &DebugLogPaths,
+    label: &str,
+) {
+    match window.eval(JS_ERROR_HOOKS) {
+        Ok(()) => write_debug_log_all(paths, &format!("[{label}] JS error hooks injected")),
+        Err(e) => write_debug_log_all(paths, &format!("[{label}] FAILED to inject JS error hooks: {e}")),
+    }
+}
+
+fn log_webview_state(
+    window: &tauri::WebviewWindow,
+    paths: &DebugLogPaths,
+    label: &str,
+) {
+    write_debug_log_all(
+        paths,
+        &format!("[{label}] window label={}", window.label()),
+    );
+    write_debug_log_all(
+        paths,
+        &format!(
+            "[{label}] window visible={} decorated={}",
+            window.is_visible().unwrap_or(false),
+            window.is_decorated().unwrap_or(false)
+        ),
+    );
+    if let Ok(size) = window.inner_size() {
+        write_debug_log_all(
+            paths,
+            &format!("[{label}] window inner_size={}x{}", size.width, size.height),
+        );
+    }
+    match window.url() {
+        Ok(url) => {
+            write_debug_log_all(paths, &format!("[{label}] webview URL: {url}"));
+            write_debug_log_all(paths, &format!("[{label}] webview scheme: {:?}", url.scheme()));
+            write_debug_log_all(paths, &format!("[{label}] webview host: {:?}", url.host_str()));
+        }
+        Err(e) => write_debug_log_all(paths, &format!("[{label}] failed to get webview URL: {e}")),
+    }
+}
+
+fn maybe_navigate_from_blank(
+    window: &tauri::WebviewWindow,
+    paths: &DebugLogPaths,
+    label: &str,
+) {
+    let Ok(url) = window.url() else {
+        return;
+    };
+    if url.scheme() != "about" {
+        write_debug_log_all(paths, &format!("[{label}] webview has non-blank URL, no navigation needed"));
+        return;
+    }
+
+    let target_url_str = if cfg!(target_os = "windows") {
+        "https://tauri.localhost/"
+    } else {
+        "tauri://localhost/"
+    };
+    write_debug_log_all(
+        paths,
+        &format!("[{label}] webview still about:blank, navigating to {target_url_str}"),
+    );
+    match tauri::Url::parse(target_url_str) {
+        Ok(target_url) => match window.navigate(target_url) {
+            Ok(()) => write_debug_log_all(paths, &format!("[{label}] navigate to {target_url_str} succeeded")),
+            Err(e) => write_debug_log_all(paths, &format!("[{label}] navigate to {target_url_str} failed: {e}")),
+        },
+        Err(e) => write_debug_log_all(
+            paths,
+            &format!("[{label}] failed to parse URL {target_url_str}: {e}"),
+        ),
+    }
+}
+
+fn spawn_webview_diagnostics(app_handle: tauri::AppHandle, paths: DebugLogPaths) {
+    let schedules: &[(u64, &str)] = &[
+        (0, "immediate"),
+        (1, "1s"),
+        (3, "3s"),
+        (8, "8s"),
+        (15, "15s"),
+    ];
+
+    for (secs, label) in schedules {
+        let app = app_handle.clone();
+        let paths = paths.clone();
+        let wait = *secs;
+        let tag = *label;
+        std::thread::spawn(move || {
+            if wait > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(wait));
+            }
+            write_debug_log_all(&paths, &format!("[diag-{tag}] webview diagnostic check"));
+            let Some(window) = app.get_webview_window("main") else {
+                write_debug_log_all(&paths, &format!("[diag-{tag}] no main webview window"));
+                return;
+            };
+
+            log_webview_state(&window, &paths, &format!("diag-{tag}"));
+            inject_js_error_hooks(&window, &paths, &format!("diag-{tag}"));
+            if wait >= 3 {
+                maybe_navigate_from_blank(&window, &paths, &format!("diag-{tag}"));
+            }
+            eval_webview_snapshot(&window, &paths, &format!("diag-{tag}"));
+        });
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // Early debug log: write to debug.log next to the executable.
-    // This runs BEFORE the Tauri builder so we can capture startup failures
-    // (e.g. panic during setup, data dir failure, etc.) even when the UI
-    // never loads (white screen).
     let exe_path = std::env::current_exe().ok();
-    let debug_log_path = exe_path
-        .as_ref()
-        .and_then(|p| p.parent())
-        .map(|d| d.join("debug.log"))
-        .unwrap_or_else(|| std::path::PathBuf::from("debug.log"));
+    let debug_paths = resolve_debug_log_paths(&exe_path);
+    install_panic_hook(debug_paths.clone());
 
-    let _ = write_debug_log(&debug_log_path, "=== Biosphere Terminal started ===");
-    let _ = write_debug_log(&debug_log_path, &format!("exe: {:?}", exe_path));
-    let _ = write_debug_log(&debug_log_path, &format!("args: {:?}", std::env::args().collect::<Vec<_>>()));
-    let _ = write_debug_log(&debug_log_path, &format!("cwd: {:?}", std::env::current_dir().ok()));
-    let _ = write_debug_log(&debug_log_path, &format!("debug.log: {:?}", debug_log_path));
+    write_debug_log_all(
+        &debug_paths,
+        "=== Biosphere Terminal started ===",
+    );
+    let _ = write_debug_log_all(&debug_paths, &format!("exe: {:?}", exe_path));
+    let _ = write_debug_log_all(&debug_paths, &format!("args: {:?}", std::env::args().collect::<Vec<_>>()));
+    let _ = write_debug_log_all(&debug_paths, &format!("cwd: {:?}", std::env::current_dir().ok()));
+    for path in debug_paths.iter() {
+        let _ = write_debug_log_all(&debug_paths, &format!("debug.log path: {:?}", path));
+    }
 
     // ---- System & Environment diagnostics ----
-    let _ = write_debug_log(&debug_log_path, &format!("os: {}", std::env::consts::OS));
-    let _ = write_debug_log(&debug_log_path, &format!("arch: {}", std::env::consts::ARCH));
-    let _ = write_debug_log(&debug_log_path, &format!("family: {}", std::env::consts::FAMILY));
+    let _ = write_debug_log_all(&debug_paths, &format!("os: {}", std::env::consts::OS));
+    let _ = write_debug_log_all(&debug_paths, &format!("arch: {}", std::env::consts::ARCH));
+    let _ = write_debug_log_all(&debug_paths, &format!("family: {}", std::env::consts::FAMILY));
 
     // Key environment variables that affect WebView2 / Tauri
     for key in &[
@@ -77,13 +320,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // Truncate PATH to avoid bloating the log
                 if key == &"PATH" {
                     let truncated = if val.len() > 300 { &val[..300] } else { &val };
-                    let _ = write_debug_log(&debug_log_path, &format!("env {} = {}...", truncated, if val.len() > 300 { " (truncated)" } else { "" }));
+                    let _ = write_debug_log_all(&debug_paths, &format!("env {} = {}...", truncated, if val.len() > 300 { " (truncated)" } else { "" }));
                 } else {
-                    let _ = write_debug_log(&debug_log_path, &format!("env {} = {}", key, val));
+                    let _ = write_debug_log_all(&debug_paths, &format!("env {} = {}", key, val));
                 }
             }
             Err(_) => {
-                let _ = write_debug_log(&debug_log_path, &format!("env {} = (not set)", key));
+                let _ = write_debug_log_all(&debug_paths, &format!("env {} = (not set)", key));
             }
         }
     }
@@ -91,7 +334,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // On Windows: check WebView2 Runtime availability
     #[cfg(target_os = "windows")]
     {
-        let _ = write_debug_log(&debug_log_path, "[diag] checking WebView2 Runtime...");
+        let _ = write_debug_log_all(&debug_paths, "[diag] checking WebView2 Runtime...");
         // WebView2 runtime is typically at:
         //   C:\Program Files (x86)\Microsoft\EdgeWebView\Application
         // or bundled in the app
@@ -103,32 +346,32 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         ];
         for p in &possible_paths {
             if p.exists() {
-                let _ = write_debug_log(&debug_log_path, &format!("[diag] WebView2/Edge found at: {:?}", p));
+                let _ = write_debug_log_all(&debug_paths, &format!("[diag] WebView2/Edge found at: {:?}", p));
                 // Try to list subdirectories (version folders)
                 if let Ok(entries) = std::fs::read_dir(p) {
                     for entry in entries.flatten() {
                         let name = entry.file_name().to_string_lossy().to_string();
                         if name.starts_with(|c: char| c.is_ascii_digit()) {
-                            let _ = write_debug_log(&debug_log_path, &format!("[diag]   version dir: {}", name));
+                            let _ = write_debug_log_all(&debug_paths, &format!("[diag]   version dir: {}", name));
                         }
                     }
                 }
             } else {
-                let _ = write_debug_log(&debug_log_path, &format!("[diag] WebView2/Edge NOT found at: {:?}", p));
+                let _ = write_debug_log_all(&debug_paths, &format!("[diag] WebView2/Edge NOT found at: {:?}", p));
             }
         }
 
         // Check registry for WebView2 version
-        let _ = write_debug_log(&debug_log_path, "[diag] checking registry for WebView2...");
+        let _ = write_debug_log_all(&debug_paths, "[diag] checking registry for WebView2...");
         if let Ok(output) = std::process::Command::new("reg")
             .args(["query", r"HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEB-22B8B6B3A6D1}", "/v", "pv"])
             .output()
         {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let _ = write_debug_log(&debug_log_path, &format!("[diag] reg query HKLM WOW6432Node stdout: {}", stdout.trim()));
+            let _ = write_debug_log_all(&debug_paths, &format!("[diag] reg query HKLM WOW6432Node stdout: {}", stdout.trim()));
             if !stderr.trim().is_empty() {
-                let _ = write_debug_log(&debug_log_path, &format!("[diag] reg query HKLM WOW6432Node stderr: {}", stderr.trim()));
+                let _ = write_debug_log_all(&debug_paths, &format!("[diag] reg query HKLM WOW6432Node stderr: {}", stderr.trim()));
             }
         }
         if let Ok(output) = std::process::Command::new("reg")
@@ -137,9 +380,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let _ = write_debug_log(&debug_log_path, &format!("[diag] reg query HKLM stdout: {}", stdout.trim()));
+            let _ = write_debug_log_all(&debug_paths, &format!("[diag] reg query HKLM stdout: {}", stdout.trim()));
             if !stderr.trim().is_empty() {
-                let _ = write_debug_log(&debug_log_path, &format!("[diag] reg query HKLM stderr: {}", stderr.trim()));
+                let _ = write_debug_log_all(&debug_paths, &format!("[diag] reg query HKLM stderr: {}", stderr.trim()));
             }
         }
         if let Ok(output) = std::process::Command::new("reg")
@@ -148,9 +391,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let _ = write_debug_log(&debug_log_path, &format!("[diag] reg query HKCU stdout: {}", stdout.trim()));
+            let _ = write_debug_log_all(&debug_paths, &format!("[diag] reg query HKCU stdout: {}", stdout.trim()));
             if !stderr.trim().is_empty() {
-                let _ = write_debug_log(&debug_log_path, &format!("[diag] reg query HKCU stderr: {}", stderr.trim()));
+                let _ = write_debug_log_all(&debug_paths, &format!("[diag] reg query HKCU stderr: {}", stderr.trim()));
             }
         }
 
@@ -161,9 +404,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if !stdout.trim().is_empty() {
-                let _ = write_debug_log(&debug_log_path, &format!("[diag] msedgewebview2.exe found: {}", stdout.trim()));
+                let _ = write_debug_log_all(&debug_paths, &format!("[diag] msedgewebview2.exe found: {}", stdout.trim()));
             } else {
-                let _ = write_debug_log(&debug_log_path, "[diag] msedgewebview2.exe NOT found in PATH");
+                let _ = write_debug_log_all(&debug_paths, "[diag] msedgewebview2.exe NOT found in PATH");
             }
         }
     }
@@ -174,17 +417,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         match std::fs::write(&test_file, b"test") {
             Ok(()) => {
                 let _ = std::fs::remove_file(&test_file);
-                let _ = write_debug_log(&debug_log_path, &format!("[diag] exe directory is writable: {:?}", exe_dir));
+                let _ = write_debug_log_all(&debug_paths, &format!("[diag] exe directory is writable: {:?}", exe_dir));
             }
             Err(e) => {
-                let _ = write_debug_log(&debug_log_path, &format!("[diag] exe directory is NOT writable: {:?} ({})", exe_dir, e));
+                let _ = write_debug_log_all(&debug_paths, &format!("[diag] exe directory is NOT writable: {:?} ({})", exe_dir, e));
             }
         }
     }
 
-    // Share the debug log path with the setup closure (Tauri setup is Fn once, not FnMut).
-    let debug_log_for_setup = std::sync::Arc::new(debug_log_path.clone());
-    let debug_log_path_for_after = debug_log_path.clone();
+    let debug_paths_for_setup = debug_paths.clone();
+    let debug_paths_for_after = debug_paths.clone();
 
     let terminal_service = Arc::new(TerminalService::new());
 
@@ -194,8 +436,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .manage(terminal_service.clone())
         .setup(move |app| {
             let app_handle = app.handle();
-            let debug_log_path = (*debug_log_for_setup).clone();
-            let _ = write_debug_log(&debug_log_path, "[setup] Tauri setup started");
+            let debug_paths = debug_paths_for_setup.clone();
+            let _ = write_debug_log_all(&debug_paths, "[setup] Tauri setup started");
 
             // Resolve data/log directory based on environment.
             // In production we MUST use a user-writable location (app_data_dir),
@@ -212,40 +454,43 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 (data, logs)
             };
 
-            let _ = write_debug_log(&debug_log_path, &format!("[setup] data_dir: {:?}", data_dir));
-            let _ = write_debug_log(&debug_log_path, &format!("[setup] log_dir: {:?}", log_dir));
+            let _ = write_debug_log_all(&debug_paths, &format!("[setup] data_dir: {:?}", data_dir));
+            let _ = write_debug_log_all(&debug_paths, &format!("[setup] log_dir: {:?}", log_dir));
 
             if let Err(e) = std::fs::create_dir_all(&data_dir) {
                 eprintln!("Warning: could not create data dir {:?}: {}", data_dir, e);
-                let _ = write_debug_log(&debug_log_path, &format!("[setup] FAILED to create data dir: {}", e));
+                let _ = write_debug_log_all(&debug_paths, &format!("[setup] FAILED to create data dir: {}", e));
             }
             if let Err(e) = std::fs::create_dir_all(&log_dir) {
                 eprintln!("Warning: could not create log dir {:?}: {}", log_dir, e);
-                let _ = write_debug_log(&debug_log_path, &format!("[setup] FAILED to create log dir: {}", e));
+                let _ = write_debug_log_all(&debug_paths, &format!("[setup] FAILED to create log dir: {}", e));
             }
 
             infra::logging::init(&log_dir);
-            let _ = write_debug_log(&debug_log_path, "[setup] logging initialized");
+            let _ = write_debug_log_all(&debug_paths, "[setup] logging initialized");
 
             tracing::info!("[app] data directory: {:?}", data_dir);
             tracing::info!("[app] log directory: {:?}", log_dir);
+            for path in debug_paths.iter() {
+                tracing::info!("[app] debug log path: {:?}", path);
+            }
 
             terminal_service.set_app_handle(app_handle.clone())?;
-            let _ = write_debug_log(&debug_log_path, "[setup] terminal_service initialized");
+            let _ = write_debug_log_all(&debug_paths, "[setup] terminal_service initialized");
 
             let db_path = data_dir.join("biosphere.db");
             let notes_dir = data_dir.join("notes");
-            let _ = write_debug_log(&debug_log_path, &format!("[setup] db_path: {:?}", db_path));
+            let _ = write_debug_log_all(&debug_paths, &format!("[setup] db_path: {:?}", db_path));
 
             let _ = std::fs::create_dir_all(&notes_dir);
 
             let db = match Database::open(&db_path) {
                 Ok(db) => {
-                    let _ = write_debug_log(&debug_log_path, "[setup] database opened successfully");
+                    let _ = write_debug_log_all(&debug_paths, "[setup] database opened successfully");
                     db
                 }
                 Err(e) => {
-                    let _ = write_debug_log(&debug_log_path, &format!("[setup] FAILED to open database: {}", e));
+                    let _ = write_debug_log_all(&debug_paths, &format!("[setup] FAILED to open database: {}", e));
                     tracing::error!("[app] failed to open database at {:?}: {}", db_path, e);
                     // Show user-friendly error dialog before exiting.
                     use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -278,7 +523,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let icons_dir = data_dir.join("icons");
             let icon_service = Arc::new(IconService::new(db_arc.clone(), icons_dir));
             let remote_desktop_service = Arc::new(RemoteDesktopService::new());
-            let _ = write_debug_log(&debug_log_path, "[setup] all services initialized");
+            let _ = write_debug_log_all(&debug_paths, "[setup] all services initialized");
 
             app_handle.manage(db_arc);
             app_handle.manage(notebook_service);
@@ -288,7 +533,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             app_handle.manage(command_executor);
             app_handle.manage(icon_service);
             app_handle.manage(remote_desktop_service);
-            let _ = write_debug_log(&debug_log_path, "[setup] all services registered with app_handle");
+            let _ = write_debug_log_all(&debug_paths, "[setup] all services registered with app_handle");
 
             // Inspect the webview: log if main window exists and its URL.
             // NOTE: During setup the webview URL may still be about:blank because
@@ -297,199 +542,77 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             // tauri://localhost/ overrides Tauri's own navigation and WebView2
             // does not support the tauri:// scheme (it uses https://tauri.localhost/).
             if let Some(window) = app_handle.get_webview_window("main") {
-                let _ = write_debug_log(&debug_log_path, "[setup] main webview window found");
+                let _ = write_debug_log_all(&debug_paths, "[setup] main webview window found");
                 match window.url() {
                     Ok(url) => {
-                        let _ = write_debug_log(&debug_log_path, &format!("[setup] main webview URL at setup time: {} (may change after setup)", url));
+                        let _ = write_debug_log_all(&debug_paths, &format!("[setup] main webview URL at setup time: {} (may change after setup)", url));
                     }
                     Err(e) => {
-                        let _ = write_debug_log(&debug_log_path, &format!("[setup] FAILED to get main webview URL: {}", e));
+                        let _ = write_debug_log_all(&debug_paths, &format!("[setup] FAILED to get main webview URL: {}", e));
                     }
                 }
 
                 // Log window properties
-                let _ = write_debug_log(&debug_log_path, &format!("[setup] window label: {}", window.label()));
-                let _ = write_debug_log(&debug_log_path, &format!("[setup] window is_visible: {}", window.is_visible().unwrap_or(false)));
-                let _ = write_debug_log(&debug_log_path, &format!("[setup] window is_decorated: {}", window.is_decorated().unwrap_or(false)));
+                let _ = write_debug_log_all(&debug_paths, &format!("[setup] window label: {}", window.label()));
+                let _ = write_debug_log_all(&debug_paths, &format!("[setup] window is_visible: {}", window.is_visible().unwrap_or(false)));
+                let _ = write_debug_log_all(&debug_paths, &format!("[setup] window is_decorated: {}", window.is_decorated().unwrap_or(false)));
                 if let Ok(size) = window.inner_size() {
-                    let _ = write_debug_log(&debug_log_path, &format!("[setup] window inner_size: {}x{}", size.width, size.height));
+                    let _ = write_debug_log_all(&debug_paths, &format!("[setup] window inner_size: {}x{}", size.width, size.height));
                 }
                 if let Ok(pos) = window.outer_position() {
-                    let _ = write_debug_log(&debug_log_path, &format!("[setup] window position: ({}, {})", pos.x, pos.y));
+                    let _ = write_debug_log_all(&debug_paths, &format!("[setup] window position: ({}, {})", pos.x, pos.y));
                 }
             } else {
-                let _ = write_debug_log(&debug_log_path, "[setup] WARNING: no main webview window found");
+                let _ = write_debug_log_all(&debug_paths, "[setup] WARNING: no main webview window found");
             }
 
             // Log all available windows
             let all_windows = app_handle.webview_windows();
-            let _ = write_debug_log(&debug_log_path, &format!("[setup] total webview windows: {}", all_windows.len()));
+            let _ = write_debug_log_all(&debug_paths, &format!("[setup] total webview windows: {}", all_windows.len()));
             for (label, win) in &all_windows {
                 let url_str = win.url().map(|u| u.to_string()).unwrap_or_else(|e| format!("(error: {})", e));
-                let _ = write_debug_log(&debug_log_path, &format!("[setup]   window '{}': {}", label, url_str));
+                let _ = write_debug_log_all(&debug_paths, &format!("[setup]   window '{}': {}", label, url_str));
             }
 
             // Log Tauri app info
-            let _ = write_debug_log(&debug_log_path, &format!("[setup] app identifier: {}", app_handle.config().identifier));
-            let _ = write_debug_log(&debug_log_path, &format!("[setup] app product_name: {:?}", app_handle.config().product_name));
-            let _ = write_debug_log(&debug_log_path, &format!("[setup] app version: {:?}", app_handle.config().version));
+            let _ = write_debug_log_all(&debug_paths, &format!("[setup] app identifier: {}", app_handle.config().identifier));
+            let _ = write_debug_log_all(&debug_paths, &format!("[setup] app product_name: {:?}", app_handle.config().product_name));
+            let _ = write_debug_log_all(&debug_paths, &format!("[setup] app version: {:?}", app_handle.config().version));
             if let Some(frontend_dist) = &app_handle.config().build.frontend_dist {
-                let _ = write_debug_log(&debug_log_path, &format!("[setup] config frontendDist: {:?}", frontend_dist));
+                let _ = write_debug_log_all(&debug_paths, &format!("[setup] config frontendDist: {:?}", frontend_dist));
             } else {
-                let _ = write_debug_log(&debug_log_path, "[setup] config frontendDist: (not set)");
+                let _ = write_debug_log_all(&debug_paths, "[setup] config frontendDist: (not set)");
             }
             if let Some(dev_url) = &app_handle.config().build.dev_url {
-                let _ = write_debug_log(&debug_log_path, &format!("[setup] config devUrl: {}", dev_url));
+                let _ = write_debug_log_all(&debug_paths, &format!("[setup] config devUrl: {}", dev_url));
             }
             if let Some(csp) = &app_handle.config().app.security.csp {
-                let _ = write_debug_log(&debug_log_path, &format!("[setup] config CSP: {}", csp));
+                let _ = write_debug_log_all(&debug_paths, &format!("[setup] config CSP: {}", csp));
             } else {
-                let _ = write_debug_log(&debug_log_path, "[setup] config CSP: (not set)");
+                let _ = write_debug_log_all(&debug_paths, "[setup] config CSP: (not set)");
             }
 
-            // Delayed check: verify the webview URL after Tauri's own navigation
-            // should have completed.  If it is still about:blank, navigate to
-            // the platform-correct URL as a fallback.
-            // Also inject JS error listeners to capture frontend errors.
-            let app_handle_delayed = app_handle.clone();
-            let debug_log_path_delayed = debug_log_path.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(3));
-                let _ = write_debug_log(&debug_log_path_delayed, "[delayed] checking webview URL after 3s");
-                if let Some(window) = app_handle_delayed.get_webview_window("main") {
-                    match window.url() {
-                        Ok(url) => {
-                            let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] webview URL: {}", url));
-                            let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] webview scheme: {:?}", url.scheme()));
-                            let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] webview host: {:?}", url.host_str()));
-                            if url.scheme() == "about" {
-                                let _ = write_debug_log(&debug_log_path_delayed, "[delayed] webview still about:blank, attempting platform-specific navigation");
-                                let target_url_str = if cfg!(target_os = "windows") {
-                                    "https://tauri.localhost/"
-                                } else {
-                                    "tauri://localhost/"
-                                };
-                                match tauri::Url::parse(target_url_str) {
-                                    Ok(target_url) => {
-                                        let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] navigating to: {}", target_url_str));
-                                        match window.navigate(target_url) {
-                                            Ok(()) => {
-                                                let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] navigate to {} succeeded", target_url_str));
-                                            }
-                                            Err(e) => {
-                                                let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] navigate to {} failed: {}", target_url_str, e));
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] failed to parse URL {}: {}", target_url_str, e));
-                                    }
-                                }
-                            } else {
-                                let _ = write_debug_log(&debug_log_path_delayed, "[delayed] webview has valid URL, no action needed");
-                            }
-                        }
-                        Err(e) => {
-                            let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] failed to get webview URL: {}", e));
-                        }
-                    }
-
-                    // Inject JS to capture frontend errors and report via Tauri events
-                    let _ = write_debug_log(&debug_log_path_delayed, "[delayed] injecting JS error listeners");
-                    let js_err = r#"
-                        (function(){
-                            window.__biosphere_errors = [];
-                            window.onerror = function(msg, src, line, col, err) {
-                                window.__biosphere_errors.push('onerror: ' + msg + ' at ' + src + ':' + line + ':' + col);
-                            };
-                            window.addEventListener('unhandledrejection', function(e) {
-                                window.__biosphere_errors.push('unhandledrejection: ' + (e.reason && e.reason.stack || e.reason || e));
-                            });
-                            document.addEventListener('securitypolicyviolation', function(e) {
-                                window.__biosphere_errors.push('CSP violation: ' + e.violatedDirective + ' blocked ' + e.blockedURI);
-                            });
-                        })();
-                    "#;
-                    match window.eval(js_err) {
-                        Ok(()) => {
-                            let _ = write_debug_log(&debug_log_path_delayed, "[delayed] JS error listeners injected successfully");
-                        }
-                        Err(e) => {
-                            let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] FAILED to inject JS error listeners: {}", e));
-                        }
-                    }
-
-                    // Inject JS to check DOM content
-                    let js_dom = r#"
-                        (function(){
-                            var bodyLen = document.body ? document.body.innerHTML.length : -1;
-                            var scripts = document.querySelectorAll('script');
-                            window.__biosphere_dom_info = 'bodyLen=' + bodyLen + ' scripts=' + scripts.length;
-                        })();
-                    "#;
-                    match window.eval(js_dom) {
-                        Ok(()) => {
-                            let _ = write_debug_log(&debug_log_path_delayed, "[delayed] JS DOM check injected");
-                        }
-                        Err(e) => {
-                            let _ = write_debug_log(&debug_log_path_delayed, &format!("[delayed] FAILED to inject JS DOM check: {}", e));
-                        }
-                    }
-
-                    // Listen for JS diagnostic events
-                    let debug_log_for_listener = debug_log_path_delayed.clone();
-                    let _listener_id = app_handle_delayed.listen("js-diagnostic", move |event| {
-                        let payload = event.payload().to_string();
-                        let _ = write_debug_log(&debug_log_for_listener, &format!("[js-diagnostic] {}", payload));
-                    });
-
-                    // Second delayed check after 8s total to collect error info and see final state
-                    let window_8s = window;
-                    let debug_log_8s = debug_log_path_delayed.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_secs(5));
-                        let _ = write_debug_log(&debug_log_8s, "[delayed-8s] final webview check");
-
-                        match window_8s.url() {
-                            Ok(url) => {
-                                let _ = write_debug_log(&debug_log_8s, &format!("[delayed-8s] webview URL: {}", url));
-                            }
-                            Err(e) => {
-                                let _ = write_debug_log(&debug_log_8s, &format!("[delayed-8s] failed to get URL: {}", e));
-                            }
-                        }
-
-                        // Collect JS errors and DOM info via Tauri event
-                        let js_collect = r#"
-                            (function(){
-                                var errs = window.__biosphere_errors || [];
-                                var domInfo = window.__biosphere_dom_info || '(not set)';
-                                var bodyPreview = document.body ? document.body.innerHTML.substring(0, 500) : '(no body)';
-                                var result = 'domInfo=' + domInfo + ' errors=' + errs.length;
-                                if(errs.length > 0) {
-                                    result += ' | ' + errs.join(' | ');
-                                }
-                                result += ' | bodyPreview=' + bodyPreview;
-                                if(window.__TAURI__ && window.__TAURI__.event && window.__TAURI__.event.emit) {
-                                    window.__TAURI__.event.emit('js-diagnostic', result);
-                                }
-                            })();
-                        "#;
-                        match window_8s.eval(js_collect) {
-                            Ok(()) => {
-                                let _ = write_debug_log(&debug_log_8s, "[delayed-8s] JS diagnostics collection triggered (result via event)");
-                            }
-                            Err(e) => {
-                                let _ = write_debug_log(&debug_log_8s, &format!("[delayed-8s] FAILED to trigger JS diagnostics: {}", e));
-                            }
-                        }
-                    });
-                } else {
-                    let _ = write_debug_log(&debug_log_path_delayed, "[delayed] no main webview window found");
-                }
+            // Mirror frontend diagnostic events into debug.log and tracing.
+            let debug_paths_listener = debug_paths.clone();
+            let _frontend_diag_listener = app_handle.listen("frontend-diagnostic", move |event| {
+                let payload = event.payload().to_string();
+                write_debug_log_all(&debug_paths_listener, &format!("[frontend-diagnostic] {payload}"));
+                tracing::info!("[frontend-diagnostic] {payload}");
+            });
+            let debug_paths_js_listener = debug_paths.clone();
+            let _js_diag_listener = app_handle.listen("js-diagnostic", move |event| {
+                let payload = event.payload().to_string();
+                write_debug_log_all(&debug_paths_js_listener, &format!("[js-diagnostic] {payload}"));
+                tracing::info!("[js-diagnostic] {payload}");
             });
 
-            let _ = write_debug_log(&debug_log_path, "[setup] setup completed successfully");
+            if let Some(window) = app_handle.get_webview_window("main") {
+                inject_js_error_hooks(&window, &debug_paths, "setup-immediate");
+            }
+
+            spawn_webview_diagnostics(app_handle.clone(), debug_paths.clone());
+
+            let _ = write_debug_log_all(&debug_paths, "[setup] setup completed successfully");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -618,17 +741,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     match &result {
         Ok(()) => {
-            let _ = write_debug_log(&debug_log_path_for_after, "=== Biosphere Terminal exited cleanly ===");
+            write_debug_log_all(&debug_paths_for_after, "=== Biosphere Terminal exited cleanly ===");
         }
         Err(e) => {
-            let _ = write_debug_log(&debug_log_path_for_after, &format!("=== Biosphere Terminal failed: {} ===", e));
+            write_debug_log_all(
+                &debug_paths_for_after,
+                &format!("=== Biosphere Terminal failed: {e} ==="),
+            );
         }
     }
 
     result.map_err(Into::into)
 }
 
-/// Append a line to the debug log next to the executable.
+/// Append a line to a single debug log file.
 /// Best-effort: ignores errors so it never breaks startup.
 fn write_debug_log(path: &std::path::Path, message: &str) -> std::io::Result<()> {
     use std::io::Write;

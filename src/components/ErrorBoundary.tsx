@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { writeFrontendLog } from '../core/services/agent.service';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import Button from '@mui/material/Button';
@@ -24,8 +25,10 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
+    const message = `${error.message}\n${error.stack ?? ''}\ncomponentStack:${info.componentStack ?? ''}`;
     console.error('[ErrorBoundary] caught error:', error);
     console.error('[ErrorBoundary] component stack:', info.componentStack);
+    void writeFrontendLog('error', 'ErrorBoundary', message);
   }
 
   handleReset = () => {
