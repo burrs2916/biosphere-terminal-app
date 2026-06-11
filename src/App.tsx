@@ -108,7 +108,11 @@ function StandaloneLayout() {
 
 function RootRouter() {
   const location = useLocation();
-  const isStandalone = location.pathname.startsWith('/category-notes') || location.pathname.startsWith('/notes-reference') || location.pathname.startsWith('/ai-copilot') || location.pathname.startsWith('/plugin-workshop') || location.pathname.startsWith('/plugin-script-viewer') || location.pathname.startsWith('/remote-desktop');
+  // HashRouter: path-only urls (e.g. "/category-notes") are loaded as pathname "/" with hash "#/..."
+  // WebviewWindow urls (e.g. "/#/category-notes") are loaded as pathname "/<any>" with hash "#/category-notes"
+  // So we need to inspect both pathname AND hash to determine if we are in a standalone window.
+  const checkPath = (location.hash.replace(/^#/, '') || location.pathname);
+  const isStandalone = checkPath.startsWith('/category-notes') || checkPath.startsWith('/notes-reference') || checkPath.startsWith('/ai-copilot') || checkPath.startsWith('/plugin-workshop') || checkPath.startsWith('/plugin-script-viewer') || checkPath.startsWith('/remote-desktop');
 
   return isStandalone ? <StandaloneLayout /> : <AppLayout />;
 }

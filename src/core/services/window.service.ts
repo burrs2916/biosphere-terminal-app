@@ -16,7 +16,7 @@ export async function openCategoryNotesWindow(groupId: string, categoryName: str
     : 'All Notes';
 
   const webview = new WebviewWindow(key, {
-    url: `/category-notes?groupId=${encodeURIComponent(groupId)}&category=${encodeURIComponent(categoryName)}`,
+    url: `/#/category-notes?groupId=${encodeURIComponent(groupId)}&category=${encodeURIComponent(categoryName)}`,
     title,
     width: 1000,
     height: 700,
@@ -50,23 +50,25 @@ export async function openRemoteDesktopWindow(sshParams?: {
   privateKeyPath?: string;
   password?: string;
 }): Promise<WebviewWindow | null> {
-  const id = Date.now().toString(36);
-  const key = `remote-desktop-${id}`;
+  const key = 'remote-desktop';
 
-  let url = '/remote-desktop';
-  if (sshParams) {
-    const params = new URLSearchParams();
-    params.set('host', sshParams.host);
-    if (sshParams.port) params.set('port', String(sshParams.port));
-    params.set('username', sshParams.username);
-    params.set('authMethod', sshParams.authMethod);
-    if (sshParams.privateKeyPath) params.set('privateKeyPath', sshParams.privateKeyPath);
-    if (sshParams.password) params.set('password', sshParams.password);
-    url += `?${params.toString()}`;
+  const existing = await WebviewWindow.getByLabel(key);
+  if (existing) {
+    await existing.setFocus();
+    return existing;
   }
 
   const webview = new WebviewWindow(key, {
-    url,
+    url: `/#/remote-desktop${sshParams ? (() => {
+      const params = new URLSearchParams();
+      params.set('host', sshParams.host);
+      if (sshParams.port) params.set('port', String(sshParams.port));
+      params.set('username', sshParams.username);
+      params.set('authMethod', sshParams.authMethod);
+      if (sshParams.privateKeyPath) params.set('privateKeyPath', sshParams.privateKeyPath);
+      if (sshParams.password) params.set('password', sshParams.password);
+      return '?' + params.toString();
+    })() : ''}`,
     title: 'Remote Desktop',
     width: 1200,
     height: 800,
@@ -138,7 +140,7 @@ export async function openNoteEditorWindow(noteId: string, title?: string): Prom
   }
 
   const webview = new WebviewWindow(key, {
-    url: `/category-notes?noteId=${encodeURIComponent(noteId)}`,
+    url: `/#/category-notes?noteId=${encodeURIComponent(noteId)}`,
     title: title || 'Note Editor',
     width: 1000,
     height: 700,
@@ -201,11 +203,16 @@ export async function openAllNotesWindow(): Promise<WebviewWindow | null> {
 }
 
 export async function openNotesReferenceWindow(): Promise<WebviewWindow | null> {
-  const id = Date.now().toString(36);
-  const key = `notes-ref-${id}`;
+  const key = 'notes-ref';
+
+  const existing = await WebviewWindow.getByLabel(key);
+  if (existing) {
+    await existing.setFocus();
+    return existing;
+  }
 
   const webview = new WebviewWindow(key, {
-    url: '/notes-reference',
+    url: '/#/notes-reference',
     title: 'Notes Reference',
     width: 1000,
     height: 700,
@@ -232,11 +239,16 @@ export async function openNotesReferenceWindow(): Promise<WebviewWindow | null> 
 }
 
 export async function openAiCopilotWindow(): Promise<WebviewWindow | null> {
-  const id = Date.now().toString(36);
-  const key = `ai-copilot-${id}`;
+  const key = 'ai-copilot';
+
+  const existing = await WebviewWindow.getByLabel(key);
+  if (existing) {
+    await existing.setFocus();
+    return existing;
+  }
 
   const webview = new WebviewWindow(key, {
-    url: '/ai-copilot',
+    url: '/#/ai-copilot',
     title: 'AI Copilot',
     width: 480,
     height: 700,
@@ -263,11 +275,16 @@ export async function openAiCopilotWindow(): Promise<WebviewWindow | null> {
 }
 
 export async function openPluginWorkshopWindow(): Promise<WebviewWindow | null> {
-  const id = Date.now().toString(36);
-  const key = `plugin-workshop-${id}`;
+  const key = 'plugin-workshop';
+
+  const existing = await WebviewWindow.getByLabel(key);
+  if (existing) {
+    await existing.setFocus();
+    return existing;
+  }
 
   const webview = new WebviewWindow(key, {
-    url: '/plugin-workshop',
+    url: '/#/plugin-workshop',
     title: 'Plugin Workshop',
     width: 900,
     height: 700,
