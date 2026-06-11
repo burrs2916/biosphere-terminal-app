@@ -70,7 +70,7 @@ fn ssh_missing_hint() -> String {
 }
 
 /// Look up an executable by name. Honors PATH and (on Windows) PATHEXT.
-fn find_executable(name: &str) -> Option<PathBuf> {
+pub fn find_executable(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let exts: Vec<String> = if cfg!(target_os = "windows") {
         std::env::var("PATHEXT")

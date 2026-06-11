@@ -71,7 +71,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   scrollback: 10000,
   copyOnSelect: true,
   pasteOnMiddleClick: true,
-  shell: '/bin/zsh',
+  // Default to empty string so the Tauri backend can pick the appropriate shell
+  // (pwsh.exe / powershell.exe / cmd.exe on Windows, $SHELL on macOS/Linux).
+  // An empty value is treated as "use platform default" by the backend.
+  shell: '',
 };
 
 const STORAGE_KEY = 'biosphere-settings';
@@ -81,9 +84,17 @@ function loadFromStorage(): AppSettings {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
       const parsed = JSON.parse(stored);
+      // Older builds hard-coded the macOS-only default '/bin/zsh' which fails on
+      // Windows. Reset to empty so the backend picks the correct shell for the
+      // current platform. Users who deliberately configured a custom shell keep it.
+      let persistedShell: string = parsed.shell ?? '';
+      if (persistedShell === '/bin/zsh' || persistedShell === '/bin/bash') {
+        persistedShell = '';
+      }
       return {
         ...DEFAULT_SETTINGS,
         ...parsed,
+        shell: persistedShell,
         appearance: { ...DEFAULT_APPEARANCE, ...parsed.appearance },
       };
     }

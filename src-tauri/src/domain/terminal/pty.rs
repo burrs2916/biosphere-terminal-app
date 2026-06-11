@@ -68,6 +68,7 @@ impl Pty {
         let shell = config
             .shell
             .clone()
+            .filter(|s| !s.trim().is_empty() && shell_exists(s))
             .unwrap_or_else(crate::core::platform::default_shell);
         let mut cmd = CommandBuilder::new(&shell);
         cmd.env("TERM", "xterm-256color");
@@ -182,4 +183,20 @@ impl Pty {
         let child = self.child.lock().unwrap();
         child.process_id()
     }
+}
+
+/// Returns true if `shell` is a runnable command for the current platform.
+///
+/// - If `shell` contains a path separator, we require the file to exist.
+/// - Otherwise we defer to `default_shell()` resolution via PATH/PATHEXT
+///   (handled by `crate::core::platform::find_executable`).
+fn shell_exists(shell: &str) -> bool {
+    let trimmed = shell.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.contains(std::path::MAIN_SEPARATOR) || trimmed.contains('/') || trimmed.contains('\\') {
+        return std::path::Path::new(trimmed).exists();
+    }
+    crate::core::platform::find_executable(trimmed).is_some()
 }
