@@ -190,7 +190,8 @@ jobs:
             | Platform | Download | Notes |
             |----------|----------|-------|
             | macOS (Apple Silicon) | `.dmg` in **macos-arm64** artifact | If Gatekeeper blocks: `xattr -cr /Applications/biosphere-ai-terminal.app` then open |
-            | Windows | NSIS `.exe` or `.msi` in **windows-x64** artifact | Do **not** use raw standalone exe |
+            | Windows (signed installer) | NSIS `.exe` or `.msi` in **windows-x64** | Requires code signing for distribution |
+            | Windows (unsigned test) | **windows-standalone-exe** or **windows-portable** | Needs [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) pre-installed |
             | Linux | `.deb` or `.AppImage` in **linux-x64** artifact | |
 
             See CHANGELOG for details.
@@ -252,6 +253,66 @@ jobs:
           path: |
             src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+
+      # Portable unsigned build for local testing (no installer / no code signing).
+      # Frontend is embedded in the exe; WebView2 Runtime must already be installed on the machine.
+      - name: Prepare Windows portable package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $releaseDir = "src-tauri/target/x86_64-pc-windows-msvc/release"
+          $portableDir = "src-tauri/target/windows-portable"
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+
+          Write-Host "=== Release directory contents ==="
+          Get-ChildItem -Path $releaseDir -File | ForEach-Object { Write-Host $_.Name }
+
+          $exe = Join-Path $releaseDir "biosphere-terminal-app.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Host "✗ biosphere-terminal-app.exe not found"
+            exit 1
+          }
+
+          Copy-Item -Path $exe -Destination (Join-Path $portableDir "biosphere-terminal-app.exe") -Force
+          Get-ChildItem -Path $releaseDir -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -Path $_.FullName -Destination $portableDir -Force
+            Write-Host "✓ bundled dll: $($_.Name)"
+          }
+
+          @"
+          Biosphere Terminal — Windows portable (unsigned test build)
+
+          Run: biosphere-terminal-app.exe
+
+          Requirements:
+          - Microsoft Edge WebView2 Runtime must be installed
+            https://developer.microsoft.com/microsoft-edge/webview2/
+          - Visual C++ Redistributable (usually already present on Windows 10/11)
+
+          Logs (after running):
+          - %LOCALAPPDATA%\BURRS.biosphere-ai-terminal\debug.log
+          - %APPDATA%\BURRS.biosphere-ai-terminal\logs\biosphere.log
+
+          Note: NSIS/MSI installers can bootstrap WebView2 automatically; this portable
+          exe does not. If you see a white screen, install WebView2 first, then check logs.
+          "@ | Set-Content -Path (Join-Path $portableDir "README.txt") -Encoding UTF8
+
+          Compress-Archive -Path (Join-Path $portableDir "*") -DestinationPath "src-tauri/target/windows-portable.zip" -Force
+          Write-Host "✓ Created windows-portable.zip"
+
+      - name: Upload standalone EXE (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-standalone-exe
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/biosphere-terminal-app.exe
+
+      - name: Upload portable ZIP (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: src-tauri/target/windows-portable.zip
 
       - name: Upload MSIX artifact
         if: runner.os == 'Windows'
