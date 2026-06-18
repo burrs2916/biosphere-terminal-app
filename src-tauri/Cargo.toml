@@ -44,18 +44,19 @@ chrono = "0.4"
 tauri-plugin-dialog = "2.7.1"
 
 # Windows.Services.Store API (Microsoft Store IAP) — Windows-only.
-# We rely on the auto-generated bindings from the `windows` crate. The
-# `windows-collections` crate provides ergonomic conversions from Vec to
-# IIterable<HSTRING>, required by GetStoreProductsAsync.
+# Pinned to windows 0.61 to align with the transitive `windows-core 0.61.2`
+# pulled in elsewhere; mixing 0.62 caused trait-bound mismatches in CI
+# (`HSTRING: RuntimeType` not satisfied because of two `windows-core` copies).
+# `windows::Foundation::Collections` is exposed via the `Foundation_Collections`
+# feature in 0.61, so we don't need the standalone `windows-collections` crate.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62", features = [
+windows = { version = "0.61", features = [
     "Foundation",
     "Foundation_Collections",
     "Services_Store",
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
 ] }
-windows-core = "0.62"
-windows-collections = "0.2"
+windows-core = "0.61"
 
 [workspace]

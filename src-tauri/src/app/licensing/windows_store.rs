@@ -1,6 +1,6 @@
 //! Microsoft Store In-App Purchase 集成。
 //!
-//! 仅 Windows 平台编译。所有调用都通过 `windows` crate 提供的
+//! 仅 Windows 平台编译。所有调用都通过 `windows` crate (0.61) 提供的
 //! `Windows.Services.Store` 命名空间绑定。
 //!
 //! ## 关键 API
@@ -15,12 +15,19 @@
 //!    会得到 `ERROR_NO_PACKAGE_IDENTITY (0x80073D54)`。
 //! 2. AppxManifest 必须声明 `internetClient` capability。
 //! 3. 加载项必须先在 Partner Center 提交并通过认证（即 9NZ4NSFLW6RW）。
+//!
+//! ## 版本注意
+//! - 本文件锁定使用 `windows = "0.61"`。它的 `windows_collections` 是
+//!   `windows::Foundation::Collections`，对 `IIterable<HSTRING>` 提供了
+//!   `From<Vec<Option<HSTRING>>>` 实现（`HSTRING::Default == Option<HSTRING>`）。
+//! - 之前尝试过 0.62 版本，会与依赖图里 tauri 引入的 0.61 形成 trait 冲突
+//!   （`HSTRING: RuntimeType` not satisfied），最终切回 0.61 解决。
 
 use std::collections::HashSet;
 
+use windows::Foundation::Collections::IIterable;
 use windows::Services::Store::{StoreContext, StorePurchaseStatus};
 use windows::core::HSTRING;
-use windows_collections::IIterable;
 
 use super::PRO_LIFETIME_PRODUCT_ID;
 
@@ -70,6 +77,16 @@ impl From<StoreIapError> for String {
     }
 }
 
+/// 构造 IIterable<HSTRING>。windows 0.61 中 HSTRING::Default 等价于
+/// Option<HSTRING>，所以需要包成 Some(...)。
+fn hstring_iterable(values: &[&str]) -> IIterable<HSTRING> {
+    let vec: Vec<Option<HSTRING>> = values
+        .iter()
+        .map(|v| Some(HSTRING::from(*v)))
+        .collect();
+    IIterable::<HSTRING>::from(vec)
+}
+
 /// 触发 Microsoft Store 购买弹窗。
 ///
 /// 阻塞等待用户在 Store 弹窗中完成购买。前端应保持 UI 在 loading 状态。
@@ -79,9 +96,8 @@ pub async fn request_purchase_pro_lifetime() -> Result<String, StoreIapError> {
         let ctx = StoreContext::GetDefault().map_err(classify_error)?;
 
         // 1. 拉取 Pro 加载项的 Store 元数据。
-        let kinds: IIterable<HSTRING> = IIterable::from(vec![HSTRING::from("Durable")]);
-        let ids: IIterable<HSTRING> =
-            IIterable::from(vec![HSTRING::from(PRO_LIFETIME_PRODUCT_ID)]);
+        let kinds = hstring_iterable(&["Durable"]);
+        let ids = hstring_iterable(&[PRO_LIFETIME_PRODUCT_ID]);
         let query_op = ctx
             .GetStoreProductsAsync(&kinds, &ids)
             .map_err(classify_error)?;
