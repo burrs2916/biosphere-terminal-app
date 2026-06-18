@@ -32,6 +32,13 @@ export function Header({ onToggleSidebar }: HeaderProps) {
 
   const renderLicenseChip = () => {
     if (!licenseStatus) return null;
+    // macOS / Linux 平台：后端返回 isPro=true 但 proUnlockedAt 为空且无 trial 信息，
+    // 此时不应显示授权角标，避免用户误以为是付费版。
+    const isPlatformFreePro =
+      licenseStatus.isPro && !licenseStatus.proUnlockedAt && !licenseStatus.trialStartedAt;
+    if (isPlatformFreePro) {
+      return null;
+    }
     if (licenseStatus.isPro) {
       return (
         <Chip

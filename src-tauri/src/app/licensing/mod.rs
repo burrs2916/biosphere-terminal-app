@@ -17,7 +17,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-/// Number of days the free trial lasts.
+/// Number of days the free trial lasts (Windows only - macOS/Linux are free Pro).
+#[cfg(target_os = "windows")]
 pub const TRIAL_DAYS: i64 = 14;
 
 /// Product ID for the lifetime Pro add-on registered in Partner Center.
@@ -90,7 +91,10 @@ impl LicensingService {
 
         // First launch: initialize the trial start time immediately so the
         // 14-day clock starts ticking the first time the user opens the app.
+        // 仅 Windows 平台需要试用期；macOS/Linux 默认全 Pro 解锁，无需写入。
+        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
         let mut state = state;
+        #[cfg(target_os = "windows")]
         if state.trial_started_at.is_none() {
             state.trial_started_at = Some(Utc::now().to_rfc3339());
             if let Err(err) = Self::save_state(&state_path, &state) {
@@ -132,6 +136,36 @@ impl LicensingService {
     }
 
     fn compute_status(state: &LicenseState) -> LicenseStatus {
+        // 平台策略：macOS 与 Linux 当前未上线付费渠道，所有 Pro 功能默认开放，
+        // 用户体验等同于已购买 Pro。仅 Windows 走 14 天试用 + Microsoft Store
+        // 一次性购买的商业模式。
+        #[cfg(not(target_os = "windows"))]
+        {
+            // 在非 Windows 平台直接返回 Pro 状态。
+            // 注意：用 `let _ = ...` 抑制后续 Windows-only 代码的未使用变量警告。
+            let _ = state;
+            return LicenseStatus {
+                tier: "pro".to_string(),
+                is_pro: true,
+                is_trial: false,
+                is_expired: false,
+                trial_days_remaining: 0,
+                trial_started_at: None,
+                trial_expires_at: None,
+                pro_unlocked_at: None,
+                reason: "Free Pro on macOS/Linux".to_string(),
+            };
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            Self::compute_status_windows(state)
+        }
+    }
+
+    /// Windows 平台的许可证状态计算逻辑：14 天试用 + Pro 解锁状态。
+    #[cfg(target_os = "windows")]
+    fn compute_status_windows(state: &LicenseState) -> LicenseStatus {
         // Pro unlocked takes precedence over trial state.
         if let Some(unlocked_at) = &state.pro_unlocked_at {
             return LicenseStatus {
@@ -211,6 +245,8 @@ impl LicensingService {
         }
     }
 
+    /// 计算试用过期时间，仅 Windows 平台用于状态计算。
+    #[cfg(target_os = "windows")]
     fn trial_expires_at(state: &LicenseState) -> Option<String> {
         let started = state.trial_started_at.as_ref()?;
         let started_at = DateTime::parse_from_rfc3339(started).ok()?;
