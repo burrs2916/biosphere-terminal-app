@@ -527,6 +527,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let licensing_service = Arc::new(LicensingService::new(data_dir.clone()));
             let _ = write_debug_log_all(&debug_paths, "[setup] all services initialized");
 
+            // 启动后异步与 Microsoft Store 同步 entitlement，防止本地缓存被人工编辑。
+            // 仅 Windows 平台有意义，其他平台是 no-op。
+            {
+                let licensing_for_sync = licensing_service.clone();
+                tauri::async_runtime::spawn(async move {
+                    licensing_for_sync.sync_with_store().await;
+                });
+            }
+
             app_handle.manage(db_arc);
             app_handle.manage(notebook_service);
             app_handle.manage(agent_service);

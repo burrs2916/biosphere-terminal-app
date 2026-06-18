@@ -1,0 +1,182 @@
+//! Microsoft Store In-App Purchase 集成。
+//!
+//! 仅 Windows 平台编译。所有调用都通过 `windows` crate 提供的
+//! `Windows.Services.Store` 命名空间绑定。
+//!
+//! ## 关键 API
+//! - `StoreContext::GetDefault` —— 获取当前用户/应用上下文。
+//! - `StoreContext::GetStoreProductsAsync(kinds, ids)` —— 拉取指定产品
+//!   元数据；只有拿到 `StoreProduct` 才能弹出购买窗口。
+//! - `StoreProduct::RequestPurchaseAsync` —— 触发 Store 购买弹窗。
+//! - `StoreContext::GetAppLicenseAsync` —— 查询 add-on entitlement。
+//!
+//! ## 必须条件
+//! 1. 应用必须以 MSIX 包形式从 Microsoft Store 安装运行；侧载或开发模式
+//!    会得到 `ERROR_NO_PACKAGE_IDENTITY (0x80073D54)`。
+//! 2. AppxManifest 必须声明 `internetClient` capability。
+//! 3. 加载项必须先在 Partner Center 提交并通过认证（即 9NZ4NSFLW6RW）。
+
+use std::collections::HashSet;
+
+use windows::Services::Store::{StoreContext, StorePurchaseStatus};
+use windows::core::HSTRING;
+use windows_collections::IIterable;
+
+use super::PRO_LIFETIME_PRODUCT_ID;
+
+/// IAP 操作错误，前端会以字符串形式收到。
+#[derive(Debug)]
+pub enum StoreIapError {
+    /// 当前进程没有 Package Identity（侧载 / 开发模式）。
+    NoPackageIdentity,
+    /// 找不到指定的 Store 产品（产品 ID 错误或加载项尚未通过认证）。
+    ProductNotFound,
+    /// Store API 调用失败（用户未登录、配置异常等）。
+    Api(String),
+    /// 用户在 Store 弹窗中取消了购买。
+    UserCancelled,
+    /// 网络错误。
+    NetworkError(String),
+    /// 购买流程返回了未知/异常状态。
+    UnexpectedStatus(String),
+}
+
+impl std::fmt::Display for StoreIapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreIapError::NoPackageIdentity => write!(
+                f,
+                "App is not running as a Microsoft Store package. \
+                Install from the Store before purchasing."
+            ),
+            StoreIapError::ProductNotFound => write!(
+                f,
+                "The Pro add-on was not found in the Microsoft Store. \
+                It may still be in certification."
+            ),
+            StoreIapError::Api(msg) => write!(f, "Store API error: {}", msg),
+            StoreIapError::UserCancelled => write!(f, "User cancelled the purchase"),
+            StoreIapError::NetworkError(msg) => write!(f, "Network error: {}", msg),
+            StoreIapError::UnexpectedStatus(s) => write!(f, "Unexpected purchase status: {}", s),
+        }
+    }
+}
+
+impl std::error::Error for StoreIapError {}
+
+impl From<StoreIapError> for String {
+    fn from(e: StoreIapError) -> Self {
+        e.to_string()
+    }
+}
+
+/// 触发 Microsoft Store 购买弹窗。
+///
+/// 阻塞等待用户在 Store 弹窗中完成购买。前端应保持 UI 在 loading 状态。
+/// 成功返回订单标识字符串（用作本地缓存的 store_order_id）。
+pub async fn request_purchase_pro_lifetime() -> Result<String, StoreIapError> {
+    tokio::task::spawn_blocking(|| -> Result<String, StoreIapError> {
+        let ctx = StoreContext::GetDefault().map_err(classify_error)?;
+
+        // 1. 拉取 Pro 加载项的 Store 元数据。
+        let kinds: IIterable<HSTRING> = IIterable::from(vec![HSTRING::from("Durable")]);
+        let ids: IIterable<HSTRING> =
+            IIterable::from(vec![HSTRING::from(PRO_LIFETIME_PRODUCT_ID)]);
+        let query_op = ctx
+            .GetStoreProductsAsync(&kinds, &ids)
+            .map_err(classify_error)?;
+        let query_result = query_op.get().map_err(classify_error)?;
+
+        let products = query_result.Products().map_err(classify_error)?;
+        let product = products
+            .Lookup(&HSTRING::from(PRO_LIFETIME_PRODUCT_ID))
+            .map_err(|_| StoreIapError::ProductNotFound)?;
+
+        // 2. 触发购买弹窗，阻塞等待用户操作。
+        let purchase_op = product.RequestPurchaseAsync().map_err(classify_error)?;
+        let result = purchase_op.get().map_err(classify_error)?;
+        let status = result.Status().map_err(classify_error)?;
+
+        match status {
+            StorePurchaseStatus::Succeeded | StorePurchaseStatus::AlreadyPurchased => Ok(format!(
+                "store:{}:{}",
+                PRO_LIFETIME_PRODUCT_ID,
+                chrono::Utc::now().to_rfc3339()
+            )),
+            StorePurchaseStatus::NotPurchased => Err(StoreIapError::UserCancelled),
+            StorePurchaseStatus::NetworkError => Err(StoreIapError::NetworkError(
+                "Could not reach the Microsoft Store".to_string(),
+            )),
+            StorePurchaseStatus::ServerError => Err(StoreIapError::Api(
+                "Microsoft Store server error".to_string(),
+            )),
+            other => Err(StoreIapError::UnexpectedStatus(format!("{:?}", other))),
+        }
+    })
+    .await
+    .map_err(|e| StoreIapError::Api(format!("blocking task panicked: {}", e)))?
+}
+
+/// 查询用户当前拥有的 add-on entitlements（用于 Restore Purchase / 启动同步）。
+///
+/// 通过 `StoreContext::GetAppLicenseAsync` 获取应用的 License，
+/// 然后遍历 `AddOnLicenses`，收集所有 `IsActive=true` 的产品 ID。
+pub async fn get_user_owned_addons() -> Result<HashSet<String>, StoreIapError> {
+    tokio::task::spawn_blocking(|| -> Result<HashSet<String>, StoreIapError> {
+        let ctx = StoreContext::GetDefault().map_err(classify_error)?;
+
+        let app_license_op = ctx.GetAppLicenseAsync().map_err(classify_error)?;
+        let app_license = app_license_op.get().map_err(classify_error)?;
+
+        let mut owned = HashSet::new();
+        let addon_licenses = app_license.AddOnLicenses().map_err(classify_error)?;
+        let iter = addon_licenses.First().map_err(classify_error)?;
+        loop {
+            if !iter.HasCurrent().map_err(classify_error)? {
+                break;
+            }
+            let kvp = iter.Current().map_err(classify_error)?;
+            let key = kvp.Key().map_err(classify_error)?.to_string();
+            let license = kvp.Value().map_err(classify_error)?;
+            if license.IsActive().map_err(classify_error)? {
+                if !key.is_empty() {
+                    owned.insert(key);
+                }
+                if let Ok(token) = license.InAppOfferToken() {
+                    let token_str = token.to_string();
+                    if !token_str.is_empty() {
+                        owned.insert(token_str);
+                    }
+                }
+                if let Ok(sku) = license.SkuStoreId() {
+                    let sku_str = sku.to_string();
+                    if !sku_str.is_empty() {
+                        owned.insert(sku_str);
+                    }
+                }
+            }
+            iter.MoveNext().map_err(classify_error)?;
+        }
+        Ok(owned)
+    })
+    .await
+    .map_err(|e| StoreIapError::Api(format!("blocking task panicked: {}", e)))?
+}
+
+/// 复核当前用户是否拥有 Pro 加载项 entitlement。
+/// 返回 `true` 表示 Store 确认已购买；`false` 表示未购买；
+/// `Err` 表示无法获取（侧载、网络异常等）—— 此时调用方应保留本地缓存状态。
+pub async fn verify_pro_entitlement() -> Result<bool, StoreIapError> {
+    let owned = get_user_owned_addons().await?;
+    Ok(owned.contains(PRO_LIFETIME_PRODUCT_ID))
+}
+
+/// 把 windows::core::Error 翻译成更友好的 StoreIapError。
+fn classify_error(err: windows::core::Error) -> StoreIapError {
+    let code = err.code().0 as u32;
+    // 0x80073D54 = ERROR_NO_PACKAGE_IDENTITY: 进程没有 MSIX identity
+    if code == 0x80073D54 {
+        return StoreIapError::NoPackageIdentity;
+    }
+    StoreIapError::Api(format!("HRESULT 0x{:08X}: {}", code, err.message()))
+}

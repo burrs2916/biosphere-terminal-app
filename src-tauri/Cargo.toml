@@ -1,6 +1,6 @@
 [package]
 name = "biosphere-terminal-app"
-version = "0.2.0"
+version = "0.3.0"
 description = "Biosphere Terminal - Visual Terminal Application"
 authors = ["Biosphere Team"]
 edition = "2021"
@@ -42,5 +42,20 @@ portable-pty = "0.8"
 anyhow = "1"
 chrono = "0.4"
 tauri-plugin-dialog = "2.7.1"
+
+# Windows.Services.Store API (Microsoft Store IAP) — Windows-only.
+# We rely on the auto-generated bindings from the `windows` crate. The
+# `windows-collections` crate provides ergonomic conversions from Vec to
+# IIterable<HSTRING>, required by GetStoreProductsAsync.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Services_Store",
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.62"
+windows-collections = "0.2"
 
 [workspace]

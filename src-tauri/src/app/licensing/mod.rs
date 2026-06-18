@@ -17,6 +17,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+#[cfg(target_os = "windows")]
+pub mod windows_store;
+
 /// Number of days the free trial lasts (Windows only - macOS/Linux are free Pro).
 #[cfg(target_os = "windows")]
 pub const TRIAL_DAYS: i64 = 14;
@@ -106,6 +109,77 @@ impl LicensingService {
         LicensingService {
             state: Arc::new(RwLock::new(state)),
             state_path,
+        }
+    }
+
+    /// 启动后异步与 Microsoft Store 同步 entitlement 状态：
+    /// - 若 Store 报告已购买但本地未标记 Pro → 自动 unlock；
+    /// - 若 Store 报告未购买但本地标记 Pro → 撤销本地 Pro（防止本地文件被
+    ///   人工编辑伪造）；
+    /// - 若 Store API 不可用（侧载、网络异常）→ 保留本地状态，不做改动。
+    ///
+    /// 仅在 Windows 平台上有意义，其他平台是 no-op。
+    pub async fn sync_with_store(&self) {
+        #[cfg(target_os = "windows")]
+        {
+            let owned = match windows_store::verify_pro_entitlement().await {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::info!(
+                        "[licensing] skipping store sync (likely sideloaded or offline): {}",
+                        err
+                    );
+                    return;
+                }
+            };
+
+            let mut state = self.state.write().await;
+            let local_pro = state.pro_unlocked_at.is_some();
+            match (owned, local_pro) {
+                (true, false) => {
+                    state.pro_unlocked_at = Some(Utc::now().to_rfc3339());
+                    state.store_order_id = Some(format!(
+                        "store-sync:{}:{}",
+                        PRO_LIFETIME_PRODUCT_ID,
+                        Utc::now().to_rfc3339()
+                    ));
+                    let snapshot = state.clone();
+                    drop(state);
+                    if let Err(e) = Self::save_state(&self.state_path, &snapshot) {
+                        tracing::warn!("[licensing] failed to persist store sync: {}", e);
+                    }
+                    tracing::info!("[licensing] store sync: Pro auto-unlocked from Store entitlement");
+                }
+                (false, true) => {
+                    // Store 端没找到 entitlement，但本地仍标记 Pro。
+                    // 仅当 store_order_id 来自真实 Store 流程（前缀 "store"）时才撤销，
+                    // 因为开发模式下手动 unlock_pro 不应被清空。
+                    let from_store = state
+                        .store_order_id
+                        .as_deref()
+                        .map(|s| s.starts_with("store"))
+                        .unwrap_or(false);
+                    if from_store {
+                        state.pro_unlocked_at = None;
+                        state.store_order_id = None;
+                        let snapshot = state.clone();
+                        drop(state);
+                        if let Err(e) = Self::save_state(&self.state_path, &snapshot) {
+                            tracing::warn!("[licensing] failed to persist store revoke: {}", e);
+                        }
+                        tracing::warn!(
+                            "[licensing] store sync: Pro revoked because no entitlement was found"
+                        );
+                    } else {
+                        tracing::info!(
+                            "[licensing] store sync: local non-store unlock kept as-is"
+                        );
+                    }
+                }
+                _ => {
+                    tracing::debug!("[licensing] store sync: state matches Store, no change");
+                }
+            }
         }
     }
 
@@ -256,6 +330,7 @@ impl LicensingService {
 
     /// Mark the Pro license as unlocked. Used by the Store IAP flow once a
     /// successful purchase is confirmed, or by a manual license-key activation.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub async fn unlock_pro(
         &self,
         store_order_id: Option<String>,

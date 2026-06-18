@@ -73,9 +73,8 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
   purchase: async () => {
     set({ loading: true, error: null });
     try {
-      // On Windows, the frontend would first call the Store IAP API and
-      // pass the resulting order ID here. For now we record a local unlock
-      // so the flow works on all platforms during development.
+      // 调用后端，由 Rust 侧通过 Windows.Services.Store API 触发真实购买。
+      // 用户在 Store 弹窗中支付完成后，后端会复核 entitlement 再返回 Pro 状态。
       const status = await purchaseProLifetime();
       set({ status, loading: false });
     } catch (err) {
