@@ -26,6 +26,7 @@ import { useTranslation } from 'react-i18next';
 import { ChatMessagesArea, ChatInputArea, type FileAttachment } from '../components/chat/ChatComponents';
 import type { ToolCallDisplay } from '../components/chat/ChatComponents';
 import type { PluginManifest } from '../proto/plugin';
+import { useFeatureGate, LockedScreen } from '../features/licensing';
 
 const WORKSHOP_AGENT_KEY = 'biosphere_workshop_agent_id';
 
@@ -471,6 +472,12 @@ export function PluginWorkshopPage() {
         .filter((s) => activeCategory === 'all' || s.category === activeCategory)
     : Object.values(scenarioCache).flat()
         .filter((s) => activeCategory === 'all' || s.category === activeCategory);
+
+  // License gate: plugin workshop is a Pro feature.
+  const featureGate = useFeatureGate('plugin_workshop');
+  if (!featureGate.canUse) {
+    return <LockedScreen feature="plugin_workshop" />;
+  }
 
   return (
     <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', bgcolor: isDark ? '#0D1117' : '#fff' }}>

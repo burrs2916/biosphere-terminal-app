@@ -17,6 +17,7 @@ use app::plugin_service::PluginService;
 use app::linker_service::LinkerService;
 use app::icon_service::IconService;
 use app::remote_desktop_service::RemoteDesktopService;
+use app::licensing::LicensingService;
 use domain::command::executor::CommandExecutor;
 
 fn get_dev_data_dir() -> std::path::PathBuf {
@@ -523,6 +524,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let icons_dir = data_dir.join("icons");
             let icon_service = Arc::new(IconService::new(db_arc.clone(), icons_dir));
             let remote_desktop_service = Arc::new(RemoteDesktopService::new());
+            let licensing_service = Arc::new(LicensingService::new(data_dir.clone()));
             let _ = write_debug_log_all(&debug_paths, "[setup] all services initialized");
 
             app_handle.manage(db_arc);
@@ -533,6 +535,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             app_handle.manage(command_executor);
             app_handle.manage(icon_service);
             app_handle.manage(remote_desktop_service);
+            app_handle.manage(licensing_service);
             let _ = write_debug_log_all(&debug_paths, "[setup] all services registered with app_handle");
 
             // Inspect the webview: log if main window exists and its URL.
@@ -736,6 +739,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::remote_desktop::create_remote_desktop,
             interface::commands::remote_desktop::close_remote_desktop,
             interface::commands::remote_desktop::setup_remote_desktop,
+            interface::commands::licensing::check_pro_status,
+            interface::commands::licensing::purchase_pro_lifetime,
+            interface::commands::licensing::restore_pro_license,
+            interface::commands::licensing::reset_license,
+            interface::commands::licensing::extend_trial,
+            interface::commands::licensing::get_pro_product_id,
         ])
         .run(tauri::generate_context!());
 

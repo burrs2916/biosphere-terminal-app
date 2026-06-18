@@ -4,10 +4,12 @@ import IconButton from '@mui/material/IconButton';
 import Typography from '@mui/material/Typography';
 import Button from '@mui/material/Button';
 import Box from '@mui/material/Box';
-import { ListIcon } from '@phosphor-icons/react';
+import Chip from '@mui/material/Chip';
+import { ListIcon, SparkleIcon, CrownIcon } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
 import { useSettingsStore } from '../../engine';
+import { useLicenseStore, useUpgradeDialogStore } from '../../features/licensing';
 import logo from '../../assets/logo.svg?url';
 
 interface HeaderProps {
@@ -19,11 +21,78 @@ export function Header({ onToggleSidebar }: HeaderProps) {
   const theme = useTheme();
   const currentLang = i18n.language?.startsWith('zh') ? 'zh-CN' : 'en-US';
   const isDark = theme.palette.mode === 'dark';
+  const licenseStatus = useLicenseStore((s) => s.status);
+  const openUpgrade = useUpgradeDialogStore((s) => s.openDialog);
 
   const toggleLanguage = () => {
     const nextLang = currentLang === 'zh-CN' ? 'en-US' : 'zh-CN';
     useSettingsStore.getState().update('language', nextLang);
     i18n.changeLanguage(nextLang);
+  };
+
+  const renderLicenseChip = () => {
+    if (!licenseStatus) return null;
+    if (licenseStatus.isPro) {
+      return (
+        <Chip
+          icon={<CrownIcon size={14} weight="fill" />}
+          label="Pro"
+          size="small"
+          sx={{
+            height: 24,
+            fontSize: 11,
+            fontWeight: 700,
+            background: 'linear-gradient(135deg, #FFD740 0%, #FFA726 100%)',
+            color: '#1A1A2E',
+            '& .MuiChip-icon': { color: '#1A1A2E', ml: '6px' },
+          }}
+        />
+      );
+    }
+    if (licenseStatus.isTrial) {
+      return (
+        <Button
+          size="small"
+          startIcon={<SparkleIcon size={14} weight="fill" />}
+          onClick={() => openUpgrade()}
+          sx={{
+            height: 24,
+            minWidth: 0,
+            px: 1.25,
+            fontSize: 11,
+            fontWeight: 700,
+            color: '#fff',
+            background: 'linear-gradient(135deg, #6C63FF 0%, #4FC3F7 100%)',
+            '&:hover': { background: 'linear-gradient(135deg, #5B54E0 0%, #29B6F6 100%)' },
+          }}
+        >
+          {t('license.header.trialDaysLeft', {
+            defaultValue: `Trial · ${licenseStatus.trialDaysRemaining}d`,
+            count: licenseStatus.trialDaysRemaining,
+          })}
+        </Button>
+      );
+    }
+    // Expired or free
+    return (
+      <Button
+        size="small"
+        startIcon={<SparkleIcon size={14} weight="fill" />}
+        onClick={() => openUpgrade()}
+        sx={{
+          height: 24,
+          minWidth: 0,
+          px: 1.25,
+          fontSize: 11,
+          fontWeight: 700,
+          color: '#fff',
+          background: 'linear-gradient(135deg, #6C63FF 0%, #4FC3F7 100%)',
+          '&:hover': { background: 'linear-gradient(135deg, #5B54E0 0%, #29B6F6 100%)' },
+        }}
+      >
+        {t('license.header.upgrade', { defaultValue: 'Upgrade' })}
+      </Button>
+    );
   };
 
   return (
@@ -48,6 +117,7 @@ export function Header({ onToggleSidebar }: HeaderProps) {
             {t('app.name')}
           </Typography>
         </Box>
+        {renderLicenseChip()}
         <Button
           color="inherit"
           size="small"

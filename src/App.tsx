@@ -22,6 +22,7 @@ import { AiCopilotPage } from './pages/AiCopilotPage';
 import { PluginWorkshopPage } from './pages/PluginWorkshopPage';
 import { PluginScriptViewerPage } from './pages/PluginScriptViewerPage';
 import { RemoteDesktopPage } from './pages/RemoteDesktopPage';
+import { LicenseProvider, UpgradeDialog } from './features/licensing';
 
 function AppLayout() {
   const sidebarOpen = useLayoutStore((s) => s.sidebarOpen);
@@ -134,11 +135,14 @@ export default function App() {
   return (
     <HashRouter>
       <AppTheme>
-        <NotificationProvider>
-          <ErrorBoundary>
-            <RootRouter />
-          </ErrorBoundary>
-        </NotificationProvider>
+        <LicenseProvider>
+          <NotificationProvider>
+            <ErrorBoundary>
+              <RootRouter />
+              <UpgradeDialog />
+            </ErrorBoundary>
+          </NotificationProvider>
+        </LicenseProvider>
       </AppTheme>
     </HashRouter>
   );

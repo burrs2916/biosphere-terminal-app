@@ -7,3 +7,4 @@ export * from './plugin';
 export * from './notebook';
 export * from './agent';
 export * from './environment';
+export * from './licensing';

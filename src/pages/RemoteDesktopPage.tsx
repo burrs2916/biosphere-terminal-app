@@ -32,6 +32,7 @@ import { useNotify } from '../core/notification';
 import { TerminalEmulator } from '../features/terminal';
 import type { TerminalEmulatorHandle } from '../features/terminal';
 import type { PtyConfig } from '../proto';
+import { useFeatureGate, LockedScreen } from '../features/licensing';
 
 type Step = 'config' | 'connecting' | 'setup' | 'viewer';
 type Mode = 'x11' | 'vnc';
@@ -471,6 +472,13 @@ export function RemoteDesktopPage() {
       }
     };
   }, []);
+
+  // License gate: remote desktop is a Pro feature. Free / expired users see
+  // a locked screen instead of the connection UI.
+  const featureGate = useFeatureGate('remote_desktop');
+  if (!featureGate.canUse) {
+    return <LockedScreen feature="remote_desktop" />;
+  }
 
   if (step === 'viewer') {
     if (mode === 'vnc' && session) {
