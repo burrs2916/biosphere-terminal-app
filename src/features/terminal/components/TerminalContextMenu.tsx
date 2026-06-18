@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import Popper from '@mui/material/Popper';
 import Paper from '@mui/material/Paper';
+import MenuList from '@mui/material/MenuList';
 import MenuItem from '@mui/material/MenuItem';
 import Divider from '@mui/material/Divider';
 import Typography from '@mui/material/Typography';
@@ -70,7 +71,6 @@ export function TerminalContextMenu({
     <Paper
       sx={{
         minWidth: 200,
-        py: 0.5,
         borderRadius: 2,
         border: '1px solid',
         borderColor: 'divider',
@@ -83,51 +83,53 @@ export function TerminalContextMenu({
         if (e.key === 'Escape') onClose();
       }}
     >
-      <MenuItem
-        onClick={() => handleAction(onCopy)}
-        disabled={!menuState?.hasSelection}
-        sx={{ gap: 1.5, py: 0.75, px: 1.5 }}
-      >
-        <ClipboardIcon size={16} color={iconColor} />
-        <Typography variant="body2">{t('copy_selection')}</Typography>
-      </MenuItem>
-      <MenuItem
-        onClick={() => handleAction(onPaste)}
-        sx={{ gap: 1.5, py: 0.75, px: 1.5 }}
-      >
-        <ClipboardTextIcon size={16} color={iconColor} />
-        <Typography variant="body2">{t('paste_clipboard')}</Typography>
-      </MenuItem>
-      <Divider />
-      <MenuItem
-        onClick={() => handleAction(onSelectAll)}
-        sx={{ gap: 1.5, py: 0.75, px: 1.5 }}
-      >
-        <SelectionAllIcon size={16} color={iconColor} />
-        <Typography variant="body2">{t('select_all')}</Typography>
-      </MenuItem>
-      <MenuItem
-        onClick={() => handleAction(onFind)}
-        sx={{ gap: 1.5, py: 0.75, px: 1.5 }}
-      >
-        <MagnifyingGlassIcon size={16} color={iconColor} />
-        <Typography variant="body2">{t('find')}</Typography>
-      </MenuItem>
-      <Divider />
-      <MenuItem
-        onClick={() => handleAction(onClearBuffer)}
-        sx={{ gap: 1.5, py: 0.75, px: 1.5 }}
-      >
-        <BroomIcon size={16} color={iconColor} />
-        <Typography variant="body2">{t('clear_buffer')}</Typography>
-      </MenuItem>
-      <MenuItem
-        onClick={() => handleAction(onScrollToBottom)}
-        sx={{ gap: 1.5, py: 0.75, px: 1.5 }}
-      >
-        <ArrowLineDownIcon size={16} color={iconColor} />
-        <Typography variant="body2">{t('scroll_to_bottom')}</Typography>
-      </MenuItem>
+      <MenuList autoFocusItem={!!menuState} sx={{ py: 0.5 }}>
+        <MenuItem
+          onClick={() => handleAction(onCopy)}
+          disabled={!menuState?.hasSelection}
+          sx={{ gap: 1.5, py: 0.75, px: 1.5 }}
+        >
+          <ClipboardIcon size={16} color={iconColor} />
+          <Typography variant="body2">{t('copy_selection')}</Typography>
+        </MenuItem>
+        <MenuItem
+          onClick={() => handleAction(onPaste)}
+          sx={{ gap: 1.5, py: 0.75, px: 1.5 }}
+        >
+          <ClipboardTextIcon size={16} color={iconColor} />
+          <Typography variant="body2">{t('paste_clipboard')}</Typography>
+        </MenuItem>
+        <Divider />
+        <MenuItem
+          onClick={() => handleAction(onSelectAll)}
+          sx={{ gap: 1.5, py: 0.75, px: 1.5 }}
+        >
+          <SelectionAllIcon size={16} color={iconColor} />
+          <Typography variant="body2">{t('select_all')}</Typography>
+        </MenuItem>
+        <MenuItem
+          onClick={() => handleAction(onFind)}
+          sx={{ gap: 1.5, py: 0.75, px: 1.5 }}
+        >
+          <MagnifyingGlassIcon size={16} color={iconColor} />
+          <Typography variant="body2">{t('find')}</Typography>
+        </MenuItem>
+        <Divider />
+        <MenuItem
+          onClick={() => handleAction(onClearBuffer)}
+          sx={{ gap: 1.5, py: 0.75, px: 1.5 }}
+        >
+          <BroomIcon size={16} color={iconColor} />
+          <Typography variant="body2">{t('clear_buffer')}</Typography>
+        </MenuItem>
+        <MenuItem
+          onClick={() => handleAction(onScrollToBottom)}
+          sx={{ gap: 1.5, py: 0.75, px: 1.5 }}
+        >
+          <ArrowLineDownIcon size={16} color={iconColor} />
+          <Typography variant="body2">{t('scroll_to_bottom')}</Typography>
+        </MenuItem>
+      </MenuList>
     </Paper>
   );
 

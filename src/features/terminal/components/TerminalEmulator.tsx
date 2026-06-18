@@ -178,16 +178,24 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         if (terminalRef.current !== term) return;
         if (!term.element) return;
         if (!visible) return;
+        // Cross-platform safety: ensure renderer is ready before fit() to prevent
+        // 'this._renderer.value.dimensions' undefined errors on Windows/Linux/macOS
+        const internal = term as any;
+        const rendererReady = !!(
+          internal._renderer?.value?.dimensions ||
+          internal._core?._renderService?._renderer?.value?.dimensions ||
+          internal._core?.viewport
+        );
+        if (!rendererReady) return;
         const rect = container.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) return;
         try {
           fit.fit();
-          // Ensure terminal is focused after resize
           term.focus();
         } catch (err) {
-          // Silently ignore fit errors during cleanup
+          console.warn('TerminalEmulator: fit() during resize failed', err);
         }
-      }, 100); // Increased delay to prevent rapid resize issues
+      }, 100);
     }, [visible]);
 
     const isDisposedRef = useRef(false);
@@ -223,19 +231,22 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       terminal.loadAddon(webLinksAddon);
       terminal.loadAddon(searchAddon);
 
+      // CRITICAL: open() must be called BEFORE loading WebglAddon (xterm.js requirement)
+      terminal.open(containerRef.current);
+
+      // Try WebGL renderer with fallback to canvas (default)
+      // WebGL may fail on Linux (no GPU/driver issues) or virtualized environments
       if (webglRenderer) {
         try {
           const webglAddon = new WebglAddon();
           webglAddon.onContextLoss(() => {
-            webglAddon.dispose();
+            try { webglAddon.dispose(); } catch { /* noop */ }
           });
           terminal.loadAddon(webglAddon);
         } catch (err) {
-          console.error('TerminalEmulator: WebglAddon load failed', err);
+          console.warn('TerminalEmulator: WebGL renderer unavailable, falling back to canvas', err);
         }
       }
-
-      terminal.open(containerRef.current);
 
       terminal.onBell(() => {
         const currentBellStyle = useSettingsStore.getState().settings.bellStyle;
@@ -284,21 +295,45 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         return true;
       });
 
-      requestAnimationFrame(() => {
-        if (fitAddonRef.current && containerRef.current && terminalRef.current && terminalRef.current.element) {
-          const rect = containerRef.current.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0) {
-            try {
-              fitAddonRef.current.fit();
-              const cols = terminalRef.current.cols;
-              const rows = terminalRef.current.rows;
-              resizeTerminal(sessionId, rows, cols).catch((e) => notify(String(e)));
-            } catch (err) {
-            }
+      // Wait for renderer to be ready before fitting
+      // Cross-platform compatibility: xterm.js renderer (canvas/WebGL/DOM) initializes asynchronously
+      // On Windows/Linux/macOS, the timing varies based on GPU drivers and WebView2/WebKit versions
+      let attempts = 0;
+      const MAX_ATTEMPTS = 120; // ~2 seconds at 60fps, sufficient for slow renderer init
+      const tryFit = () => {
+        if (isDisposedRef.current) return;
+        attempts++;
+        if (!fitAddonRef.current || !containerRef.current || !terminalRef.current || !terminalRef.current.element) {
+          if (attempts < MAX_ATTEMPTS) requestAnimationFrame(tryFit);
+          return;
+        }
+        // Check if any renderer is initialized: WebGL, canvas, or DOM
+        // _renderer is the internal renderer service; .value is the active backend
+        const term = terminalRef.current as any;
+        const rendererReady = !!(
+          term._renderer?.value?.dimensions ||
+          term._core?._renderService?._renderer?.value?.dimensions ||
+          term._core?.viewport
+        );
+        if (!rendererReady && attempts < MAX_ATTEMPTS) {
+          requestAnimationFrame(tryFit);
+          return;
+        }
+        const rect = containerRef.current.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          try {
+            fitAddonRef.current.fit();
+            const cols = terminalRef.current.cols;
+            const rows = terminalRef.current.rows;
+            resizeTerminal(sessionId, rows, cols).catch((e) => notify(String(e)));
+          } catch (err) {
+            console.warn('TerminalEmulator: initial fit() failed, will retry on resize', err);
           }
         }
         setTerminalReady(true);
-      });
+      };
+      // Start checking after a short delay to allow renderer to mount
+      setTimeout(() => requestAnimationFrame(tryFit), 16);
 
       if (copyOnSelect) {
         selectionChangeOffRef.current = terminal.onSelectionChange(() => {
@@ -524,6 +559,14 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         const container = containerRef.current;
         requestAnimationFrame(() => {
           if (fit && container && term && terminalRef.current === term && term.element) {
+            // Cross-platform safety: skip fit() if renderer not ready
+            const internal = term as any;
+            const rendererReady = !!(
+              internal._renderer?.value?.dimensions ||
+              internal._core?._renderService?._renderer?.value?.dimensions ||
+              internal._core?.viewport
+            );
+            if (!rendererReady) return;
             const rect = container.getBoundingClientRect();
             if (rect.width > 0 && rect.height > 0) {
               try {
@@ -534,13 +577,13 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
                 // Ensure terminal regains focus when becoming visible
                 term.focus();
               } catch (err) {
-                // Silently ignore fit errors
+                console.warn('TerminalEmulator: visibility fit() failed', err);
               }
             }
           }
         });
       }
-    }, [visible, sessionId, notify]);
+    }, [visible]);
 
     return (
       <Box
