@@ -47,8 +47,10 @@ tauri-plugin-dialog = "2.7.1"
 # Pinned to windows 0.61 to align with the transitive `windows-core 0.61.2`
 # pulled in elsewhere; mixing 0.62 caused trait-bound mismatches in CI
 # (`HSTRING: RuntimeType` not satisfied because of two `windows-core` copies).
-# `windows::Foundation::Collections` is exposed via the `Foundation_Collections`
-# feature in 0.61, so we don't need the standalone `windows-collections` crate.
+# windows 0.61 keeps `IIterable` in the standalone `windows-collections 0.2`
+# crate (it is NOT re-exported from `windows::Foundation::Collections`),
+# so we must depend on it explicitly. windows 0.61 itself depends on
+# windows-collections 0.2 internally, so this stays single-version.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
     "Foundation",
@@ -58,5 +60,6 @@ windows = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-core = "0.61"
+windows-collections = "0.2"
 
 [workspace]

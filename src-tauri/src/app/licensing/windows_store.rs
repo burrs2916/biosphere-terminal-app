@@ -17,17 +17,19 @@
 //! 3. 加载项必须先在 Partner Center 提交并通过认证（即 9NZ4NSFLW6RW）。
 //!
 //! ## 版本注意
-//! - 本文件锁定使用 `windows = "0.61"`。它的 `windows_collections` 是
-//!   `windows::Foundation::Collections`，对 `IIterable<HSTRING>` 提供了
-//!   `From<Vec<Option<HSTRING>>>` 实现（`HSTRING::Default == Option<HSTRING>`）。
-//! - 之前尝试过 0.62 版本，会与依赖图里 tauri 引入的 0.61 形成 trait 冲突
+//! - 本文件锁定使用 `windows = "0.61"` + `windows-collections = "0.2"`。
+//!   IIterable 在 windows 0.61 没有 re-export 到 `windows::Foundation::Collections`，
+//!   必须从独立 crate `windows_collections` 导入。
+//! - windows 0.61 内部就依赖 windows-collections 0.2，因此显式声明 0.2 不会
+//!   制造多版本冲突。
+//! - 之前尝试过 0.62，会与依赖图里 tauri 引入的 0.61 形成 trait 冲突
 //!   （`HSTRING: RuntimeType` not satisfied），最终切回 0.61 解决。
 
 use std::collections::HashSet;
 
-use windows::Foundation::Collections::IIterable;
 use windows::Services::Store::{StoreContext, StorePurchaseStatus};
 use windows::core::HSTRING;
+use windows_collections::IIterable;
 
 use super::PRO_LIFETIME_PRODUCT_ID;
 
