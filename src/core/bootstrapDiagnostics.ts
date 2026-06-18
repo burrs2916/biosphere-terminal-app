@@ -59,6 +59,13 @@ export function installBootstrapDiagnostics(): void {
       .filter(Boolean)
       .join(' ');
     bootstrapLog('error', 'window.onerror', detail);
+    // Suppress known harmless xterm.js v5 race condition in syncScrollArea
+    // See https://github.com/xtermjs/xterm.js/issues/5011
+    if (event.message?.includes('_renderer.value.dimensions') ||
+        event.message?.includes('_renderer') && event.message?.includes('dimensions')) {
+      event.preventDefault();
+      return false;
+    }
   });
 
   window.addEventListener('unhandledrejection', (event) => {

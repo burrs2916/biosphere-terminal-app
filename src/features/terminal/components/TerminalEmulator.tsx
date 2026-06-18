@@ -326,45 +326,43 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         return true;
       });
 
-      // Wait for renderer to be ready before fitting
-      // Cross-platform compatibility: xterm.js renderer (canvas/WebGL/DOM) initializes asynchronously
-      // On Windows/Linux/macOS, the timing varies based on GPU drivers and WebView2/WebKit versions
-      let attempts = 0;
-      const MAX_ATTEMPTS = 120; // ~2 seconds at 60fps, sufficient for slow renderer init
-      const tryFit = () => {
+      // Mark terminal ready immediately so the container becomes visible.
+      // The actual fit() will happen via ResizeObserver once the container has size.
+      // This is critical: previously, terminalReady stayed false if container was hidden,
+      // which caused an infinite hidden state where the terminal could never become visible.
+      setTerminalReady(true);
+
+      // Best-effort initial fit (will retry via ResizeObserver if container has no size yet)
+      const tryInitialFit = () => {
         if (isDisposedRef.current) return;
-        attempts++;
-        if (!fitAddonRef.current || !containerRef.current || !terminalRef.current || !terminalRef.current.element) {
-          if (attempts < MAX_ATTEMPTS) requestAnimationFrame(tryFit);
-          return;
-        }
-        // Check if any renderer is initialized: WebGL, canvas, or DOM
-        // _renderer is the internal renderer service; .value is the active backend
-        const term = terminalRef.current as any;
+        const fit = fitAddonRef.current;
+        const container = containerRef.current;
+        const term = terminalRef.current;
+        if (!fit || !container || !term || !term.element) return;
+        // Skip if renderer not ready yet (will retry on resize)
+        const internal = term as any;
         const rendererReady = !!(
-          term._renderer?.value?.dimensions ||
-          term._core?._renderService?._renderer?.value?.dimensions ||
-          term._core?.viewport
+          internal._renderer?.value?.dimensions ||
+          internal._core?._renderService?._renderer?.value?.dimensions
         );
-        if (!rendererReady && attempts < MAX_ATTEMPTS) {
-          requestAnimationFrame(tryFit);
-          return;
+        if (!rendererReady) return;
+        const rect = container.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        try {
+          fit.fit();
+          resizeTerminal(sessionId, term.rows, term.cols).catch((e) => notify(String(e)));
+        } catch (err) {
+          console.warn('TerminalEmulator: initial fit() failed', err);
         }
-        const rect = containerRef.current.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          try {
-            fitAddonRef.current.fit();
-            const cols = terminalRef.current.cols;
-            const rows = terminalRef.current.rows;
-            resizeTerminal(sessionId, rows, cols).catch((e) => notify(String(e)));
-          } catch (err) {
-            console.warn('TerminalEmulator: initial fit() failed, will retry on resize', err);
-          }
-        }
-        setTerminalReady(true);
       };
-      // Start checking after a short delay to allow renderer to mount
-      setTimeout(() => requestAnimationFrame(tryFit), 16);
+      // Try fit a few times across animation frames to catch the renderer once ready
+      requestAnimationFrame(() => {
+        tryInitialFit();
+        requestAnimationFrame(() => {
+          tryInitialFit();
+          setTimeout(tryInitialFit, 100);
+        });
+      });
 
       if (copyOnSelect) {
         selectionChangeOffRef.current = terminal.onSelectionChange(() => {
