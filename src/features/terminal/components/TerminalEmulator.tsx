@@ -231,22 +231,62 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       terminal.loadAddon(webLinksAddon);
       terminal.loadAddon(searchAddon);
 
-      // CRITICAL: open() must be called BEFORE loading WebglAddon (xterm.js requirement)
-      terminal.open(containerRef.current);
-
-      // Try WebGL renderer with fallback to canvas (default)
-      // WebGL may fail on Linux (no GPU/driver issues) or virtualized environments
-      if (webglRenderer) {
-        try {
-          const webglAddon = new WebglAddon();
-          webglAddon.onContextLoss(() => {
-            try { webglAddon.dispose(); } catch { /* noop */ }
-          });
-          terminal.loadAddon(webglAddon);
-        } catch (err) {
-          console.warn('TerminalEmulator: WebGL renderer unavailable, falling back to canvas', err);
+      // CRITICAL FIX for "this._renderer.value.dimensions" undefined error:
+      // xterm.js viewport's syncScrollArea is called synchronously during onResize/onScroll
+      // events, but the renderer dimensions may not be initialized yet. We monkey-patch the
+      // viewport's _innerRefresh to bail out safely when renderer is not ready.
+      const installViewportGuard = () => {
+        const internal = terminal as any;
+        const viewport = internal._core?.viewport;
+        if (!viewport) return;
+        // Patch syncScrollArea to skip when renderer dimensions are not available
+        if (viewport.syncScrollArea && !viewport.__guarded) {
+          const original = viewport.syncScrollArea.bind(viewport);
+          viewport.syncScrollArea = function (...args: any[]) {
+            try {
+              const renderer = internal._core?._renderService?._renderer?.value
+                || internal._renderer?.value;
+              if (!renderer || !renderer.dimensions) return;
+              return original(...args);
+            } catch (err) {
+              console.warn('TerminalEmulator: syncScrollArea guarded', err);
+              return;
+            }
+          };
+          viewport.__guarded = true;
         }
-      }
+      };
+
+      // Wait for container to have non-zero size before terminal.open()
+      // This is the most reliable way to prevent renderer initialization race conditions
+      const openTerminal = () => {
+        if (isDisposedRef.current || !containerRef.current) return;
+        const rect = containerRef.current.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) {
+          requestAnimationFrame(openTerminal);
+          return;
+        }
+        try {
+          terminal.open(containerRef.current);
+          installViewportGuard();
+          // Try WebGL renderer with fallback to canvas (default)
+          // WebGL may fail on Linux (no GPU/driver issues) or virtualized environments
+          if (webglRenderer) {
+            try {
+              const webglAddon = new WebglAddon();
+              webglAddon.onContextLoss(() => {
+                try { webglAddon.dispose(); } catch { /* noop */ }
+              });
+              terminal.loadAddon(webglAddon);
+            } catch (err) {
+              console.warn('TerminalEmulator: WebGL renderer unavailable, falling back to canvas', err);
+            }
+          }
+        } catch (err) {
+          console.error('TerminalEmulator: terminal.open() failed', err);
+        }
+      };
+      openTerminal();
 
       terminal.onBell(() => {
         const currentBellStyle = useSettingsStore.getState().settings.bellStyle;
