@@ -79,13 +79,12 @@ impl From<StoreIapError> for String {
     }
 }
 
-/// 构造 IIterable<HSTRING>。windows 0.61 中 HSTRING::Default 等价于
-/// Option<HSTRING>，所以需要包成 Some(...)。
+/// 构造 IIterable<HSTRING>。
+/// windows 0.61 中 `HSTRING` 实现 `Type<HSTRING, CloneType>`，
+/// 因此 `HSTRING::Default == HSTRING`，`IIterable::from` 接受 `Vec<HSTRING>`。
+/// (与 InterfaceType 类型不同，那些 Default 才是 `Option<T>`。)
 fn hstring_iterable(values: &[&str]) -> IIterable<HSTRING> {
-    let vec: Vec<Option<HSTRING>> = values
-        .iter()
-        .map(|v| Some(HSTRING::from(*v)))
-        .collect();
+    let vec: Vec<HSTRING> = values.iter().map(|v| HSTRING::from(*v)).collect();
     IIterable::<HSTRING>::from(vec)
 }
 
