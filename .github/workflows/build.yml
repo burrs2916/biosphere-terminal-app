@@ -40,34 +40,23 @@ jobs:
         run: pnpm exec tsc
 
   # ============================================================
-  # Rust check (backend quality gate)
+  # Rust check (backend quality gate, Windows-only since Win is the only release target)
   # ============================================================
   cargo-check:
     name: Cargo Check
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Linux system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libjavascriptcoregtk-4.1-dev \
-            libsoup-3.0-dev
-
       - name: Cache Cargo registry
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            C:\Users\runneradmin\.cargo\registry
+            C:\Users\runneradmin\.cargo\git
           key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
@@ -91,10 +80,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ⚠️ macOS / Linux 当前未上架对应商店，CI 暂不构建。
+          # 待 Apple App Store / Snap Store 上架后再恢复以下两段配置。
           # --- macOS (Apple Silicon; Intel Macs use Rosetta 2) ---
-          - platform: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: macos-arm64
+          # - platform: macos-latest
+          #   target: aarch64-apple-darwin
+          #   artifact_name: macos-arm64
 
           # --- Windows ---
           - platform: windows-latest
@@ -102,9 +93,9 @@ jobs:
             artifact_name: windows-x64
 
           # --- Linux ---
-          - platform: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: linux-x64
+          # - platform: ubuntu-latest
+          #   target: x86_64-unknown-linux-gnu
+          #   artifact_name: linux-x64
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -190,10 +181,10 @@ jobs:
 
             | Platform | Download | Notes |
             |----------|----------|-------|
-            | macOS (Apple Silicon) | `.dmg` in **macos-arm64** artifact | If Gatekeeper blocks: `xattr -cr /Applications/biosphere-ai-terminal.app` then open |
             | Windows (signed installer) | NSIS `.exe` or `.msi` in **windows-x64** | Requires code signing for distribution |
             | Windows (unsigned test) | **windows-standalone-exe** or **windows-portable** | Needs [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) pre-installed |
-            | Linux | `.deb` or `.AppImage` in **linux-x64** artifact | |
+
+            ⚠️ macOS / Linux builds are temporarily disabled until those stores are configured.
 
             See CHANGELOG for details.
           releaseDraft: true
@@ -238,13 +229,14 @@ jobs:
         shell: pwsh
 
       # ---- Upload build artifacts ----
+      # ⚠️ macOS / Linux 暂未上架，相关上传步骤已注释。
       # macOS: DMG only — uploading raw .app via Actions zip corrupts Framework symlinks
-      - name: Upload artifacts (macOS)
-        if: matrix.artifact_name == 'macos-arm64'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+      # - name: Upload artifacts (macOS)
+      #   if: matrix.artifact_name == 'macos-arm64'
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ${{ matrix.artifact_name }}
+      #     path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
 
       - name: Upload artifacts (Windows)
         if: runner.os == 'Windows'
@@ -325,8 +317,8 @@ jobs:
             src-tauri/target/**/*.msixbundle
           if-no-files-found: warn
 
-      - name: Upload artifacts (Linux)
-        if: runner.os == 'Linux'
+      - name: Upload artifacts (Linux) [DISABLED]
+        if: false
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
