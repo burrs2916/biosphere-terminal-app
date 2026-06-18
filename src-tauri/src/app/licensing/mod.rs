@@ -95,15 +95,30 @@ impl LicensingService {
         // First launch: initialize the trial start time immediately so the
         // 14-day clock starts ticking the first time the user opens the app.
         // 仅 Windows 平台需要试用期；macOS/Linux 默认全 Pro 解锁，无需写入。
+        //
+        // 关键安全性：必须 **先写盘成功** 才在内存里设置 trial_started_at。
+        // 否则磁盘满 / 权限不足时，每次启动都会重置 trial 起点 = 无限试用。
         #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
         let mut state = state;
         #[cfg(target_os = "windows")]
         if state.trial_started_at.is_none() {
-            state.trial_started_at = Some(Utc::now().to_rfc3339());
-            if let Err(err) = Self::save_state(&state_path, &state) {
-                tracing::warn!("[licensing] failed to persist initial trial start: {}", err);
+            let mut candidate = state.clone();
+            candidate.trial_started_at = Some(Utc::now().to_rfc3339());
+            match Self::save_state(&state_path, &candidate) {
+                Ok(()) => {
+                    state = candidate;
+                    tracing::info!("[licensing] trial started at first launch");
+                }
+                Err(err) => {
+                    // 写盘失败：保持 trial_started_at 为 None。compute_status
+                    // 会把这种状态当做 free tier，比错误地"无限试用"更安全。
+                    tracing::error!(
+                        "[licensing] failed to persist initial trial start: {} \
+                        — leaving trial uninitialized; user will be treated as free tier",
+                        err
+                    );
+                }
             }
-            tracing::info!("[licensing] trial started at first launch");
         }
 
         LicensingService {
@@ -114,14 +129,20 @@ impl LicensingService {
 
     /// 启动后异步与 Microsoft Store 同步 entitlement 状态：
     /// - 若 Store 报告已购买但本地未标记 Pro → 自动 unlock；
-    /// - 若 Store 报告未购买但本地标记 Pro → 撤销本地 Pro（防止本地文件被
-    ///   人工编辑伪造）；
+    /// - 若 Store 报告未购买但本地标记 Pro → 仅当超过宽限期才撤销，
+    ///   防止刚刚购买的用户因 Store 后台同步延迟（5-30 秒，偶尔几小时）
+    ///   而被错误降级；
     /// - 若 Store API 不可用（侧载、网络异常）→ 保留本地状态，不做改动。
     ///
     /// 仅在 Windows 平台上有意义，其他平台是 no-op。
     pub async fn sync_with_store(&self) {
         #[cfg(target_os = "windows")]
         {
+            /// 刚购买后给 Store 后台同步留出的宽限期。期间内若 Store 端
+            /// 暂时还没看到 entitlement，仍然保留本地 Pro 状态。
+            /// 24 小时是 Microsoft 官方文档建议的同步上限。
+            const PURCHASE_GRACE_HOURS: i64 = 24;
+
             let owned = match windows_store::verify_pro_entitlement().await {
                 Ok(v) => v,
                 Err(err) => {
@@ -152,29 +173,55 @@ impl LicensingService {
                 }
                 (false, true) => {
                     // Store 端没找到 entitlement，但本地仍标记 Pro。
-                    // 仅当 store_order_id 来自真实 Store 流程（前缀 "store"）时才撤销，
+                    // 仅当 store_order_id 来自真实 Store 流程（前缀 "store"）时才考虑撤销，
                     // 因为开发模式下手动 unlock_pro 不应被清空。
                     let from_store = state
                         .store_order_id
                         .as_deref()
                         .map(|s| s.starts_with("store"))
                         .unwrap_or(false);
-                    if from_store {
-                        state.pro_unlocked_at = None;
-                        state.store_order_id = None;
-                        let snapshot = state.clone();
-                        drop(state);
-                        if let Err(e) = Self::save_state(&self.state_path, &snapshot) {
-                            tracing::warn!("[licensing] failed to persist store revoke: {}", e);
-                        }
-                        tracing::warn!(
-                            "[licensing] store sync: Pro revoked because no entitlement was found"
-                        );
-                    } else {
+                    if !from_store {
                         tracing::info!(
                             "[licensing] store sync: local non-store unlock kept as-is"
                         );
+                        return;
                     }
+
+                    // 检查购买时间是否仍在宽限期内。pro_unlocked_at 比 store_order_id
+                    // 更稳定（始终是 RFC3339 时间），优先使用它。
+                    let purchased_at = state
+                        .pro_unlocked_at
+                        .as_deref()
+                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&Utc));
+
+                    let in_grace_period = match purchased_at {
+                        Some(t) => (Utc::now() - t).num_hours() < PURCHASE_GRACE_HOURS,
+                        // 时间戳损坏：保守起见认为仍在宽限期，宁可放过不可错杀。
+                        None => true,
+                    };
+
+                    if in_grace_period {
+                        tracing::info!(
+                            "[licensing] store sync: entitlement not yet visible but \
+                            purchase is within {}h grace period, keeping Pro state",
+                            PURCHASE_GRACE_HOURS
+                        );
+                        return;
+                    }
+
+                    state.pro_unlocked_at = None;
+                    state.store_order_id = None;
+                    let snapshot = state.clone();
+                    drop(state);
+                    if let Err(e) = Self::save_state(&self.state_path, &snapshot) {
+                        tracing::warn!("[licensing] failed to persist store revoke: {}", e);
+                    }
+                    tracing::warn!(
+                        "[licensing] store sync: Pro revoked because no entitlement was \
+                        found after {}h grace period",
+                        PURCHASE_GRACE_HOURS
+                    );
                 }
                 _ => {
                     tracing::debug!("[licensing] store sync: state matches Store, no change");
@@ -290,7 +337,14 @@ impl LicensingService {
 
         let now = Utc::now();
         let expires_at = started_at + chrono::Duration::days(TRIAL_DAYS);
-        let remaining = (expires_at - now).num_days();
+        // 用 ceil 而非 num_days() 整除：剩 8 小时也应显示 "1 day"，
+        // 这样不会出现「最后一天显示 Trial · 0d」的诡异 UI。
+        let remaining_secs = (expires_at - now).num_seconds();
+        let remaining = if remaining_secs <= 0 {
+            0
+        } else {
+            ((remaining_secs as f64) / 86400.0).ceil() as i64
+        };
 
         if now < expires_at {
             LicenseStatus {

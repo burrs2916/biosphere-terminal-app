@@ -112,7 +112,11 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     void feature;
     const status = get().status;
-    if (!status) return false;
+    // 启动初期 status 还在加载（异步从后端拉取）。这段时间内（通常 < 200ms）
+    // 我们 **乐观放行** —— 否则刚启动应用的 trial / pro 用户会看到 LockedScreen
+    // 闪烁一下再变正常，体验非常糟糕。
+    // 真正的拦截发生在 status 加载完成后，由 React 自动重渲染收紧权限。
+    if (!status) return true;
     // Pro users can use everything.
     if (status.isPro) return true;
     // During the trial, all Pro features are unlocked.

@@ -104,7 +104,7 @@ export async function openPluginScriptViewerWindow(pluginId: string, pluginName:
   }
 
   const webview = new WebviewWindow(key, {
-    url: `/plugin-script-viewer?pluginId=${encodeURIComponent(pluginId)}`,
+    url: `/#/plugin-script-viewer?pluginId=${encodeURIComponent(pluginId)}`,
     title: `${pluginName} — Script Viewer`,
     width: 800,
     height: 600,
@@ -176,7 +176,7 @@ export async function openAllNotesWindow(): Promise<WebviewWindow | null> {
   }
 
   const webview = new WebviewWindow(key, {
-    url: '/category-notes',
+    url: '/#/category-notes',
     title: 'All Notes',
     width: 1000,
     height: 700,

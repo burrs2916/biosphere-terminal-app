@@ -183,9 +183,28 @@ pub async fn get_user_owned_addons() -> Result<HashSet<String>, StoreIapError> {
 /// 复核当前用户是否拥有 Pro 加载项 entitlement。
 /// 返回 `true` 表示 Store 确认已购买；`false` 表示未购买；
 /// `Err` 表示无法获取（侧载、网络异常等）—— 此时调用方应保留本地缓存状态。
+///
+/// 实现策略：由于本应用目前只销售单一 Pro 加载项 (9NZ4NSFLW6RW)，
+/// 任何 `IsActive=true` 的 add-on entitlement 都视为有效 Pro。
+/// 这避免了 Store API 返回的 key 可能是 SkuStoreId / InAppOfferToken 等
+/// 多种格式时的精确字符串匹配难题。如果将来引入第二个加载项，需要改为
+/// 精确比较 product.StoreId。
 pub async fn verify_pro_entitlement() -> Result<bool, StoreIapError> {
     let owned = get_user_owned_addons().await?;
-    Ok(owned.contains(PRO_LIFETIME_PRODUCT_ID))
+    if owned.is_empty() {
+        return Ok(false);
+    }
+    // 精确匹配优先（防御未来扩展）；找不到时退回到"任意 active addon"判定。
+    if owned.contains(PRO_LIFETIME_PRODUCT_ID) {
+        return Ok(true);
+    }
+    tracing::info!(
+        "[licensing] active add-on entitlement found but its key did not match \
+        PRO_LIFETIME_PRODUCT_ID; treating user as Pro because we currently sell \
+        only one add-on. owned keys: {:?}",
+        owned
+    );
+    Ok(true)
 }
 
 /// 把 windows::core::Error 翻译成更友好的 StoreIapError。

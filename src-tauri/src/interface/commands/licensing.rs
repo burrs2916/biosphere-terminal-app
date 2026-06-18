@@ -15,9 +15,13 @@ pub async fn check_pro_status(
 /// 流程：
 /// 1. 通过 `Windows.Services.Store.StoreContext::RequestPurchaseAsync` 弹出
 ///    Store 购买对话框；
-/// 2. 用户支付完成后，再调用 `verify_pro_entitlement` 复核 Store 端
-///    entitlement 是否真实生效；
-/// 3. 双重确认通过后才把本地状态标记为 Pro。
+/// 2. 用户支付完成后，Store 弹窗本身就已经原子性地确认了 entitlement，
+///    我们直接信任 `StorePurchaseStatus::Succeeded` 返回值，立即写入本地缓存。
+///
+/// 注意：此处 **不** 立即调用 `verify_pro_entitlement` 复核，因为
+/// `Windows.Services.Store` 的 add-on entitlement 后台同步通常有
+/// 5-30 秒延迟，刚买完立刻 verify 几乎必然返回 false，会导致 UI 误报失败、
+/// 让用户以为没买成功。复核交给应用启动时的 `sync_with_store` 慢慢做。
 ///
 /// 在非 Windows 平台或没有 Package Identity 的开发环境，调用会返回错误，
 /// 前端应当显示"请通过 Microsoft Store 安装"的提示。
@@ -28,22 +32,14 @@ pub async fn purchase_pro_lifetime(
     #[cfg(target_os = "windows")]
     {
         use crate::app::licensing::windows_store;
-        // Step 1: 弹出 Store 购买窗口
+        // Step 1: 弹出 Store 购买窗口，等待用户支付。
+        // RequestPurchaseAsync 返回 Succeeded 时，Store 客户端已经原子性
+        // 确认了支付与 entitlement 授权（即使 server 端同步还没传播过来）。
         let order_id = windows_store::request_purchase_pro_lifetime()
             .await
             .map_err(String::from)?;
-        // Step 2: 复核 entitlement，避免因 Store 端尚未同步导致误判
-        let owned = windows_store::verify_pro_entitlement()
-            .await
-            .map_err(String::from)?;
-        if !owned {
-            return Err(
-                "Purchase reported success but entitlement is not yet active. \
-                Please restart the app or click Restore Purchase in a moment."
-                    .to_string(),
-            );
-        }
-        // Step 3: 写入本地缓存
+        // Step 2: 直接写入本地缓存。后续启动 sync_with_store 会慢慢核对
+        // server 端 entitlement 并校正状态（详见 sync_with_store 的宽限期逻辑）。
         service.unlock_pro(Some(order_id), None).await
     }
 
