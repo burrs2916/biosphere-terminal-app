@@ -30,6 +30,9 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '../engine';
 import { useNotify } from '../core/notification';
 import { useTranslation } from 'react-i18next';
+import { useLicenseStore } from '../features/licensing/licenseStore';
+import { useUpgradeDialogStore } from '../features/licensing/upgradeDialogStore';
+import type { ProFeature } from '../proto/licensing';
 
 interface Tab {
   id: string;
@@ -84,6 +87,20 @@ export function TerminalPage() {
     if (!activeTab) return undefined;
     return terminalRefs.current.get(activeTab.id);
   }, []);
+
+  // Pro 功能授权检查：未付费时弹出升级对话框
+  const canUseFeature = useLicenseStore((s) => s.canUse);
+  const openUpgrade = useUpgradeDialogStore((s) => s.openDialog);
+  const guardProFeature = useCallback(
+    (feature: ProFeature, action: () => void) => {
+      if (canUseFeature(feature)) {
+        action();
+      } else {
+        openUpgrade(feature);
+      }
+    },
+    [canUseFeature, openUpgrade],
+  );
 
   const handleNewTerminal = useCallback(() => {
     setPickerOpen(true);
@@ -246,29 +263,37 @@ export function TerminalPage() {
   );
 
   const handleOpenNotes = useCallback(() => {
-    openNotesReferenceWindow().catch((e) => { console.error(e); notify(String(e)); });
-  }, []);
+    guardProFeature('note_reference', () => {
+      openNotesReferenceWindow().catch((e) => { console.error(e); notify(String(e)); });
+    });
+  }, [guardProFeature, notify]);
 
   const handleOpenAiCopilot = useCallback(() => {
-    openAiCopilotWindow().catch((e) => { console.error(e); notify(String(e)); });
-  }, []);
+    guardProFeature('ai_copilot', () => {
+      openAiCopilotWindow().catch((e) => { console.error(e); notify(String(e)); });
+    });
+  }, [guardProFeature, notify]);
 
   const handleOpenWorkshop = useCallback(() => {
-    openPluginWorkshopWindow().catch((e) => { console.error(e); notify(String(e)); });
-  }, []);
+    guardProFeature('plugin_workshop', () => {
+      openPluginWorkshopWindow().catch((e) => { console.error(e); notify(String(e)); });
+    });
+  }, [guardProFeature, notify]);
 
   const handleOpenRemoteDesktop = useCallback(() => {
-    const activeTab = tabsRef.current.find((t) => t.isActive);
-    const sshParams = activeTab?.ssh ? {
-      host: activeTab.ssh.host,
-      port: activeTab.ssh.port,
-      username: activeTab.ssh.username,
-      authMethod: activeTab.ssh.authMethod,
-      privateKeyPath: activeTab.ssh.privateKeyPath,
-      password: activeTab.ssh.password,
-    } : undefined;
-    openRemoteDesktopWindow(sshParams).catch((e) => { console.error(e); notify(String(e)); });
-  }, [notify]);
+    guardProFeature('remote_desktop', () => {
+      const activeTab = tabsRef.current.find((t) => t.isActive);
+      const sshParams = activeTab?.ssh ? {
+        host: activeTab.ssh.host,
+        port: activeTab.ssh.port,
+        username: activeTab.ssh.username,
+        authMethod: activeTab.ssh.authMethod,
+        privateKeyPath: activeTab.ssh.privateKeyPath,
+        password: activeTab.ssh.password,
+      } : undefined;
+      openRemoteDesktopWindow(sshParams).catch((e) => { console.error(e); notify(String(e)); });
+    });
+  }, [guardProFeature, notify]);
 
   const handleClearBuffer = useCallback(() => {
     getActiveTerminal()?.clearBuffer();

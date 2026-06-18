@@ -4,23 +4,23 @@ import { checkProStatus, purchaseProLifetime, restoreProLicense, resetLicense } 
 
 /// All Pro features gated by the license system. Keep in sync with
 /// `ProFeature` in `proto/licensing.ts`.
+///
+/// 商业模式：试用期 14 天内全部开放，试用结束后需 $9.99 一次性买断解锁。
 export const PRO_FEATURES: ProFeature[] = [
-  'unlimited_ssh',
-  'unlimited_notes',
-  'ai_assistant',
   'remote_desktop',
   'plugin_workshop',
-  'sync_settings',
+  'ai_copilot',
+  'note_ai_optimize',
+  'note_reference',
 ];
 
 /// Human-readable labels for each Pro feature, used in the upgrade dialog.
 export const PRO_FEATURE_LABELS: Record<ProFeature, string> = {
-  unlimited_ssh: 'Unlimited SSH connections',
-  unlimited_notes: 'Unlimited notes & notebooks',
-  ai_assistant: 'AI assistant (unlimited messages)',
   remote_desktop: 'Remote desktop (VNC)',
   plugin_workshop: 'Plugin workshop',
-  sync_settings: 'Cloud settings sync',
+  ai_copilot: 'AI Copilot & Agent chat',
+  note_ai_optimize: 'AI-powered note optimization',
+  note_reference: 'AI note references & command linking',
 };
 
 interface LicenseState {

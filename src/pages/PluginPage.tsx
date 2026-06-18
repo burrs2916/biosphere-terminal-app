@@ -27,6 +27,8 @@ import { ChatMessagesArea, ChatInputArea, type FileAttachment } from '../compone
 import type { ToolCallDisplay } from '../components/chat/ChatComponents';
 import type { PluginManifest } from '../proto/plugin';
 import { listPluginUsageLogs } from '../core/services/plugin.service';
+import { useLicenseStore } from '../features/licensing/licenseStore';
+import { useUpgradeDialogStore } from '../features/licensing/upgradeDialogStore';
 
 /** Sanitize an example prompt to remove system instructions and absolute paths */
 interface StreamChunk { conversationId: string; chunk: string }
@@ -903,7 +905,14 @@ function PluginSidebar({ plugins, onToggle, onDelete, accentColor, successColor,
       <Box sx={{ px: 1, py: 1 }}>
         <Paper
           variant="outlined"
-          onClick={() => openPluginWorkshopWindow().catch((e) => console.error('Failed to open plugin workshop:', e))}
+          onClick={() => {
+            // Pro 功能授权检查：未付费时弹出升级对话框
+            if (!useLicenseStore.getState().canUse('plugin_workshop')) {
+              useUpgradeDialogStore.getState().openDialog('plugin_workshop');
+              return;
+            }
+            openPluginWorkshopWindow().catch((e) => console.error('Failed to open plugin workshop:', e));
+          }}
           sx={{
             p: 1, borderRadius: 1.5, cursor: 'pointer',
             borderColor: `${accentColor}30`,

@@ -40,6 +40,8 @@ import { listen } from '@tauri-apps/api/event';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { AiOptimizeDialog } from './AiOptimizeDialog';
 import type { NoteDto } from '../../../proto/notebook';
+import { useLicenseStore } from '../../licensing/licenseStore';
+import { useUpgradeDialogStore } from '../../licensing/upgradeDialogStore';
 
 const lowlight = createLowlight(common);
 
@@ -274,6 +276,13 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
   };
 
   const handleAiOptimize = useCallback(async () => {
+    // Pro 功能授权检查：未付费时弹出升级对话框
+    const canUseFn = useLicenseStore.getState().canUse;
+    if (!canUseFn('note_ai_optimize')) {
+      useUpgradeDialogStore.getState().openDialog('note_ai_optimize');
+      return;
+    }
+
     const agentId = getNoteAssistantAgentId();
     if (!agentId) {
       setAiStatus('error');

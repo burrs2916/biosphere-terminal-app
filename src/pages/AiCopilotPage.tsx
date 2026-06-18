@@ -14,6 +14,7 @@ import { useTranslation } from 'react-i18next';
 import { useNotify } from '../core/notification';
 import { ChatMessagesArea, ChatInputArea, type FileAttachment } from '../components/chat/ChatComponents';
 import type { ToolCallDisplay } from '../components/chat/ChatComponents';
+import { useFeatureGate, LockedScreen } from '../features/licensing';
 
 const STORAGE_KEY = 'biosphere_terminal_copilot_agent_id';
 
@@ -42,6 +43,9 @@ interface ToolCallEvent {
 interface ToolCallPayload { conversationId: string; toolCall: ToolCallEvent }
 
 export function AiCopilotPage() {
+  // Pro 功能：未付费时显示锁定页
+  const featureGate = useFeatureGate('ai_copilot');
+
   const { t } = useTranslation('agent');
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
@@ -289,6 +293,11 @@ export function AiCopilotPage() {
         </Typography>
       </Box>
     );
+  }
+
+  // 未付费用户显示锁定页
+  if (!featureGate.canUse) {
+    return <LockedScreen feature="ai_copilot" />;
   }
 
   return (

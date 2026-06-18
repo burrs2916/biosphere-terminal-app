@@ -11,7 +11,7 @@ import {
   InfoIcon, BookmarkSimpleIcon, FunctionIcon, Sparkle,
 } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
-import { getNoteAssistantAgentId } from '../../agent/components/NoteAssistantTab';
+import { useLicenseStore } from '../../licensing/licenseStore';
 
 interface EditorToolbarProps {
   editor: Editor | null;
@@ -23,6 +23,8 @@ export function EditorToolbar({ editor, onAiOptimize, aiOptimizing }: EditorTool
   const { t } = useTranslation('notebook');
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
+  // Pro 功能授权：未付费时按钮置灰
+  const canUseAiOptimize = useLicenseStore((s) => s.canUse('note_ai_optimize'));
 
   if (!editor) return null;
 
@@ -146,16 +148,17 @@ export function EditorToolbar({ editor, onAiOptimize, aiOptimizing }: EditorTool
       {onAiOptimize && (
         <>
           <Divider orientation="vertical" flexItem sx={{ mx: 0.25, borderColor: isDark ? 'rgba(48,54,61,0.6)' : 'rgba(0,0,0,0.08)' }} />
-          <Tooltip title={t('editor.ai_optimize')} arrow>
+          <Tooltip title={canUseAiOptimize ? t('editor.ai_optimize') : 'Pro · Upgrade to unlock'} arrow>
             <IconButton
               size="small"
               onClick={onAiOptimize}
-              disabled={aiOptimizing || !getNoteAssistantAgentId()}
+              disabled={aiOptimizing}
               sx={{
-                color: '#CE93D8',
+                color: canUseAiOptimize ? '#CE93D8' : 'rgba(206,147,216,0.4)',
                 borderRadius: 1.5,
                 p: 0.5,
-                '&:hover': { bgcolor: 'rgba(206,147,216,0.12)', color: '#EA80FC' },
+                opacity: canUseAiOptimize ? 1 : 0.55,
+                '&:hover': { bgcolor: 'rgba(206,147,216,0.12)', color: canUseAiOptimize ? '#EA80FC' : 'rgba(206,147,216,0.6)' },
                 '&.Mui-disabled': { color: 'rgba(206,147,216,0.2)' },
               }}
             >

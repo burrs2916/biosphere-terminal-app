@@ -15,30 +15,13 @@ export interface LicenseStatus {
 
 /// Pro feature identifiers used by FeatureGate. Keep these in sync with the
 /// `PRO_FEATURES` list in `licenseStore.ts`.
+///
+/// 商业模式：
+/// - 终端、SSH（无数量限制）、笔记（无数量限制）属于免费基础功能
+/// - 以下 5 项为 Pro 高级功能，试用期内全部开放，试用结束后需付费解锁
 export type ProFeature =
-  | 'unlimited_ssh'
-  | 'unlimited_notes'
-  | 'ai_assistant'
-  | 'remote_desktop'
-  | 'plugin_workshop'
-  | 'sync_settings';
-
-/// Free-tier limits enforced client-side. These mirror the limits documented
-/// in the upgrade dialog and the Microsoft Store listing.
-export interface FreeTierLimits {
-  maxSshConnections: number;
-  maxNotes: number;
-  maxAiMessagesPerDay: number;
-  remoteDesktopEnabled: boolean;
-  pluginWorkshopEnabled: boolean;
-  syncSettingsEnabled: boolean;
-}
-
-export const FREE_TIER_LIMITS: FreeTierLimits = {
-  maxSshConnections: 3,
-  maxNotes: 20,
-  maxAiMessagesPerDay: 10,
-  remoteDesktopEnabled: false,
-  pluginWorkshopEnabled: false,
-  syncSettingsEnabled: false,
-};
+  | 'remote_desktop'      // 远程桌面 (VNC)
+  | 'plugin_workshop'     // 插件工坊（创建/编辑插件）
+  | 'ai_copilot'          // AI Copilot 终端助手 / Agent 对话
+  | 'note_ai_optimize'    // 笔记 AI 优化
+  | 'note_reference';     // 笔记参考 / 命令-笔记 AI 关联

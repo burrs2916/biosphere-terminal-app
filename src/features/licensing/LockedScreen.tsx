@@ -3,7 +3,6 @@ import Typography from '@mui/material/Typography';
 import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
 import { LockIcon, SparkleIcon } from '@phosphor-icons/react';
-import { useTranslation } from 'react-i18next';
 import type { ProFeature } from '../../proto/licensing';
 import { PRO_FEATURE_LABELS } from './licenseStore';
 import { useUpgradeDialogStore } from './upgradeDialogStore';
@@ -14,11 +13,24 @@ interface LockedScreenProps {
   message?: string;
 }
 
+/// 针对每个 Pro 功能的具体说明文案
+const FEATURE_DESCRIPTIONS: Record<ProFeature, string> = {
+  remote_desktop:
+    'One-click VNC remote desktop access. Connect to your Linux/Windows servers without third-party tools.',
+  plugin_workshop:
+    'Build, test, and publish your own plugins. Extend Biosphere Terminal with custom UI and AI capabilities.',
+  ai_copilot:
+    'Multi-agent AI conversations with streaming tool calls. Bring your own model API key.',
+  note_ai_optimize:
+    'AI-powered note polishing, summarization, and rewriting directly inside the editor.',
+  note_reference:
+    'Smart note references and AI-driven command-to-note linking for instant context recall.',
+};
+
 /// Full-page placeholder shown when a Pro feature is locked. Renders a
 /// lock icon, the feature name, and an "Upgrade to Pro" button that opens
 /// the upgrade dialog.
 export function LockedScreen({ feature, message }: LockedScreenProps) {
-  const { t } = useTranslation();
   const openDialog = useUpgradeDialogStore((s) => s.openDialog);
 
   return (
@@ -48,14 +60,10 @@ export function LockedScreen({ feature, message }: LockedScreenProps) {
           <LockIcon size={28} weight="duotone" color="#6C63FF" />
         </Box>
         <Typography variant="h6" sx={{ fontWeight: 700 }}>
-          {t('license.locked.title', { defaultValue: 'Pro Feature' })}
+          {PRO_FEATURE_LABELS[feature]}
         </Typography>
         <Typography variant="body2" color="text.secondary">
-          {message ??
-            t('license.locked.message', {
-              defaultValue: `${PRO_FEATURE_LABELS[feature]} is part of Biosphere Pro. Upgrade to unlock this feature.`,
-              feature: PRO_FEATURE_LABELS[feature],
-            })}
+          {message ?? FEATURE_DESCRIPTIONS[feature]}
         </Typography>
         <Button
           variant="contained"
@@ -72,7 +80,7 @@ export function LockedScreen({ feature, message }: LockedScreenProps) {
             },
           }}
         >
-          {t('license.locked.cta', { defaultValue: 'Upgrade to Pro' })}
+          Upgrade to Pro
         </Button>
       </Stack>
     </Box>
