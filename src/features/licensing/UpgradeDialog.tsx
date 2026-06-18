@@ -59,6 +59,19 @@ export function UpgradeDialog() {
     }
   }, [restore]);
 
+  /// 检测错误是否指示「应用不是从 Store 安装的」，这种场景 IAP API 永远会失败，
+  /// 应当引导用户去浏览器 Store 页面购买，而不是反复在应用内点击。
+  const isStoreUnavailableError = useMemo(() => {
+    if (!error) return false;
+    const lower = error.toLowerCase();
+    return (
+      lower.includes('not running as a microsoft store package') ||
+      lower.includes('no_package_identity') ||
+      lower.includes('0x80073d54') ||
+      lower.includes('only available on the windows microsoft store build')
+    );
+  }, [error]);
+
   const trialDaysLeft = status?.trialDaysRemaining ?? 0;
   const isTrial = status?.isTrial ?? false;
   const isExpired = status?.isExpired ?? false;
@@ -177,33 +190,65 @@ export function UpgradeDialog() {
             </Stack>
           </Box>
 
-          {error && (
+          {error && !isStoreUnavailableError && (
             <Alert severity="error" variant="outlined">
               {error}
             </Alert>
           )}
+          {isStoreUnavailableError && (
+            <Alert severity="info" variant="outlined">
+              {t('license.upgrade.sideloadHint', {
+                defaultValue:
+                  'In-app purchase is only available when the app is installed from Microsoft Store. Please use the "Buy on Microsoft Store" button below to complete the purchase in your browser.',
+              })}
+            </Alert>
+          )}
 
           <Stack spacing={1}>
-            <Button
-              variant="contained"
-              size="large"
-              fullWidth
-              disabled={loading || purchasing}
-              onClick={handlePurchase}
-              startIcon={purchasing ? <CircularProgress size={18} color="inherit" /> : undefined}
-              sx={{
-                py: 1.25,
-                fontWeight: 700,
-                background: 'linear-gradient(135deg, #6C63FF 0%, #4FC3F7 100%)',
-                '&:hover': {
-                  background: 'linear-gradient(135deg, #5B54E0 0%, #29B6F6 100%)',
-                },
-              }}
-            >
-              {purchasing
-                ? t('license.upgrade.processing', { defaultValue: 'Processing…' })
-                : t('license.upgrade.cta', { defaultValue: `Unlock Pro for $${PRO_PRICE_USD.toFixed(2)}` })}
-            </Button>
+            {!isStoreUnavailableError && (
+              <Button
+                variant="contained"
+                size="large"
+                fullWidth
+                disabled={loading || purchasing}
+                onClick={handlePurchase}
+                startIcon={purchasing ? <CircularProgress size={18} color="inherit" /> : undefined}
+                sx={{
+                  py: 1.25,
+                  fontWeight: 700,
+                  background: 'linear-gradient(135deg, #6C63FF 0%, #4FC3F7 100%)',
+                  '&:hover': {
+                    background: 'linear-gradient(135deg, #5B54E0 0%, #29B6F6 100%)',
+                  },
+                }}
+              >
+                {purchasing
+                  ? t('license.upgrade.processing', { defaultValue: 'Processing…' })
+                  : t('license.upgrade.cta', { defaultValue: `Unlock Pro for $${PRO_PRICE_USD.toFixed(2)}` })}
+              </Button>
+            )}
+            {isStoreUnavailableError && (
+              <Button
+                variant="contained"
+                size="large"
+                fullWidth
+                href={STORE_LISTING_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                sx={{
+                  py: 1.25,
+                  fontWeight: 700,
+                  background: 'linear-gradient(135deg, #6C63FF 0%, #4FC3F7 100%)',
+                  '&:hover': {
+                    background: 'linear-gradient(135deg, #5B54E0 0%, #29B6F6 100%)',
+                  },
+                }}
+              >
+                {t('license.upgrade.buyOnStore', {
+                  defaultValue: `Buy on Microsoft Store · $${PRO_PRICE_USD.toFixed(2)}`,
+                })}
+              </Button>
+            )}
             <Button
               variant="text"
               size="small"
@@ -212,15 +257,17 @@ export function UpgradeDialog() {
             >
               {t('license.upgrade.restore', { defaultValue: 'Restore previous purchase' })}
             </Button>
-            <Button
-              variant="text"
-              size="small"
-              href={STORE_LISTING_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {t('license.upgrade.viewOnStore', { defaultValue: 'View on Microsoft Store' })}
-            </Button>
+            {!isStoreUnavailableError && (
+              <Button
+                variant="text"
+                size="small"
+                href={STORE_LISTING_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {t('license.upgrade.viewOnStore', { defaultValue: 'View on Microsoft Store' })}
+              </Button>
+            )}
           </Stack>
 
           <Typography variant="caption" color="text.secondary" align="center">
