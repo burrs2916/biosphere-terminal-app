@@ -60,38 +60,21 @@ function hashString(s: string): number {
 }
 
 function getProviderColor(name: string): string {
-  return PROVIDER_COLORS[hashString(name) % PROVIDER_COLORS.length];
+  return PROVIDER_COLORS[hashString(name || '?') % PROVIDER_COLORS.length];
 }
 
-/// 供应商头像：有emoji显示emoji，否则显示首字母+自动配色
-function ProviderAvatar({ name, logo, size = 28 }: { name: string; logo?: string; size?: number }) {
-  if (logo && logo.trim()) {
-    return (
-      <Box sx={{ width: size, height: size, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-        <Typography sx={{ fontSize: size * 0.7, lineHeight: 1 }}>{logo}</Typography>
-      </Box>
-    );
-  }
-  const letter = (name || '?').charAt(0).toUpperCase();
-  const color = getProviderColor(name || '?');
+/// 供应商颜色圆点：根据名称哈希自动分配颜色，用于视觉区分
+function ProviderDot({ name, size = 10 }: { name: string; size?: number }) {
   return (
     <Box
       sx={{
         width: size,
         height: size,
         borderRadius: '50%',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        bgcolor: color,
-        color: '#fff',
-        fontSize: size * 0.45,
-        fontWeight: 700,
+        bgcolor: getProviderColor(name),
         flexShrink: 0,
       }}
-    >
-      {letter}
-    </Box>
+    />
   );
 }
 
@@ -109,19 +92,16 @@ function ProviderDialog({
   const { t } = useTranslation('agent');
   const [name, setName] = useState('');
   const [apiKey, setApiKey] = useState('');
-  const [logo, setLogo] = useState('');
   const [enabled, setEnabled] = useState(true);
 
   useEffect(() => {
     if (initial) {
       setName(initial.name);
       setApiKey(initial.apiKey);
-      setLogo(initial.logo);
       setEnabled(initial.enabled);
     } else {
       setName('');
       setApiKey('');
-      setLogo('');
       setEnabled(true);
     }
   }, [initial, open]);
@@ -133,7 +113,7 @@ function ProviderDialog({
       id: initial?.id || genId('pv'),
       name: name.trim(),
       apiKey: apiKey.trim(),
-      logo: logo.trim(),
+      logo: '',
       enabled,
       createdAt: initial?.createdAt || now,
       updatedAt: now,
@@ -147,18 +127,6 @@ function ProviderDialog({
       <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: '16px !important' }}>
         <TextField label={t('provider.name')} value={name} onChange={(e) => setName(e.target.value)} fullWidth size="small" placeholder={t('provider.name_placeholder')} />
         <TextField label={t('provider.api_key')} value={apiKey} onChange={(e) => setApiKey(e.target.value)} fullWidth size="small" type="password" placeholder="sk-..." />
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          <ProviderAvatar name={name || '?'} logo={logo} size={36} />
-          <TextField
-            label={t('provider.logo_emoji', { defaultValue: 'Emoji (optional)' })}
-            value={logo}
-            onChange={(e) => setLogo(e.target.value)}
-            size="small"
-            placeholder="🟢"
-            sx={{ flex: 1 }}
-            helperText={t('provider.logo_helper', { defaultValue: 'Leave empty to auto-generate from name' })}
-          />
-        </Box>
         <FormControlLabel control={<Switch checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />} label={t('agent.enabled')} />
       </DialogContent>
       <DialogActions>
@@ -586,9 +554,8 @@ export function ModelConfigPage() {
       >
         {PROVIDER_PRESET_KEYS.map((preset) => (
           <MenuItem key={preset.nameKey} onClick={() => handleAddPreset(preset)}>
-            <Box sx={{ mr: 1, display: 'flex', alignItems: 'center' }}>
-              <ProviderAvatar name={t(preset.nameKey)} logo={preset.logo} size={24} />
-            </Box>
+            <ProviderDot name={t(preset.nameKey)} size={10} />
+            <Box sx={{ ml: 1.5 }} />
             {t(preset.nameKey)}
           </MenuItem>
         ))}
@@ -627,7 +594,7 @@ export function ModelConfigPage() {
                   onClick={() => toggleProvider(provider.id)}
                 >
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <ProviderAvatar name={provider.name} logo={provider.logo} size={32} />
+                    <ProviderDot name={provider.name} size={10} />
                     <Box>
                       <Typography variant="body2" sx={{ fontWeight: 600 }}>{provider.name}</Typography>
                       <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
