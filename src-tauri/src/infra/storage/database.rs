@@ -571,6 +571,60 @@ impl Database {
             let _ = conn.execute_batch("ALTER TABLE ai_conversations ADD COLUMN compaction_summary TEXT NOT NULL DEFAULT '';");
         }
 
+        // Migration: Fix ai_agents foreign key constraint to allow ON DELETE SET NULL
+        // This prevents "FOREIGN KEY constraint failed" when deleting models
+        let has_correct_fk: bool = {
+            let result: String = conn.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='ai_agents'",
+                [],
+                |row| row.get(0),
+            ).unwrap_or_default();
+            result.contains("model_id) REFERENCES ai_models(id) ON DELETE SET NULL")
+        };
+
+        if !has_correct_fk {
+            conn.execute_batch(
+                "
+                -- Create new table with correct foreign key constraint
+                CREATE TABLE IF NOT EXISTS ai_agents_new (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    model_id TEXT,
+                    system_prompt TEXT NOT NULL DEFAULT '',
+                    temperature REAL NOT NULL DEFAULT 0.7,
+                    max_iterations INTEGER NOT NULL DEFAULT 10,
+                    tool_ids TEXT NOT NULL DEFAULT '[]',
+                    trigger_type TEXT NOT NULL DEFAULT 'manual',
+                    fallback_model_id TEXT,
+                    workspace_dir TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    FOREIGN KEY (model_id) REFERENCES ai_models(id) ON DELETE SET NULL,
+                    FOREIGN KEY (fallback_model_id) REFERENCES ai_models(id) ON DELETE SET NULL
+                );
+
+                -- Copy data from old table (convert '' to NULL for model_id and fallback_model_id)
+                INSERT INTO ai_agents_new (
+                    id, name, description, model_id, system_prompt, temperature,
+                    max_iterations, tool_ids, trigger_type, fallback_model_id,
+                    workspace_dir, created_at, updated_at
+                )
+                SELECT 
+                    id, name, description,
+                    CASE WHEN model_id = '' THEN NULL ELSE model_id END,
+                    system_prompt, temperature, max_iterations, tool_ids, trigger_type,
+                    CASE WHEN fallback_model_id = '' THEN NULL ELSE fallback_model_id END,
+                    workspace_dir, created_at, updated_at
+                FROM ai_agents;
+
+                -- Drop old table and rename new one
+                DROP TABLE ai_agents;
+                ALTER TABLE ai_agents_new RENAME TO ai_agents;
+                "
+            )?;
+        }
+
         Ok(())
     }
 }

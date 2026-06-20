@@ -39,7 +39,7 @@ export interface AgentDto {
   id: string;
   name: string;
   description: string;
-  modelId: string;
+  modelId: string | null;
   systemPrompt: string;
   temperature: number;
   maxIterations: number;
@@ -48,7 +48,7 @@ export interface AgentDto {
   autoConfirm: boolean;
   permissionMode: string;
   alwaysAllowedTools: string[];
-  fallbackModelId: string;
+  fallbackModelId: string | null;
   workspaceDir: string;
   createdAt: number;
   updatedAt: number;

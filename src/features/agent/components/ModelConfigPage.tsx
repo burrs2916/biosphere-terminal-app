@@ -589,7 +589,8 @@ export function ModelConfigPage() {
                           endpoints.some(e => e.providerId === provider.id && e.id === m.endpointId)
                         ).map(m => m.id);
                         const affectedAgents = agents.filter(a =>
-                          providerModels.includes(a.modelId) || providerModels.includes(a.fallbackModelId)
+                          (a.modelId && providerModels.includes(a.modelId)) ||
+                          (a.fallbackModelId && providerModels.includes(a.fallbackModelId))
                         );
                         let msg = t('provider.delete_confirm', { name: provider.name });
                         if (affectedAgents.length > 0) {

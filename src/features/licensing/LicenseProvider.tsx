@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useLicenseStore } from './licenseStore';
 
@@ -15,11 +15,14 @@ const LicenseContext = createContext<LicenseContextValue | null>(null);
 /// system-level surface) are reflected immediately when the user comes
 /// back to the app.
 export function LicenseProvider({ children }: { children: ReactNode }) {
-  const refresh = useLicenseStore((s) => s.refresh);
+  // 使用 getState().refresh 稳定引用，避免 store 重建时 refresh 变化
+  // 导致 useEffect 重新执行。refresh 内部已有 in-flight 去重。
+  const refreshRef = useRef(useLicenseStore.getState().refresh);
+  refreshRef.current = useLicenseStore.getState().refresh;
 
   useEffect(() => {
     // 1) Initial fetch on mount.
-    refresh().catch(() => {
+    refreshRef.current().catch(() => {
       /* swallowed: store already recorded the error */
     });
 
@@ -32,7 +35,7 @@ export function LicenseProvider({ children }: { children: ReactNode }) {
         const win = getCurrentWindow();
         const handler = await win.onFocusChanged(({ payload: focused }) => {
           if (focused) {
-            refresh().catch(() => {
+            refreshRef.current().catch(() => {
               /* swallowed */
             });
           }
@@ -53,9 +56,11 @@ export function LicenseProvider({ children }: { children: ReactNode }) {
         unlisten();
       }
     };
-  }, [refresh]);
+  }, []);
 
-  const value = useMemo<LicenseContextValue>(() => ({ refresh }), [refresh]);
+  const value = useMemo<LicenseContextValue>(() => ({
+    refresh: () => refreshRef.current(),
+  }), []);
 
   return <LicenseContext.Provider value={value}>{children}</LicenseContext.Provider>;
 }

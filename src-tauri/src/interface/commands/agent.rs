@@ -63,7 +63,7 @@ pub struct AgentDto {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub model_id: String,
+    pub model_id: Option<String>,
     pub system_prompt: String,
     pub temperature: f64,
     pub max_iterations: i32,
@@ -72,7 +72,7 @@ pub struct AgentDto {
     pub auto_confirm: bool,
     pub permission_mode: String,
     pub always_allowed_tools: Vec<String>,
-    pub fallback_model_id: String,
+    pub fallback_model_id: Option<String>,
     pub workspace_dir: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -385,7 +385,9 @@ pub async fn run_agent(
     let agent = service.get_agent_by_id(&agent_id)?
         .ok_or_else(|| "Agent not found".to_string())?;
 
-    let model = service.get_model_by_id(&agent.model_id)?
+    let model_id = agent.model_id.as_ref()
+        .ok_or_else(|| "Agent has no model configured".to_string())?;
+    let model = service.get_model_by_id(model_id)?
         .ok_or_else(|| "Model not found".to_string())?;
 
     let endpoint = service.get_endpoint_by_id(&model.endpoint_id)?
@@ -405,8 +407,8 @@ pub async fn run_agent(
     let llm_provider = crate::plugins::ai_agent::openai_provider::OpenAiCompatProvider::new(config);
     let llm_provider_arc: Arc<dyn crate::plugins::ai_agent::provider::LlmProvider> = Arc::new(llm_provider);
 
-    let fallback_provider_and_model: Option<(Arc<dyn crate::plugins::ai_agent::provider::LlmProvider>, String)> = if !agent.fallback_model_id.is_empty() {
-        if let Ok(Some(fb_model)) = service.get_model_by_id(&agent.fallback_model_id) {
+    let fallback_provider_and_model: Option<(Arc<dyn crate::plugins::ai_agent::provider::LlmProvider>, String)> = if let Some(fb_model_id) = &agent.fallback_model_id {
+        if let Ok(Some(fb_model)) = service.get_model_by_id(fb_model_id) {
             if let Ok(Some(fb_endpoint)) = service.get_endpoint_by_id(&fb_model.endpoint_id) {
                 if let Ok(Some(fb_provider_row)) = service.get_provider_by_id(&fb_endpoint.provider_id) {
                     let fb_config = crate::plugins::ai_agent::provider::ProviderConfig {
@@ -1278,7 +1280,9 @@ Generate 3-5 DIFFERENT and UNIQUE analysis scenarios. Respond ONLY with valid JS
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
     );
 
-    let model = service.get_model_by_id(&agent.model_id)?
+    let model_id = agent.model_id.as_ref()
+        .ok_or_else(|| "Agent has no model configured".to_string())?;
+    let model = service.get_model_by_id(model_id)?
         .ok_or_else(|| "Model not found".to_string())?;
 
     let endpoint = service.get_endpoint_by_id(&model.endpoint_id)?

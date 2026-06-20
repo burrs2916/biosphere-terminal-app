@@ -22,7 +22,7 @@ interface AgentFormData {
   id: string;
   name: string;
   description: string;
-  modelId: string;
+  modelId: string | null;
   systemPrompt: string;
   temperature: number;
   maxIterations: number;
@@ -31,7 +31,7 @@ interface AgentFormData {
   autoConfirm: boolean;
   permissionMode: string;
   alwaysAllowedTools: string[];
-  fallbackModelId: string;
+  fallbackModelId: string | null;
   workspaceDir: string;
   createdAt: number;
 }
@@ -41,7 +41,7 @@ function defaultFormData(): AgentFormData {
     id: '',
     name: '',
     description: '',
-    modelId: '',
+    modelId: null,
     systemPrompt: '',
     temperature: 0.7,
     maxIterations: 10,
@@ -50,7 +50,7 @@ function defaultFormData(): AgentFormData {
     autoConfirm: false,
     permissionMode: 'confirm',
     alwaysAllowedTools: [],
-    fallbackModelId: '',
+    fallbackModelId: null,
     workspaceDir: '',
     createdAt: 0,
   };
@@ -108,7 +108,7 @@ export function AgentManager() {
       autoConfirm: agent.autoConfirm || false,
       permissionMode: agent.permissionMode || 'confirm',
       alwaysAllowedTools: agent.alwaysAllowedTools || [],
-      fallbackModelId: agent.fallbackModelId || '',
+      fallbackModelId: agent.fallbackModelId,
       workspaceDir: agent.workspaceDir || '',
       createdAt: agent.createdAt || 0,
     });
@@ -387,9 +387,9 @@ export function AgentManager() {
                     <FormControl fullWidth size="small" error={!editing.modelId}>
                       <InputLabel>{t('agent.model_label')}</InputLabel>
                       <Select
-                        value={editing.modelId}
+                        value={editing.modelId || ''}
                         label={t('agent.model_label')}
-                        onChange={(e) => setEditing({ ...editing, modelId: e.target.value })}
+                        onChange={(e) => setEditing({ ...editing, modelId: e.target.value || null })}
                       >
                         <MenuItem value="">{t('agent.select_model')}</MenuItem>
                         {enabledModels.map((model) => (
@@ -472,9 +472,9 @@ export function AgentManager() {
                     <FormControl fullWidth size="small">
                       <InputLabel>Fallback Model</InputLabel>
                       <Select
-                        value={editing.fallbackModelId}
+                        value={editing.fallbackModelId || ''}
                         label="Fallback Model"
-                        onChange={(e) => setEditing({ ...editing, fallbackModelId: e.target.value })}
+                        onChange={(e) => setEditing({ ...editing, fallbackModelId: e.target.value || null })}
                       >
                         <MenuItem value="">
                           <em>None</em>

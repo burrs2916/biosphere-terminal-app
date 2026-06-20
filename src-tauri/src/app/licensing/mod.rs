@@ -158,17 +158,21 @@ impl LicensingService {
             let local_pro = state.pro_unlocked_at.is_some();
             match (owned, local_pro) {
                 (true, false) => {
-                    state.pro_unlocked_at = Some(Utc::now().to_rfc3339());
-                    state.store_order_id = Some(format!(
+                    // 先构造新状态并写盘，写盘成功后才修改内存状态，确保两者一致。
+                    let mut new_state = state.clone();
+                    new_state.pro_unlocked_at = Some(Utc::now().to_rfc3339());
+                    new_state.store_order_id = Some(format!(
                         "store-sync:{}:{}",
                         PRO_LIFETIME_PRODUCT_ID,
                         Utc::now().to_rfc3339()
                     ));
-                    let snapshot = state.clone();
-                    drop(state);
-                    if let Err(e) = Self::save_state(&self.state_path, &snapshot) {
+                    if let Err(e) = Self::save_state(&self.state_path, &new_state) {
                         tracing::warn!("[licensing] failed to persist store sync: {}", e);
+                        // 写盘失败：不修改内存状态，保持与磁盘一致。
+                        return;
                     }
+                    *state = new_state;
+                    drop(state);
                     tracing::info!("[licensing] store sync: Pro auto-unlocked from Store entitlement");
                 }
                 (false, true) => {
@@ -210,13 +214,17 @@ impl LicensingService {
                         return;
                     }
 
-                    state.pro_unlocked_at = None;
-                    state.store_order_id = None;
-                    let snapshot = state.clone();
-                    drop(state);
-                    if let Err(e) = Self::save_state(&self.state_path, &snapshot) {
+                    // 先构造新状态并写盘，写盘成功后才修改内存状态，确保两者一致。
+                    let mut new_state = state.clone();
+                    new_state.pro_unlocked_at = None;
+                    new_state.store_order_id = None;
+                    if let Err(e) = Self::save_state(&self.state_path, &new_state) {
                         tracing::warn!("[licensing] failed to persist store revoke: {}", e);
+                        // 写盘失败：不修改内存状态，保持与磁盘一致。
+                        return;
                     }
+                    *state = new_state;
+                    drop(state);
                     tracing::warn!(
                         "[licensing] store sync: Pro revoked because no entitlement was \
                         found after {}h grace period",
@@ -245,8 +253,18 @@ impl LicensingService {
         }
         let json = serde_json::to_string_pretty(state)
             .map_err(|e| format!("serialize license state: {}", e))?;
-        std::fs::write(path, json)
-            .map_err(|e| format!("write license state: {}", e))?;
+        // 原子写入：先写到临时文件，再 rename 覆盖目标文件。
+        // 这样即使写入过程中崩溃（断电、panic），目标文件也保持完整。
+        // rename 在同一文件系统上是原子的（POSIX / Windows NTFS 均保证）。
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, &json)
+            .map_err(|e| format!("write license state (tmp): {}", e))?;
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| {
+                // rename 失败时尝试清理临时文件，避免残留。
+                let _ = std::fs::remove_file(&tmp_path);
+                format!("rename license state: {}", e)
+            })?;
         Ok(())
     }
 
@@ -399,11 +417,12 @@ impl LicensingService {
 
         Self::save_state(&self.state_path, &new_state)?;
 
+        let status = Self::compute_status(&new_state);
         *state = new_state;
         drop(state);
 
         tracing::info!("[licensing] Pro unlocked");
-        Ok(Self::compute_status(&new_state))
+        Ok(status)
     }
 
     /// Reset the license state. Used by restore-purchase flows when the Store
@@ -420,11 +439,12 @@ impl LicensingService {
 
         Self::save_state(&self.state_path, &new_state)?;
 
+        let status = Self::compute_status(&new_state);
         *state = new_state;
         drop(state);
 
         tracing::info!("[licensing] license state reset");
-        Ok(Self::compute_status(&new_state))
+        Ok(status)
     }
 
     /// Extend the trial by a given number of days. Useful as a promotional
@@ -449,10 +469,11 @@ impl LicensingService {
 
         Self::save_state(&self.state_path, &new_state)?;
 
+        let status = Self::compute_status(&new_state);
         *state = new_state;
         drop(state);
 
         tracing::info!("[licensing] trial extended by {} days", days);
-        Ok(Self::compute_status(&new_state))
+        Ok(status)
     }
 }

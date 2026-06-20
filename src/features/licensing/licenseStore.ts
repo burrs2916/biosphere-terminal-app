@@ -43,23 +43,47 @@ interface LicenseState {
   canUse: (feature: ProFeature) => boolean;
 }
 
+/// Module-level in-flight marker for refresh(). 防止快速切换窗口时
+/// 多个并发 refresh 请求产生竞态（后到的旧响应覆盖新响应）。
+/// 放在模块作用域而非 store state，避免触发不必要的重渲染。
+let refreshInFlight: Promise<void> | null = null;
+
+/// 记录是否已经至少尝试过一次加载 status。
+/// canUse 在 status === null 时乐观放行以避免启动闪烁，
+/// 但若后端持续故障，我们需要在尝试加载后回退到保守拒绝，
+/// 防止 Pro 功能永久免费开放。
+let refreshAttempted = false;
+
 export const useLicenseStore = create<LicenseState>((set, get) => ({
   status: null,
   loading: false,
   error: null,
 
   refresh: async () => {
-    set({ loading: true, error: null });
-    try {
-      const status = await checkProStatus();
-      set({ status, loading: false });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      // 保留原有 status，不重置为 DEFAULT_STATUS。
-      // 重置会导致 Pro/Trial 用户在后端调用失败时被误判为 free，
-      // 启动时出现 LockedScreen 闪烁。error 仍被记录供 UI 显示。
-      set({ loading: false, error: message });
+    // 如果已有 refresh 在进行中，复用同一个 Promise，避免并发竞态。
+    if (refreshInFlight) {
+      return refreshInFlight;
     }
+    const run = async () => {
+      set({ loading: true, error: null });
+      try {
+        const status = await checkProStatus();
+        set({ status, loading: false });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        // 保留原有 status，不重置为 DEFAULT_STATUS。
+        // 重置会导致 Pro/Trial 用户在后端调用失败时被误判为 free，
+        // 启动时出现 LockedScreen 闪烁。error 仍被记录供 UI 显示。
+        set({ loading: false, error: message });
+      } finally {
+        // 标记已尝试加载，后续 canUse 不再乐观放行。
+        refreshAttempted = true;
+      }
+    };
+    refreshInFlight = run().finally(() => {
+      refreshInFlight = null;
+    });
+    return refreshInFlight;
   },
 
   purchase: async () => {
@@ -112,7 +136,11 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
     // 我们 **乐观放行** —— 否则刚启动应用的 trial / pro 用户会看到 LockedScreen
     // 闪烁一下再变正常，体验非常糟糕。
     // 真正的拦截发生在 status 加载完成后，由 React 自动重渲染收紧权限。
-    if (!status) return true;
+    if (!status) {
+      // 若已经尝试过加载但仍无 status（后端持续故障），回退到保守拒绝，
+      // 防止 Pro 功能永久免费开放。首次加载期间（refreshAttempted=false）仍乐观放行。
+      return !refreshAttempted;
+    }
     // Pro users can use everything.
     if (status.isPro) return true;
     // During the trial, all Pro features are unlocked.

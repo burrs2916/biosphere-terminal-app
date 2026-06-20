@@ -52,7 +52,7 @@ pub struct AiAgentRow {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub model_id: String,
+    pub model_id: Option<String>,
     pub system_prompt: String,
     pub temperature: f64,
     pub max_iterations: i32,
@@ -61,7 +61,7 @@ pub struct AiAgentRow {
     pub auto_confirm: bool,
     pub permission_mode: String,
     pub always_allowed_tools: Vec<String>,
-    pub fallback_model_id: String,
+    pub fallback_model_id: Option<String>,
     pub workspace_dir: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -481,9 +481,10 @@ impl AiModelRepo {
     pub fn delete(db: &Database, id: &str) -> Result<(), String> {
         let conn = db.conn();
         // Unlink agents that reference this model (both model_id and fallback_model_id)
-        conn.execute("UPDATE ai_agents SET model_id = '' WHERE model_id = ?1", params![id])
+        // Use NULL instead of empty string to comply with foreign key constraints
+        conn.execute("UPDATE ai_agents SET model_id = NULL WHERE model_id = ?1", params![id])
             .map_err(|e| e.to_string())?;
-        conn.execute("UPDATE ai_agents SET fallback_model_id = '' WHERE fallback_model_id = ?1", params![id])
+        conn.execute("UPDATE ai_agents SET fallback_model_id = NULL WHERE fallback_model_id = ?1", params![id])
             .map_err(|e| e.to_string())?;
         // Delete the model and verify a row was actually removed
         let rows = conn.execute("DELETE FROM ai_models WHERE id = ?1", params![id])
@@ -536,7 +537,7 @@ impl AiAgentRepo {
                 let permission_mode: String = row.get(10)?;
                 let always_allowed_str: String = row.get(11)?;
                 let always_allowed_tools: Vec<String> = serde_json::from_str(&always_allowed_str).unwrap_or_default();
-                let fallback_model_id: String = row.get(12)?;
+                let fallback_model_id: Option<String> = row.get(12)?;
                 let workspace_dir: String = row.get(13)?;
                 Ok(AiAgentRow {
                     id: row.get(0)?,
