@@ -33,20 +33,27 @@ export function UpgradeDialog() {
   const restore = useLicenseStore((s) => s.restore);
   const loading = useLicenseStore((s) => s.loading);
   const error = useLicenseStore((s) => s.error);
+  const clearError = useLicenseStore((s) => s.clearError);
 
   const [purchasing, setPurchasing] = useState(false);
+
+  // 关闭对话框时清空错误状态，避免下次打开时显示上次的错误。
+  const handleClose = useCallback(() => {
+    clearError();
+    closeDialog();
+  }, [clearError, closeDialog]);
 
   const handlePurchase = useCallback(async () => {
     setPurchasing(true);
     try {
       await purchase();
-      closeDialog();
+      handleClose();
     } catch {
       // Error is recorded in the store and shown below.
     } finally {
       setPurchasing(false);
     }
-  }, [purchase, closeDialog]);
+  }, [purchase, handleClose]);
 
   const handleRestore = useCallback(async () => {
     setPurchasing(true);
@@ -107,7 +114,7 @@ export function UpgradeDialog() {
   return (
     <Dialog
       open={open}
-      onClose={closeDialog}
+      onClose={handleClose}
       maxWidth="sm"
       fullWidth
       slotProps={{
@@ -127,7 +134,7 @@ export function UpgradeDialog() {
             {t('license.upgrade.title', { defaultValue: 'Biosphere Pro' })}
           </Typography>
         </Stack>
-        <IconButton size="small" onClick={closeDialog} aria-label={t('common.close', { defaultValue: 'Close' })}>
+        <IconButton size="small" onClick={handleClose} aria-label={t('common.close', { defaultValue: 'Close' })}>
           <XIcon size={18} />
         </IconButton>
       </DialogTitle>

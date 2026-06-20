@@ -160,5 +160,26 @@
     "bell_none": "无",
     "bell_visual": "视觉",
     "bell_sound": "声音"
+  },
+  "license": {
+    "upgrade": {
+      "title": "Biosphere Pro",
+      "headlineTrial": "您的试用将在 {{trialDaysLeft}} 天后结束。解锁 Pro 以保留全部功能。",
+      "headlineExpired": "您的试用已结束。升级到 Pro 以继续使用。",
+      "headlineDefault": "解锁 Biosphere Pro",
+      "subheadlineFeature": "使用此功能需要 Pro：{{feature}}",
+      "subheadlineDefault": "一次性购买，终身使用，无需订阅。",
+      "featuresLabel": "Pro 全部功能",
+      "requiredChip": "需要 Pro",
+      "oneTime": "一次性",
+      "lifetimeAccess": "终身使用",
+      "sideloadHint": "应用内购买仅在从 Microsoft Store 安装的应用中可用。请使用下方的「在 Microsoft Store 购买」按钮在浏览器中完成购买。",
+      "processing": "处理中…",
+      "cta": "解锁 Pro · $9.99",
+      "buyOnStore": "在 Microsoft Store 购买 · $9.99",
+      "restore": "恢复之前的购买",
+      "viewOnStore": "在 Microsoft Store 查看",
+      "disclaimer": "终身许可证与您的 Microsoft 账户绑定。在同一账户上重新安装将自动恢复 Pro。"
+    }
   }
 }

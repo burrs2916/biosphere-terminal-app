@@ -391,35 +391,40 @@ impl LicensingService {
         license_key: Option<String>,
     ) -> Result<LicenseStatus, String> {
         let mut state = self.state.write().await;
-        state.pro_unlocked_at = Some(Utc::now().to_rfc3339());
-        state.store_order_id = store_order_id;
-        state.license_key = license_key;
-        let snapshot = state.clone();
+        // 先构造新状态并写盘，写盘成功后才修改内存状态，确保两者一致。
+        let mut new_state = state.clone();
+        new_state.pro_unlocked_at = Some(Utc::now().to_rfc3339());
+        new_state.store_order_id = store_order_id;
+        new_state.license_key = license_key;
+
+        Self::save_state(&self.state_path, &new_state)?;
+
+        *state = new_state;
         drop(state);
 
-        Self::save_state(&self.state_path, &snapshot)?;
         tracing::info!("[licensing] Pro unlocked");
-
-        Ok(Self::compute_status(&snapshot))
+        Ok(Self::compute_status(&new_state))
     }
 
     /// Reset the license state. Used by restore-purchase flows when the Store
     /// reports no active entitlement, or for development/testing.
     pub async fn reset(&self) -> Result<LicenseStatus, String> {
         let mut state = self.state.write().await;
-        *state = LicenseState {
+        // 先构造新状态并写盘，写盘成功后才修改内存状态，确保两者一致。
+        let new_state = LicenseState {
             trial_started_at: Some(Utc::now().to_rfc3339()),
             pro_unlocked_at: None,
             store_order_id: None,
             license_key: None,
         };
-        let snapshot = state.clone();
+
+        Self::save_state(&self.state_path, &new_state)?;
+
+        *state = new_state;
         drop(state);
 
-        Self::save_state(&self.state_path, &snapshot)?;
         tracing::info!("[licensing] license state reset");
-
-        Ok(Self::compute_status(&snapshot))
+        Ok(Self::compute_status(&new_state))
     }
 
     /// Extend the trial by a given number of days. Useful as a promotional
@@ -436,15 +441,18 @@ impl LicensingService {
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or(now);
+        // 先构造新状态并写盘，写盘成功后才修改内存状态，确保两者一致。
+        let mut new_state = state.clone();
         // Shift the start time forward by `days` to extend the window.
         let new_start = base + chrono::Duration::days(days);
-        state.trial_started_at = Some(new_start.to_rfc3339());
-        let snapshot = state.clone();
+        new_state.trial_started_at = Some(new_start.to_rfc3339());
+
+        Self::save_state(&self.state_path, &new_state)?;
+
+        *state = new_state;
         drop(state);
 
-        Self::save_state(&self.state_path, &snapshot)?;
         tracing::info!("[licensing] trial extended by {} days", days);
-
-        Ok(Self::compute_status(&snapshot))
+        Ok(Self::compute_status(&new_state))
     }
 }

@@ -160,5 +160,26 @@
     "bell_none": "None",
     "bell_visual": "Visual",
     "bell_sound": "Sound"
+  },
+  "license": {
+    "upgrade": {
+      "title": "Biosphere Pro",
+      "headlineTrial": "Your trial ends in {{trialDaysLeft}} day(s). Unlock Pro to keep everything.",
+      "headlineExpired": "Your trial has ended. Upgrade to Pro to continue.",
+      "headlineDefault": "Unlock Biosphere Pro",
+      "subheadlineFeature": "Pro is required for: {{feature}}",
+      "subheadlineDefault": "One-time purchase. Lifetime access. No subscription.",
+      "featuresLabel": "Everything in Pro",
+      "requiredChip": "Required",
+      "oneTime": "one-time",
+      "lifetimeAccess": "Lifetime access",
+      "sideloadHint": "In-app purchase is only available when the app is installed from Microsoft Store. Please use the \"Buy on Microsoft Store\" button below to complete the purchase in your browser.",
+      "processing": "Processing…",
+      "cta": "Unlock Pro for $9.99",
+      "buyOnStore": "Buy on Microsoft Store · $9.99",
+      "restore": "Restore previous purchase",
+      "viewOnStore": "View on Microsoft Store",
+      "disclaimer": "Lifetime license is tied to your Microsoft account. Reinstalling on the same account restores Pro automatically."
+    }
   }
 }

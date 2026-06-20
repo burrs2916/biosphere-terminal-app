@@ -36,21 +36,12 @@ interface LicenseState {
   restore: () => Promise<void>;
   /// Reset the license state (development/testing only).
   reset: () => Promise<void>;
+  /// Clear the last error. Used when closing the upgrade dialog to avoid
+  /// showing stale errors on the next open.
+  clearError: () => void;
   /// Convenience selector: is the user allowed to use a Pro feature?
   canUse: (feature: ProFeature) => boolean;
 }
-
-const DEFAULT_STATUS: LicenseStatus = {
-  tier: 'free',
-  isPro: false,
-  isTrial: false,
-  isExpired: false,
-  trialDaysRemaining: 0,
-  trialStartedAt: null,
-  trialExpiresAt: null,
-  proUnlockedAt: null,
-  reason: 'Not initialized',
-};
 
 export const useLicenseStore = create<LicenseState>((set, get) => ({
   status: null,
@@ -64,9 +55,10 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
       set({ status, loading: false });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // 保留原有 status，不重置为 DEFAULT_STATUS。
+      // 重置会导致 Pro/Trial 用户在后端调用失败时被误判为 free，
+      // 启动时出现 LockedScreen 闪烁。error 仍被记录供 UI 显示。
       set({ loading: false, error: message });
-      // Fall back to a default status so the UI can still render.
-      set({ status: DEFAULT_STATUS });
     }
   },
 
@@ -106,6 +98,10 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
       set({ loading: false, error: message });
       throw err;
     }
+  },
+
+  clearError: () => {
+    set({ error: null });
   },
 
   canUse: (feature: ProFeature) => {

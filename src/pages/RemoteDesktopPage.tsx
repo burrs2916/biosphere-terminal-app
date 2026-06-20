@@ -82,6 +82,8 @@ export function RemoteDesktopPage() {
   const sessionIdRef = useRef<string | null>(null);
   const terminalRef = useRef<TerminalEmulatorHandle | null>(null);
   const sshRef = useRef<SshConnectionInfo | null>(null);
+  // 跟踪最新的 session 值，供卸载清理函数使用，避免 useEffect 闭包陷阱。
+  const sessionRef = useRef<RemoteDesktopSession | null>(null);
 
   const bgColor = isDark ? '#0d1117' : '#f5f5f5';
   const cardBg = isDark ? '#161B22' : '#ffffff';
@@ -430,6 +432,7 @@ export function RemoteDesktopPage() {
         const desktopSession = await createRemoteDesktop(`rd-${Date.now()}`, sshRef.current!, result.vncPort);
         console.log('[RemoteDesktop] createRemoteDesktop result:', JSON.stringify(desktopSession));
         setSession(desktopSession);
+        sessionRef.current = desktopSession;
         updateStep('ready', { status: 'done', description: 'Connected!' });
         setStep('viewer');
       } else {
@@ -454,6 +457,7 @@ export function RemoteDesktopPage() {
       sessionIdRef.current = null;
     }
     setSession(null);
+    sessionRef.current = null;
     setStep('config');
     setSetupSteps([]);
     setCurrentPhase('checking');
@@ -461,8 +465,11 @@ export function RemoteDesktopPage() {
 
   useEffect(() => {
     return () => {
-      if (session) {
-        closeRemoteDesktop(session.id).catch(() => {});
+      // 使用 sessionRef 而非 session 状态，避免闭包捕获挂载时的初始值（null）。
+      // 这样组件卸载时能正确关闭后续创建的远程桌面会话。
+      const currentSession = sessionRef.current;
+      if (currentSession) {
+        closeRemoteDesktop(currentSession.id).catch(() => {});
       }
       if (setupTerminalIdRef.current) {
         killTerminal(setupTerminalIdRef.current).catch(() => {});
