@@ -6,17 +6,17 @@ import {
   Alert, Snackbar, CircularProgress, MenuItem, Select, FormControl, InputLabel, Menu,
 } from '@mui/material';
 import {
-  Plus as PlusIcon,
-  PencilSimple as EditIcon,
-  Trash as DeleteIcon,
-  Cloud as CloudIcon,
-  Plugs as HubIcon,
-  Robot as SmartToyIcon,
-  CheckCircle as CheckCircleIcon,
-  Warning as ErrorIcon,
-  Play as PlayArrowIcon,
-  CaretDown as ExpandMoreIcon,
-  CaretUp as ExpandLessIcon,
+  PlusIcon,
+  PencilSimpleIcon,
+  TrashIcon,
+  CloudIcon,
+  PlugsIcon,
+  RobotIcon,
+  CheckCircleIcon,
+  WarningIcon,
+  PlayIcon,
+  CaretDownIcon,
+  CaretUpIcon,
 } from '@phosphor-icons/react';
 import { useAgentStore, genId } from '../store/agentStore';
 import type { ProviderDto, EndpointDto, ModelDto } from '../../../proto/agent';
@@ -580,7 +580,7 @@ export function ModelConfigPage() {
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }} onClick={(e) => e.stopPropagation()}>
                     <Tooltip title={t('provider.edit')}>
                       <IconButton size="small" onClick={() => setProviderDialog({ open: true, data: provider })}>
-                        <EditIcon size={14} />
+                        <PencilSimpleIcon size={14} />
                       </IconButton>
                     </Tooltip>
                     <Tooltip title={t('provider.delete')}>
@@ -610,11 +610,11 @@ export function ModelConfigPage() {
                           },
                         });
                       }}>
-                        <DeleteIcon size={14} color={errorColor} />
+                        <TrashIcon size={14} color={errorColor} />
                       </IconButton>
                     </Tooltip>
                     <IconButton size="small" onClick={() => toggleProvider(provider.id)}>
-                      {isExpanded ? <ExpandLessIcon size={14} /> : <ExpandMoreIcon size={14} />}
+                      {isExpanded ? <CaretUpIcon size={14} /> : <CaretDownIcon size={14} />}
                     </IconButton>
                   </Box>
                 </Box>
@@ -662,7 +662,7 @@ export function ModelConfigPage() {
                                 onClick={() => toggleEndpoint(endpoint.id)}
                               >
                                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
-                                  <HubIcon size={14} color="#FFD740" weight="fill" />
+                                  <PlugsIcon size={14} color="#FFD740" weight="fill" />
                                   <Box>
                                     <Typography variant="caption" sx={{ fontWeight: 600 }}>{endpoint.name}</Typography>
                                     <Typography variant="caption" color="text.secondary" sx={{ display: 'block', fontSize: 9 }}>
@@ -674,17 +674,17 @@ export function ModelConfigPage() {
                                   {testResult && (
                                     testResult.success
                                       ? <CheckCircleIcon size={12} color={successColor} weight="fill" />
-                                      : <ErrorIcon size={12} color={errorColor} weight="fill" />
+                                      : <WarningIcon size={12} color={errorColor} weight="fill" />
                                   )}
                                   {isTesting && <CircularProgress size={12} />}
                                   <Tooltip title={t('endpoint.test_connection')}>
                                     <IconButton size="small" sx={{ p: 0.25 }} onClick={() => handleTestConnection(endpoint.id)}>
-                                      <PlayArrowIcon size={12} />
+                                      <PlayIcon size={12} />
                                     </IconButton>
                                   </Tooltip>
                                   <Tooltip title={t('endpoint.edit')}>
                                     <IconButton size="small" sx={{ p: 0.25 }} onClick={() => setEndpointDialog({ open: true, data: endpoint, providerId: provider.id })}>
-                                      <EditIcon size={12} />
+                                      <PencilSimpleIcon size={12} />
                                     </IconButton>
                                   </Tooltip>
                                   <Tooltip title={t('endpoint.delete')}>
@@ -717,11 +717,11 @@ export function ModelConfigPage() {
                                         },
                                       });
                                     }}>
-                                      <DeleteIcon size={12} color={errorColor} />
+                                      <TrashIcon size={12} color={errorColor} />
                                     </IconButton>
                                   </Tooltip>
                                   <IconButton size="small" sx={{ p: 0.25 }} onClick={() => toggleEndpoint(endpoint.id)}>
-                                    {isEndpointExpanded ? <ExpandLessIcon size={12} /> : <ExpandMoreIcon size={12} />}
+                                    {isEndpointExpanded ? <CaretUpIcon size={12} /> : <CaretDownIcon size={12} />}
                                   </IconButton>
                                 </Box>
                               </Box>
@@ -768,7 +768,7 @@ export function ModelConfigPage() {
                                             }}
                                           >
                                             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0, flex: 1 }}>
-                                              <SmartToyIcon size={12} color={model.enabled ? primaryColor : disabledColor} weight="fill" />
+                                              <RobotIcon size={12} color={model.enabled ? primaryColor : disabledColor} weight="fill" />
                                               <Box sx={{ minWidth: 0, flex: 1 }}>
                                                 <Typography variant="caption" sx={{ fontWeight: 600, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                                   {model.name}
@@ -784,16 +784,16 @@ export function ModelConfigPage() {
                                               {modelTestResult && (
                                                 modelTestResult.success
                                                   ? <CheckCircleIcon size={10} color={successColor} weight="fill" />
-                                                  : <ErrorIcon size={10} color={errorColor} weight="fill" />
+                                                  : <WarningIcon size={10} color={errorColor} weight="fill" />
                                               )}
                                               {isModelTesting && <CircularProgress size={10} />}
                                               <Tooltip title={t('model.test')}>
                                                 <IconButton size="small" sx={{ p: 0.15 }} onClick={(e) => { e.stopPropagation(); handleTestModel(model.id); }}>
-                                                  <PlayArrowIcon size={10} />
+                                                  <PlayIcon size={10} />
                                                 </IconButton>
                                               </Tooltip>
                                               <IconButton size="small" sx={{ p: 0.15 }} onClick={() => setModelDialog({ open: true, data: model, endpointId: endpoint.id })}>
-                                                <EditIcon size={10} />
+                                                <PencilSimpleIcon size={10} />
                                               </IconButton>
                                               <IconButton size="small" sx={{ p: 0.15 }} onClick={() => {
                                                 const affectedAgents = agents.filter(a =>
@@ -817,7 +817,7 @@ export function ModelConfigPage() {
                                                   },
                                                 });
                                               }}>
-                                                <DeleteIcon size={10} color={errorColor} />
+                                                <TrashIcon size={10} color={errorColor} />
                                               </IconButton>
                                             </Box>
                                           </Box>
