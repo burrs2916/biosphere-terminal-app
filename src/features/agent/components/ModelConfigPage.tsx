@@ -44,6 +44,57 @@ const PROVIDER_PRESET_KEYS = [
   { nameKey: 'preset.ollama', logo: '🦙' },
 ];
 
+/// 从字符串生成确定性颜色（相同名称永远得到相同颜色）
+const PROVIDER_COLORS = [
+  '#6C63FF', '#4FC3F7', '#00E676', '#FFD740', '#FF6B6B',
+  '#26C6DA', '#AB47BC', '#FFA726', '#66BB6A', '#5C6BC0',
+  '#EC407A', '#7E57C2', '#29B6F6', '#9CCC65', '#8D6E63',
+];
+
+function hashString(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+
+function getProviderColor(name: string): string {
+  return PROVIDER_COLORS[hashString(name) % PROVIDER_COLORS.length];
+}
+
+/// 供应商头像：有emoji显示emoji，否则显示首字母+自动配色
+function ProviderAvatar({ name, logo, size = 28 }: { name: string; logo?: string; size?: number }) {
+  if (logo && logo.trim()) {
+    return (
+      <Box sx={{ width: size, height: size, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        <Typography sx={{ fontSize: size * 0.7, lineHeight: 1 }}>{logo}</Typography>
+      </Box>
+    );
+  }
+  const letter = (name || '?').charAt(0).toUpperCase();
+  const color = getProviderColor(name || '?');
+  return (
+    <Box
+      sx={{
+        width: size,
+        height: size,
+        borderRadius: '50%',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        bgcolor: color,
+        color: '#fff',
+        fontSize: size * 0.45,
+        fontWeight: 700,
+        flexShrink: 0,
+      }}
+    >
+      {letter}
+    </Box>
+  );
+}
+
 function ProviderDialog({
   open,
   onClose,
@@ -96,7 +147,18 @@ function ProviderDialog({
       <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: '16px !important' }}>
         <TextField label={t('provider.name')} value={name} onChange={(e) => setName(e.target.value)} fullWidth size="small" placeholder={t('provider.name_placeholder')} />
         <TextField label={t('provider.api_key')} value={apiKey} onChange={(e) => setApiKey(e.target.value)} fullWidth size="small" type="password" placeholder="sk-..." />
-        <TextField label={t('provider.logo_emoji')} value={logo} onChange={(e) => setLogo(e.target.value)} fullWidth size="small" placeholder="🟢" />
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+          <ProviderAvatar name={name || '?'} logo={logo} size={36} />
+          <TextField
+            label={t('provider.logo_emoji', { defaultValue: 'Emoji (optional)' })}
+            value={logo}
+            onChange={(e) => setLogo(e.target.value)}
+            size="small"
+            placeholder="🟢"
+            sx={{ flex: 1 }}
+            helperText={t('provider.logo_helper', { defaultValue: 'Leave empty to auto-generate from name' })}
+          />
+        </Box>
         <FormControlLabel control={<Switch checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />} label={t('agent.enabled')} />
       </DialogContent>
       <DialogActions>
@@ -524,7 +586,9 @@ export function ModelConfigPage() {
       >
         {PROVIDER_PRESET_KEYS.map((preset) => (
           <MenuItem key={preset.nameKey} onClick={() => handleAddPreset(preset)}>
-            <Box sx={{ mr: 1, fontSize: 16 }}>{preset.logo}</Box>
+            <Box sx={{ mr: 1, display: 'flex', alignItems: 'center' }}>
+              <ProviderAvatar name={t(preset.nameKey)} logo={preset.logo} size={24} />
+            </Box>
             {t(preset.nameKey)}
           </MenuItem>
         ))}
@@ -563,7 +627,7 @@ export function ModelConfigPage() {
                   onClick={() => toggleProvider(provider.id)}
                 >
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Typography sx={{ fontSize: 20 }}>{provider.logo || '☁️'}</Typography>
+                    <ProviderAvatar name={provider.name} logo={provider.logo} size={32} />
                     <Box>
                       <Typography variant="body2" sx={{ fontWeight: 600 }}>{provider.name}</Typography>
                       <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
