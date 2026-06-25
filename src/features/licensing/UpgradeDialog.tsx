@@ -17,7 +17,7 @@ import { useLicenseStore, PRO_FEATURES, PRO_FEATURE_LABELS } from './licenseStor
 import { useUpgradeDialogStore } from './upgradeDialogStore';
 
 /// Microsoft Store listing URL for the Pro lifetime add-on.
-const STORE_LISTING_URL = 'https://apps.microsoft.com/detail/9NZ4NSFLW6RW';
+const STORE_LISTING_URL = 'https://apps.microsoft.com/detail/9NN9316C8F8K';
 
 /// One-time price for the Pro lifetime license, in USD. Displayed in the
 /// dialog and matched in the Store listing.
