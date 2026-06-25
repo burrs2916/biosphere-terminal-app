@@ -59,12 +59,13 @@ export function UpgradeDialog() {
     setPurchasing(true);
     try {
       await restore();
+      handleClose();
     } catch {
       /* swallowed */
     } finally {
       setPurchasing(false);
     }
-  }, [restore]);
+  }, [restore, handleClose]);
 
   /// 检测错误是否指示「应用不是从 Store 安装的」，这种场景 IAP API 永远会失败，
   /// 应当引导用户去浏览器 Store 页面购买，而不是反复在应用内点击。
