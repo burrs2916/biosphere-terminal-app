@@ -65,16 +65,18 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
       return refreshInFlight;
     }
     const run = async () => {
-      set({ loading: true, error: null });
+      set({ loading: true });
       try {
         const status = await checkProStatus();
         set({ status, loading: false });
       } catch (err) {
+        // refresh 是后台静默操作（启动、窗口聚焦时触发），不应把错误
+        // 写入 error 字段——UpgradeDialog 读取同一个 error 来显示购买/
+        // 恢复操作的失败信息，后台 refresh 失败会让用户误以为购买失败。
+        // 保留原有 status，仅记录 loading=false。
         const message = err instanceof Error ? err.message : String(err);
-        // 保留原有 status，不重置为 DEFAULT_STATUS。
-        // 重置会导致 Pro/Trial 用户在后端调用失败时被误判为 free，
-        // 启动时出现 LockedScreen 闪烁。error 仍被记录供 UI 显示。
-        set({ loading: false, error: message });
+        console.warn('[license] refresh failed:', message);
+        set({ loading: false });
       } finally {
         // 标记已尝试加载，后续 canUse 不再乐观放行。
         refreshAttempted = true;
