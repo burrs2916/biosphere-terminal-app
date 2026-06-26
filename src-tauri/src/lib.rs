@@ -283,6 +283,11 @@ fn spawn_webview_diagnostics(app_handle: tauri::AppHandle, paths: DebugLogPaths)
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let exe_path = std::env::current_exe().ok();
     let debug_paths = resolve_debug_log_paths(&exe_path);
+
+    // Truncate debug.log on every startup so it only holds the current
+    // session's diagnostics. This prevents unbounded growth over time.
+    truncate_debug_logs(&debug_paths);
+
     install_panic_hook(debug_paths.clone());
 
     write_debug_log_all(
@@ -772,13 +777,42 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     result.map_err(Into::into)
 }
 
+/// Truncate all debug.log files to zero bytes. Called once at startup so
+/// the log only holds the current session's diagnostics.
+fn truncate_debug_logs(paths: &DebugLogPaths) {
+    for path in paths.iter() {
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path);
+    }
+}
+
+/// Maximum size of debug.log before it gets truncated in-place.
+/// 5 MB is enough for a full session of diagnostics without bloating disk.
+const DEBUG_LOG_MAX_SIZE: u64 = 5 * 1024 * 1024;
+
 /// Append a line to a single debug log file.
 /// Best-effort: ignores errors so it never breaks startup.
+/// If the file exceeds `DEBUG_LOG_MAX_SIZE`, it is truncated to empty
+/// before writing, preventing unbounded growth during a single session.
 fn write_debug_log(path: &std::path::Path, message: &str) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+
+    // Check file size; truncate if it has grown too large.
+    if let Ok(metadata) = std::fs::metadata(path) {
+        if metadata.len() >= DEBUG_LOG_MAX_SIZE {
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(path);
+        }
+    }
+
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
