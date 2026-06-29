@@ -54,12 +54,18 @@ let refreshInFlight: Promise<void> | null = null;
 /// 防止 Pro 功能永久免费开放。
 let refreshAttempted = false;
 
+/// purchase 进行中标记。防止 Store 弹窗关闭后窗口聚焦触发 refresh，
+/// 用旧状态覆盖刚写入的 Pro 状态。
+let purchaseInProgress = false;
+
 export const useLicenseStore = create<LicenseState>((set, get) => ({
   status: null,
   loading: false,
   error: null,
 
   refresh: async () => {
+    // 购买进行中时跳过 refresh，避免用旧状态覆盖刚写入的 Pro 状态。
+    if (purchaseInProgress) return;
     // 如果已有 refresh 在进行中，复用同一个 Promise，避免并发竞态。
     if (refreshInFlight) {
       return refreshInFlight;
@@ -89,16 +95,17 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
   },
 
   purchase: async () => {
+    purchaseInProgress = true;
     set({ loading: true, error: null });
     try {
-      // 调用后端，由 Rust 侧通过 Windows.Services.Store API 触发真实购买。
-      // 用户在 Store 弹窗中支付完成后，后端会复核 entitlement 再返回 Pro 状态。
       const status = await purchaseProLifetime();
       set({ status, loading: false });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       set({ loading: false, error: message });
       throw err;
+    } finally {
+      purchaseInProgress = false;
     }
   },
 

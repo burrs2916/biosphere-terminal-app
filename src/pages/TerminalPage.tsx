@@ -17,11 +17,13 @@ import {
   TerminalStatusBar,
   ConnectionPicker,
   TerminalContextMenu,
+  FindBar,
 } from '../features/terminal';
 import type { TerminalEmulatorHandle, ConnectionPickerResult } from '../features/terminal';
 import { TabBar } from '../features/session';
 import { CommandPalette } from '../features/command';
 import { spawnTerminal, killTerminal, writeToTerminal, getTerminalCwd } from '../core/services/terminal.service';
+import { copyText, pasteText } from '../core/services/clipboard.service';
 import { parseCommand } from '../core/services/command.service';
 import { generateId } from '../core/utils';
 import type { PtyConfig } from '../proto';
@@ -46,6 +48,7 @@ interface Tab {
 
 export function TerminalPage() {
   const { t } = useTranslation('terminal');
+  const { t: tCommon } = useTranslation('common');
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
   const [tabs, setTabs] = useState<Tab[]>([]);
@@ -54,7 +57,7 @@ export function TerminalPage() {
   const [confirmCloseId, setConfirmCloseId] = useState<string | null>(null);
   const [findOpen, setFindOpen] = useState(false);
   const [, setFindQuery] = useState('');
-  const [, setFindResultCount] = useState<{ resultIndex: number; resultCount: number } | null>(null);
+  const [findResultCount, setFindResultCount] = useState<{ resultIndex: number; resultCount: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ mouseX: number; mouseY: number; hasSelection: boolean } | null>(null);
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const tabsRef = useRef<Tab[]>([]);
@@ -165,12 +168,8 @@ export function TerminalPage() {
     setPickerOpen(false);
   }, [tabs.length, shell, activeCwd, estimateTerminalSize]);
 
-  const handleCloseTab = useCallback(
+  const doCloseTab = useCallback(
     (id: string) => {
-      if (confirmBeforeClose) {
-        setConfirmCloseId(id);
-        return;
-      }
       killTerminal(id).catch((e) => { console.error(e); notify(String(e)); });
       terminalRefs.current.delete(id);
       setTabs((prev) => {
@@ -181,22 +180,25 @@ export function TerminalPage() {
         return filtered;
       });
     },
-    [confirmBeforeClose],
+    [],
+  );
+
+  const handleCloseTab = useCallback(
+    (id: string) => {
+      if (confirmBeforeClose) {
+        setConfirmCloseId(id);
+        return;
+      }
+      doCloseTab(id);
+    },
+    [confirmBeforeClose, doCloseTab],
   );
 
   const handleConfirmClose = useCallback(() => {
     if (!confirmCloseId) return;
-    killTerminal(confirmCloseId).catch((e) => { console.error(e); notify(String(e)); });
-    terminalRefs.current.delete(confirmCloseId);
-    setTabs((prev) => {
-      const filtered = prev.filter((t) => t.id !== confirmCloseId);
-      if (prev.find((t) => t.id === confirmCloseId)?.isActive && filtered.length > 0) {
-        filtered[filtered.length - 1].isActive = true;
-      }
-      return filtered;
-    });
+    doCloseTab(confirmCloseId);
     setConfirmCloseId(null);
-  }, [confirmCloseId]);
+  }, [confirmCloseId, doCloseTab]);
 
   const handleCancelClose = useCallback(() => {
     setConfirmCloseId(null);
@@ -214,10 +216,10 @@ export function TerminalPage() {
           prev.map((t) => (t.id === sessionId ? { ...t, disconnected: true } : t)),
         );
       } else {
-        handleCloseTab(sessionId);
+        doCloseTab(sessionId);
       }
     },
-    [handleCloseTab],
+    [doCloseTab],
   );
 
   const handleReconnect = useCallback(
@@ -255,7 +257,9 @@ export function TerminalPage() {
       if (activeTab) {
         const bytes = new TextEncoder().encode(command + '\n');
         writeToTerminal(activeTab.id, Array.from(bytes)).catch((e) => { console.error(e); notify(String(e)); });
-        parseCommand(command, activeTab.id).catch((e) => notify(String(e)));
+        getTerminalCwd(activeTab.id).then((cwd) => {
+          parseCommand(command, activeTab.id, cwd ?? undefined).catch((e) => notify(String(e)));
+        }).catch((e) => notify(String(e)));
       }
       setPaletteOpen(false);
     },
@@ -310,22 +314,46 @@ export function TerminalPage() {
     if (!terminal) return;
     const selection = terminal.getSelection();
     if (selection) {
-      navigator.clipboard.writeText(selection).catch((e) => notify(String(e)));
+      copyText(selection).catch((e) => notify(String(e)));
     }
   }, [getActiveTerminal]);
 
   const handlePaste = useCallback(() => {
     const terminal = getActiveTerminal();
     if (!terminal) return;
-    navigator.clipboard.readText().then((text) => {
-      if (text) terminal.paste(text);
+    pasteText().then((text) => {
+      if (text) {
+        terminal.paste(text);
+        // 粘贴的命令也要记录历史（terminal.paste 不触发 onData，无法走正常 lineBuffer 流程）
+        // 只记录第一个非空行，避免多行命令被拆成多条历史
+        const activeTab = tabsRef.current.find((t) => t.isActive);
+        if (activeTab) {
+          const firstLine = text.split('\n').map((l) => l.trim()).find(Boolean);
+          if (firstLine) {
+            getTerminalCwd(activeTab.id).then((cwd) => {
+              parseCommand(firstLine, activeTab.id, cwd ?? undefined).catch((e) => notify(String(e)));
+            }).catch((e) => notify(String(e)));
+          }
+        }
+      }
     }).catch((e) => notify(String(e)));
   }, [getActiveTerminal]);
 
   const handleFind = useCallback(() => {
     setFindOpen((prev) => !prev);
-    setFindQuery('');
   }, []);
+
+  const handleFindNext = useCallback((query: string, options?: { caseSensitive?: boolean }) => {
+    if (!query) return;
+    setFindQuery(query);
+    getActiveTerminal()?.findNext(query, { caseSensitive: options?.caseSensitive ?? false });
+  }, [getActiveTerminal]);
+
+  const handleFindPrevious = useCallback((query: string, options?: { caseSensitive?: boolean }) => {
+    if (!query) return;
+    setFindQuery(query);
+    getActiveTerminal()?.findPrevious(query, { caseSensitive: options?.caseSensitive ?? false });
+  }, [getActiveTerminal]);
 
   const handleSelectAll = useCallback(() => {
     getActiveTerminal()?.selectAll();
@@ -417,7 +445,9 @@ export function TerminalPage() {
         for (const line of lines) {
           const bytes = new TextEncoder().encode(line + '\n');
           writeToTerminal(activeTab.id, Array.from(bytes)).catch((e) => { console.error(e); notify(String(e)); });
-          parseCommand(line, activeTab.id).catch((e) => notify(String(e)));
+          getTerminalCwd(activeTab.id).then((cwd) => {
+            parseCommand(line, activeTab.id, cwd ?? undefined).catch((e) => notify(String(e)));
+          }).catch((e) => notify(String(e)));
         }
       }
     }).then((fn) => {
@@ -592,21 +622,6 @@ export function TerminalPage() {
           onConnect={handleConnect}
           onClose={() => setPickerOpen(false)}
         />
-
-        <Dialog open={!!confirmCloseId} onClose={handleCancelClose}>
-          <DialogTitle>{t('page.close_terminal')}</DialogTitle>
-          <DialogContent>
-            <DialogContentText>
-              {t('page.close_terminal_desc')}
-            </DialogContentText>
-          </DialogContent>
-          <DialogActions>
-            <Button onClick={handleCancelClose}>{t('common.cancel', { defaultValue: 'Cancel' })}</Button>
-            <Button onClick={handleConfirmClose} color="error" variant="contained">
-              {t('common.confirm', { defaultValue: 'Confirm' })}
-            </Button>
-          </DialogActions>
-        </Dialog>
       </Box>
     );
   }
@@ -628,6 +643,14 @@ export function TerminalPage() {
         isSshSession={!!activeTab?.ssh}
       />
       <TabBar tabs={tabs} onSelect={handleSelectTab} onClose={handleCloseTab} />
+
+      <FindBar
+        open={findOpen}
+        onClose={() => setFindOpen(false)}
+        onFindNext={handleFindNext}
+        onFindPrevious={handleFindPrevious}
+        resultInfo={findResultCount}
+      />
 
       <Box sx={{ flex: 1, overflow: 'hidden', position: 'relative' }} data-terminal-container onContextMenu={handleContextMenu}>
         {tabs.map((tab) => (
@@ -718,9 +741,9 @@ export function TerminalPage() {
           </DialogContentText>
         </DialogContent>
         <DialogActions>
-          <Button onClick={handleCancelClose}>{t('common.cancel', { defaultValue: 'Cancel' })}</Button>
+          <Button onClick={handleCancelClose}>{tCommon('action.cancel')}</Button>
           <Button onClick={handleConfirmClose} color="error" variant="contained">
-            {t('page.close')}
+            {tCommon('action.confirm')}
           </Button>
         </DialogActions>
       </Dialog>

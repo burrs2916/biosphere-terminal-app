@@ -5,7 +5,8 @@
     "search_commands": "输入以搜索命令历史",
     "press_enter_execute": "按 Enter 执行",
     "execute": "执行",
-    "cancel": "取消"
+    "cancel": "取消",
+    "linked": "笔记"
   },
   "tags": {
     "dangerous": "危险",

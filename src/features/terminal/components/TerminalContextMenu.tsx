@@ -61,8 +61,8 @@ export function TerminalContextMenu({
     : null;
 
   const handleAction = useCallback((action: () => void) => {
-    onClose();
     action();
+    onClose();
   }, [onClose]);
 
   const iconColor = isDark ? '#8B949E' : '#6B7280';

@@ -1,6 +1,6 @@
 [package]
 name = "biosphere-terminal-app"
-version = "0.4.0"
+version = "0.4.1"
 description = "Biosphere Terminal - Visual Terminal Application"
 authors = ["Biosphere Team"]
 edition = "2021"
@@ -42,6 +42,7 @@ portable-pty = "0.8"
 anyhow = "1"
 chrono = "0.4"
 tauri-plugin-dialog = "2.7.1"
+tauri-plugin-clipboard-manager = "2.3.2"
 
 # Windows.Services.Store API (Microsoft Store IAP) — Windows-only.
 # Pinned to windows 0.61 to align with the transitive `windows-core 0.61.2`

@@ -5,7 +5,8 @@
     "search_commands": "Type to search command history",
     "press_enter_execute": "Press Enter to execute",
     "execute": "Execute",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "linked": "Note"
   },
   "tags": {
     "dangerous": "Dangerous",

@@ -3,7 +3,8 @@ import { useTranslation } from 'react-i18next';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import { CommandHistory } from '../features/command';
-import { writeToTerminal } from '../core/services/terminal.service';
+import { writeToTerminal, getTerminalCwd } from '../core/services/terminal.service';
+import { parseCommand } from '../core/services/command.service';
 import { useTerminalStore } from '../engine';
 import { useNotify } from '../core/notification';
 
@@ -17,6 +18,10 @@ export function CommandPage() {
       if (!activeSessionId) return;
       const bytes = new TextEncoder().encode(command + '\n');
       writeToTerminal(activeSessionId, Array.from(bytes)).catch((e) => { console.error(e); notify(String(e)); });
+      // 记录命令历史
+      getTerminalCwd(activeSessionId).then((cwd) => {
+        parseCommand(command, activeSessionId, cwd ?? undefined).catch((e) => notify(String(e)));
+      }).catch((e) => notify(String(e)));
     },
     [activeSessionId],
   );

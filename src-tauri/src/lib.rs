@@ -439,6 +439,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(terminal_service.clone())
         .setup(move |app| {
             let app_handle = app.handle();
@@ -525,7 +526,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 notebook_service.clone(),
                 db_arc.clone(),
             ));
-            let command_executor = Arc::new(CommandExecutor::new(db_arc.clone()));
+            let command_executor = Arc::new(CommandExecutor::new(db_arc.clone(), app_handle.clone()));
             let icons_dir = data_dir.join("icons");
             let icon_service = Arc::new(IconService::new(db_arc.clone(), icons_dir));
             let remote_desktop_service = Arc::new(RemoteDesktopService::new());
@@ -649,9 +650,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::command::save_snippet,
             interface::commands::command::delete_snippet,
             interface::commands::command::parse_command,
+            interface::commands::command::parse_command_only,
             interface::commands::command::record_exit_code,
             interface::commands::command::delete_command_history,
             interface::commands::command::clear_command_history,
+            interface::commands::command::delete_command_history_batch,
             interface::commands::profile::list_profiles,
             interface::commands::profile::save_profile,
             interface::commands::profile::delete_profile,

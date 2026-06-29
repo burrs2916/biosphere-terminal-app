@@ -5,3 +5,4 @@ export { TerminalStatusBar } from './components/TerminalStatusBar';
 export { ConnectionPicker } from './components/ConnectionPicker';
 export type { ConnectionPickerResult } from './components/ConnectionPicker';
 export { TerminalContextMenu } from './components/TerminalContextMenu';
+export { FindBar } from './components/FindBar';

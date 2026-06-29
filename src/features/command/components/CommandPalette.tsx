@@ -22,7 +22,7 @@ import {
 } from '@phosphor-icons/react';
 import {
   searchCommandHistory,
-  parseCommand,
+  parseCommandOnly,
 } from '../../../core/services/command.service';
 import { useNotify } from '../../../core/notification';
 import type { CommandHistoryEntry, ParsedCommandResult } from '../../../proto';
@@ -60,7 +60,7 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
     }
     const timer = setTimeout(() => {
       searchCommandHistory(query).then(setHistory).catch((e) => notify(String(e)));
-      parseCommand(query).then(setParsed).catch(() => setParsed(null));
+      parseCommandOnly(query).then(setParsed).catch(() => setParsed(null));
     }, 200);
     return () => clearTimeout(timer);
   }, [query]);
@@ -85,6 +85,11 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
     [parsed, doExecute],
   );
 
+  const handleHistoryClick = useCallback((command: string) => {
+    setQuery(command);
+    setSelectedIndex(0);
+  }, []);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === 'ArrowDown') {
@@ -100,6 +105,10 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
         } else if (query.trim()) {
           handleExecute(query.trim());
         }
+      } else if (e.key === 'Tab' && history.length > 0 && selectedIndex < history.length) {
+        e.preventDefault();
+        setQuery(history[selectedIndex].command);
+        setSelectedIndex(0);
       } else if (e.key === 'Escape') {
         onClose();
       }
@@ -196,7 +205,7 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
                 <ListItemButton
                   key={entry.id}
                   selected={index === selectedIndex}
-                  onClick={() => handleExecute(entry.command)}
+                  onClick={() => handleHistoryClick(entry.command)}
                   sx={{
                     '&.Mui-selected': {
                       bgcolor: 'rgba(108,99,255,0.1)',
@@ -208,10 +217,21 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
                   </ListItemIcon>
                   <ListItemText
                     primary={entry.command}
-                    secondary={entry.cwd}
+                    secondary={
+                      <Box component="span" sx={{ display: 'flex', gap: 0.5, alignItems: 'center', flexWrap: 'wrap' }}>
+                        {entry.cwd && <span style={{ opacity: 0.7 }}>{entry.cwd}</span>}
+                        {entry.executed_at && (
+                          <span style={{ opacity: 0.5, fontSize: '0.7rem' }}>
+                            {' · '}{new Date(entry.executed_at).toLocaleDateString()}
+                          </span>
+                        )}
+                        {entry.linked && (
+                          <Chip label={t('palette.linked')} size="small" sx={{ height: 16, fontSize: '0.6rem', ml: 0.5 }} />
+                        )}
+                      </Box>
+                    }
                     slotProps={{
                       primary: { variant: 'body2', sx: { fontFamily: 'monospace' } },
-                      secondary: { variant: 'caption' },
                     }}
                   />
                 </ListItemButton>

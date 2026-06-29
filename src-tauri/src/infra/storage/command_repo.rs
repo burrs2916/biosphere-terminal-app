@@ -10,7 +10,7 @@ impl CommandRepo {
             let conn = db.conn();
             let mut stmt = conn.prepare(
                 "SELECT id, session_id, command, cwd, exit_code, executed_at, \
-                 EXISTS(SELECT 1 FROM command_note_links WHERE context = command_history.command) as linked \
+                 EXISTS(SELECT 1 FROM command_note_links WHERE command_id = command_history.id) as linked \
                  FROM command_history ORDER BY executed_at DESC LIMIT ?1",
             )?;
             let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
@@ -53,7 +53,7 @@ impl CommandRepo {
             let conn = db.conn();
             let mut stmt = conn.prepare(
                 "SELECT id, session_id, command, cwd, exit_code, executed_at, \
-                 EXISTS(SELECT 1 FROM command_note_links WHERE context = command_history.command) as linked \
+                 EXISTS(SELECT 1 FROM command_note_links WHERE command_id = command_history.id) as linked \
                  FROM command_history WHERE command LIKE ?1 ORDER BY executed_at DESC LIMIT 100",
             )?;
             let pattern = format!("%{}%", query);
@@ -77,13 +77,13 @@ impl CommandRepo {
     }
 
     fn attach_linked_notes(db: &Database, entries: Vec<CommandHistoryEntry>) -> Result<Vec<CommandHistoryEntry>> {
-        let linked_commands: Vec<String> = entries
+        let linked_ids: Vec<String> = entries
             .iter()
             .filter(|e| e.linked)
-            .map(|e| e.command.clone())
+            .map(|e| e.id.clone())
             .collect();
 
-        if linked_commands.is_empty() {
+        if linked_ids.is_empty() {
             return Ok(entries);
         }
 
@@ -91,20 +91,19 @@ impl CommandRepo {
         let mut notes_map: std::collections::HashMap<String, Vec<LinkedNoteInfo>> =
             std::collections::HashMap::new();
 
-        // Build a single query with IN clause to avoid N+1
-        let placeholders: Vec<String> = linked_commands.iter().enumerate()
+        let placeholders: Vec<String> = linked_ids.iter().enumerate()
             .map(|(i, _)| format!("?{}", i + 1))
             .collect();
         let sql = format!(
-            "SELECT cnl.context, cnl.id, cnl.note_id, n.title, n.category, n.group_id \
+            "SELECT cnl.command_id, cnl.id, cnl.note_id, n.title, n.category, n.group_id \
              FROM command_note_links cnl \
              JOIN notes n ON n.id = cnl.note_id \
-             WHERE cnl.context IN ({}) \
+             WHERE cnl.command_id IN ({}) \
              ORDER BY cnl.created_at DESC",
             placeholders.join(", ")
         );
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::types::ToSql> = linked_commands.iter()
+        let params: Vec<&dyn rusqlite::types::ToSql> = linked_ids.iter()
             .map(|c| c as &dyn rusqlite::types::ToSql)
             .collect();
         let rows = stmt.query_map(params.as_slice(), |row| {
@@ -118,14 +117,14 @@ impl CommandRepo {
         })?;
 
         for row in rows {
-            let (cmd_text, note) = row?;
-            notes_map.entry(cmd_text).or_default().push(note);
+            let (cmd_id, note) = row?;
+            notes_map.entry(cmd_id).or_default().push(note);
         }
 
         let result = entries
             .into_iter()
             .map(|mut e| {
-                if let Some(notes) = notes_map.get(&e.command) {
+                if let Some(notes) = notes_map.get(&e.id) {
                     e.linked_notes = notes.clone();
                 }
                 e
@@ -182,13 +181,34 @@ impl CommandRepo {
 
     pub fn delete_history(db: &Database, id: &str) -> Result<()> {
         let conn = db.conn();
+        conn.execute("DELETE FROM command_note_links WHERE command_id = ?1", rusqlite::params![id])?;
         conn.execute("DELETE FROM command_history WHERE id = ?1", rusqlite::params![id])?;
         Ok(())
     }
 
     pub fn clear_history(db: &Database) -> Result<()> {
         let conn = db.conn();
+        conn.execute("DELETE FROM command_note_links", [])?;
         conn.execute("DELETE FROM command_history", [])?;
+        Ok(())
+    }
+
+    pub fn delete_many(db: &Database, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let conn = db.conn();
+        let placeholders: Vec<String> = ids.iter().enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let sql = format!("DELETE FROM command_note_links WHERE command_id IN ({})", placeholders.join(", "));
+        let params: Vec<&dyn rusqlite::types::ToSql> = ids.iter()
+            .map(|c| c as &dyn rusqlite::types::ToSql)
+            .collect();
+        conn.execute(&sql, params.as_slice())?;
+
+        let sql2 = format!("DELETE FROM command_history WHERE id IN ({})", placeholders.join(", "));
+        conn.execute(&sql2, params.as_slice())?;
         Ok(())
     }
 }

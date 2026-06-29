@@ -64,6 +64,17 @@ pub fn parse_command(
         .map_err(|e| e.to_string())
 }
 
+/// 只解析命令，不写入历史（用于命令面板预览）
+#[tauri::command]
+pub fn parse_command_only(
+    command: String,
+    executor: State<'_, Arc<CommandExecutor>>,
+) -> Result<ParsedCommandResult, String> {
+    executor
+        .parse_only(&command)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn record_exit_code(
     entry_id: String,
@@ -88,4 +99,12 @@ pub fn clear_command_history(
     db: State<'_, Arc<Database>>,
 ) -> Result<(), String> {
     CommandService::clear_history(&db).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_command_history_batch(
+    ids: Vec<String>,
+    db: State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    CommandService::delete_many(&db, &ids).map_err(|e| e.to_string())
 }

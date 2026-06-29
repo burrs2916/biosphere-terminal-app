@@ -27,6 +27,7 @@ import Alert from '@mui/material/Alert';
 import Radio from '@mui/material/Radio';
 import RadioGroup from '@mui/material/RadioGroup';
 import FormControlLabel from '@mui/material/FormControlLabel';
+import Checkbox from '@mui/material/Checkbox';
 import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import {
@@ -47,11 +48,13 @@ import {
   ListIcon,
   WarningCircleIcon,
   CheckCircleIcon,
+  CheckSquareIcon,
 } from '@phosphor-icons/react';
-import { getCommandHistory, searchCommandHistory, deleteCommandHistoryEntry, clearCommandHistory } from '../../../core/services/command.service';
+import { getCommandHistory, searchCommandHistory, deleteCommandHistoryEntry, clearCommandHistory, deleteCommandHistoryBatch } from '../../../core/services/command.service';
 import { createNote, linkCommandToNote, unlinkCommandNote, listNoteGroups, listNoteCategoriesByGroup, searchNotes } from '../../../core/services/notebook.service';
 import { openNoteEditorWindow } from '../../../core/services/window.service';
 import { useNotify } from '../../../core/notification';
+import { listen } from '@tauri-apps/api/event';
 import { IconRenderer } from '../../notebook/components/IconRenderer';
 import type { CommandHistoryEntry, LinkedNoteInfo } from '../../../proto/command';
 import type { NoteGroupDto, NoteDto } from '../../../proto/notebook';
@@ -88,6 +91,8 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
   const [groupMode, setGroupMode] = useState<GroupMode>('command');
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [expandedCommands, setExpandedCommands] = useState<Set<string>>(new Set());
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({ open: false, message: '', severity: 'success' });
   const notify = useNotify().notify;
 
@@ -117,6 +122,15 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
 
   useEffect(() => {
     loadHistory();
+  }, [loadHistory]);
+
+  // 监听后端命令历史变更事件，实时刷新
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen('command-history-changed', () => {
+      loadHistory();
+    }).then((fn) => { unlisten = fn; });
+    return () => { if (unlisten) unlisten(); };
   }, [loadHistory]);
 
   const entries = useMemo(() => searchResults ?? allEntries, [searchResults, allEntries]);
@@ -195,13 +209,58 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
     });
   };
 
+  const handleExecute = useCallback((command: string) => {
+    onExecute(command);
+    setSnackbar({ open: true, message: t('history.executed'), severity: 'success' });
+  }, [onExecute, t]);
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectGroup = (group: CommandGroup) => {
+    const ids = group.entries.map((e) => e.id);
+    const allSelected = ids.every((id) => selectedIds.has(id));
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allSelected) {
+        ids.forEach((id) => next.delete(id));
+      } else {
+        ids.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  };
+
+  const handleBatchDelete = async () => {
+    if (selectedIds.size === 0) return;
+    try {
+      await deleteCommandHistoryBatch(Array.from(selectedIds));
+      setSnackbar({ open: true, message: t('history.batch_deleted', { count: selectedIds.size }), severity: 'success' });
+      setSelectedIds(new Set());
+      setSelectMode(false);
+      loadHistory();
+    } catch (err) {
+      setSnackbar({ open: true, message: String(err), severity: 'error' });
+    }
+  };
+
   const buildNoteContent = (group: CommandGroup) => {
     const program = group.entries[0].command.trim().split(/\s+/)[0] || 'command';
     const lines: string[] = [`## ${program}`, ''];
     group.entries.forEach((entry, i) => {
       if (i > 0) lines.push('');
       lines.push('```bash', entry.command, '```');
-      if (entry.cwd) lines.push(`> ${entry.cwd}`);
+      if (entry.cwd) lines.push(`> 📁 ${entry.cwd}`);
+      if (entry.executed_at) {
+        const date = new Date(entry.executed_at);
+        lines.push(`> 🕐 ${date.toLocaleString()}`);
+      }
     });
     lines.push('');
     return lines.join('\n');
@@ -228,6 +287,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
         });
       }
       setSnackbar({ open: true, message: t('history.quick_saved'), severity: 'success' });
+      setExpandedCommands((prev) => new Set(prev).add(group.key));
       loadHistory();
     } catch (err) {
       setSnackbar({ open: true, message: String(err), severity: 'error' });
@@ -302,6 +362,9 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
         setSnackbar({ open: true, message: t('history.quick_saved'), severity: 'success' });
       }
       setSaveDialogOpen(false);
+      if (savingGroup) {
+        setExpandedCommands((prev) => new Set(prev).add(savingGroup.key));
+      }
       setSavingGroup(null);
       loadHistory();
     } catch (err) {
@@ -411,6 +474,21 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
               <ArrowClockwiseIcon size={16} />
             </IconButton>
           </Tooltip>
+          <Tooltip title={selectMode ? t('history.exit_select') || '' : t('history.select_mode') || ''} arrow>
+            <IconButton size="small" onClick={() => { setSelectMode(!selectMode); setSelectedIds(new Set()); }} color={selectMode ? 'primary' : 'default'}>
+              <CheckSquareIcon size={16} />
+            </IconButton>
+          </Tooltip>
+          {selectMode && selectedIds.size > 0 && (
+            <Tooltip title={t('history.batch_delete') || ''} arrow>
+              <IconButton size="small" onClick={handleBatchDelete} color="error">
+                <TrashIcon size={16} />
+              </IconButton>
+            </Tooltip>
+          )}
+          {selectMode && selectedIds.size > 0 && (
+            <Chip label={`${selectedIds.size}`} size="small" color="primary" sx={{ height: 20 }} />
+          )}
           <Tooltip title={t('history.clear_all') || ''} arrow>
             <IconButton size="small" onClick={() => setClearConfirmOpen(true)} disabled={entries.length === 0}>
               <EraserIcon size={16} color="#FF5252" />
@@ -507,7 +585,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
               return (
                 <Box key={group.key}>
                   <ListItemButton
-                    onClick={() => handleToggleExpand(group.key)}
+                    onClick={() => !selectMode && handleToggleExpand(group.key)}
                     sx={{
                       borderRadius: 1,
                       mx: 0.5,
@@ -521,10 +599,19 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
                         : {}),
                     }}
                   >
-                    <ListItemIcon sx={{ minWidth: 24 }}>
-                      {isExpanded
-                        ? <CaretDownIcon size={14} color="#8B949E" />
-                        : <CaretRightIcon size={14} color="#8B949E" />}
+                    <ListItemIcon sx={{ minWidth: 24, display: 'flex', alignItems: 'center' }}>
+                      {selectMode ? (
+                        <Checkbox
+                          size="small"
+                          checked={group.entries.every((e) => selectedIds.has(e.id))}
+                          indeterminate={group.entries.some((e) => selectedIds.has(e.id)) && !group.entries.every((e) => selectedIds.has(e.id))}
+                          onClick={(e) => { e.stopPropagation(); toggleSelectGroup(group); }}
+                        />
+                      ) : isExpanded ? (
+                        <CaretDownIcon size={14} color="#8B949E" />
+                      ) : (
+                        <CaretRightIcon size={14} color="#8B949E" />
+                      )}
                     </ListItemIcon>
                     <ListItemText
                       slotProps={{
@@ -625,7 +712,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
                       {group.entries.map((entry) => (
                         <ListItemButton
                           key={entry.id}
-                          onClick={() => onExecute(entry.command)}
+                          onClick={() => !selectMode && handleExecute(entry.command)}
                           sx={{
                             borderRadius: 1,
                             mx: 0.5,
@@ -634,8 +721,16 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
                             '&:hover': { bgcolor: 'rgba(108,99,255,0.06)' },
                           }}
                         >
-                          <ListItemIcon sx={{ minWidth: 20 }}>
-                            <FolderOpenIcon size={10} color="#8B949E" />
+                          <ListItemIcon sx={{ minWidth: 20, display: 'flex', alignItems: 'center' }}>
+                            {selectMode ? (
+                              <Checkbox
+                                size="small"
+                                checked={selectedIds.has(entry.id)}
+                                onClick={(e) => { e.stopPropagation(); toggleSelect(entry.id); }}
+                              />
+                            ) : (
+                              <FolderOpenIcon size={10} color="#8B949E" />
+                            )}
                           </ListItemIcon>
                           <ListItemText
                             slotProps={{ primary: { component: 'div' } }}

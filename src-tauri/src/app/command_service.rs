@@ -37,4 +37,8 @@ impl CommandService {
     pub fn clear_history(db: &Database) -> Result<()> {
         CommandRepo::clear_history(db)
     }
+
+    pub fn delete_many(db: &Database, ids: &[String]) -> Result<()> {
+        CommandRepo::delete_many(db, ids)
+    }
 }

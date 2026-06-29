@@ -7,8 +7,9 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import { listen, type UnlistenFn, emit } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { writeToTerminal, resizeTerminal } from '../../../core/services/terminal.service';
-import { parseCommand, recordExitCode } from '../../../core/services/command.service';
+import { writeToTerminal, resizeTerminal, getTerminalCwd } from '../../../core/services/terminal.service';
+import { copyText, pasteText } from '../../../core/services/clipboard.service';
+import { parseCommand } from '../../../core/services/command.service';
 import { getDefaultProfile } from '../../../core/services/profile.service';
 import { useSettingsStore, getThemeAppearance } from '../../../engine';
 import { useNotify } from '../../../core/notification';
@@ -75,7 +76,6 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
     const searchAddonRef = useRef<SearchAddon | null>(null);
     const unlistenersRef = useRef<UnlistenFn[]>([]);
     const lineBufferRef = useRef('');
-    const lastEntryIdRef = useRef<string | null>(null);
     const lastCommandRef = useRef<string | null>(null);
     const textEncoderRef = useRef(new TextEncoder());
     const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -92,6 +92,17 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
     const pasteOnMiddleClick = useSettingsStore((s) => s.settings.pasteOnMiddleClick);
     const webglRenderer = useSettingsStore((s) => s.settings.webglRenderer);
     const notify = useNotify().notify;
+
+    // 粘贴的命令记录到历史（terminal.paste 不触发 onData）
+    // 只记录第一个非空行，避免多行命令（for/do/done）被拆成多条历史
+    const recordPastedCommand = (text: string, sid: string) => {
+      const firstLine = text.split('\n').map((l) => l.trim()).find(Boolean);
+      if (firstLine) {
+        getTerminalCwd(sid).then((cwd) => {
+          parseCommand(firstLine, sid, cwd ?? undefined).catch((e) => notify(String(e)));
+        }).catch((e) => notify(String(e)));
+      }
+    };
 
     useEffect(() => {
       if (profileId) {
@@ -313,13 +324,16 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         if (mod && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
           const selection = terminal.getSelection();
           if (selection) {
-            navigator.clipboard.writeText(selection).catch((e) => notify(String(e)));
+            copyText(selection).catch((e) => notify(String(e)));
           }
           return false;
         }
         if (mod && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
-          navigator.clipboard.readText().then((text) => {
-            if (text) terminal.paste(text);
+          pasteText().then((text) => {
+            if (text) {
+              terminal.paste(text);
+              recordPastedCommand(text, sessionId);
+            }
           }).catch((e) => notify(String(e)));
           return false;
         }
@@ -368,7 +382,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         selectionChangeOffRef.current = terminal.onSelectionChange(() => {
           const selection = terminal.getSelection();
           if (selection) {
-            navigator.clipboard.writeText(selection).catch((e) => notify(String(e)));
+            copyText(selection).catch((e) => notify(String(e)));
           }
         });
       }
@@ -377,9 +391,10 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         const handler = (e: MouseEvent) => {
           if (e.button === 1) {
             e.preventDefault();
-            navigator.clipboard.readText().then((text) => {
+            pasteText().then((text) => {
               if (text) {
                 terminal.paste(text);
+                recordPastedCommand(text, sessionId);
               }
             }).catch((e) => notify(String(e)));
           }
@@ -407,11 +422,19 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         writeToTerminal(sessionId, Array.from(bytes)).catch((e) => notify(String(e)));
 
         if (data === '\r') {
-          const cmd = lineBufferRef.current.trim();
+          // 从终端 buffer 读取实际行内容，比 lineBufferRef 更可靠
+          // 修复 Tab 补全、bracketed paste 等场景下 lineBufferRef 不准确的问题
+          const buf = terminal.buffer.active;
+          const line = buf.getLine(buf.baseY + buf.cursorY);
+          let cmd = '';
+          if (line) {
+            cmd = line.translateToString(true).trim();
+          }
+          if (!cmd) cmd = lineBufferRef.current.trim();
           if (cmd) {
             lastCommandRef.current = cmd;
-            parseCommand(cmd, sessionId).then((result) => {
-              lastEntryIdRef.current = result.entryId;
+            getTerminalCwd(sessionId).then((cwd) => {
+              parseCommand(cmd, sessionId, cwd ?? undefined).catch((e) => notify(String(e)));
             }).catch((e) => notify(String(e)));
           }
           lineBufferRef.current = '';
@@ -468,9 +491,8 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
 
       listen<{ session_id: string; exit_code: number | null }>('terminal-closed', (event) => {
         if (event.payload.session_id === sessionId) {
-          if (lastEntryIdRef.current && event.payload.exit_code != null) {
-            recordExitCode(lastEntryIdRef.current, event.payload.exit_code).catch((e) => notify(String(e)));
-          }
+          // 不记录 exit_code：terminal-closed 是 shell 进程退出码，不是单条命令的退出码
+          // 单条命令的 exit_code 需要 shell integration 才能可靠获取
           if (event.payload.exit_code != null && event.payload.exit_code !== 0 && lastCommandRef.current) {
             emit('auto-trigger-agent', {
               triggerType: 'auto_failure',
@@ -553,7 +575,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         selectionChangeOffRef.current = terminalRef.current.onSelectionChange(() => {
           const selection = terminalRef.current?.getSelection();
           if (selection) {
-            navigator.clipboard.writeText(selection).catch((e) => notify(String(e)));
+            copyText(selection).catch((e) => notify(String(e)));
           }
         });
       }
@@ -569,9 +591,10 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         const handler = (e: MouseEvent) => {
           if (e.button === 1) {
             e.preventDefault();
-            navigator.clipboard.readText().then((text) => {
+            pasteText().then((text) => {
               if (text) {
                 terminalRef.current?.paste(text);
+                recordPastedCommand(text, sessionId);
               }
             }).catch((e) => notify(String(e)));
           }
