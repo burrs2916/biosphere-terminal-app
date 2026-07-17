@@ -100,12 +100,17 @@ pub async fn request_purchase_pro_lifetime() -> Result<String, StoreIapError> {
     tokio::task::spawn_blocking(|| -> Result<String, StoreIapError> {
         // 初始化 COM 为 STA 模式（Single Threaded Apartment）
         // 这是 Windows Store API 的必需条件
-        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
-            .map_err(|e| StoreIapError::Api(format!("CoInitializeEx failed: {}", e)))?;
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if hr.is_err() {
+            return Err(StoreIapError::Api(format!(
+                "CoInitializeEx failed: HRESULT 0x{:08X}",
+                hr.0 as u32
+            )));
+        }
 
         // 确保在函数退出时清理 COM
-        let _guard = scopeguard::guard(|| {
-            CoUninitialize();
+        let _guard = scopeguard::guard((), |_| {
+            unsafe { CoUninitialize() };
         });
 
         let ctx = StoreContext::GetDefault().map_err(classify_error)?;
@@ -159,12 +164,17 @@ pub async fn get_user_owned_addons() -> Result<HashSet<String>, StoreIapError> {
     tokio::task::spawn_blocking(|| -> Result<HashSet<String>, StoreIapError> {
         // 初始化 COM 为 STA 模式（Single Threaded Apartment）
         // 这是 Windows Store API 的必需条件
-        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
-            .map_err(|e| StoreIapError::Api(format!("CoInitializeEx failed: {}", e)))?;
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if hr.is_err() {
+            return Err(StoreIapError::Api(format!(
+                "CoInitializeEx failed: HRESULT 0x{:08X}",
+                hr.0 as u32
+            )));
+        }
 
         // 确保在函数退出时清理 COM
-        let _guard = scopeguard::guard(|| {
-            CoUninitialize();
+        let _guard = scopeguard::guard((), |_| {
+            unsafe { CoUninitialize() };
         });
 
         let ctx = StoreContext::GetDefault().map_err(classify_error)?;
