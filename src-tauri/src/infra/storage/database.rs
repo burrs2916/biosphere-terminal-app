@@ -20,14 +20,47 @@ impl Database {
                     parent,
                     e
                 );
+            } else {
+                // MSIX 沙盒下，即便 create_dir_all 报"已存在成功"，SQLite
+                // 之后创建 -journal / -shm 文件时仍可能被 Package Framework
+                // 拦住。做一次显式写探测，如果失败就把根因写进日志——
+                // 后续 Connection::open 那个 disk I/O error 就有上下文了。
+                let probe = parent.join(".biosphere-write-probe");
+                match std::fs::write(&probe, b"ok") {
+                    Ok(()) => {
+                        let _ = std::fs::remove_file(&probe);
+                        tracing::info!(
+                            "[Database::open] parent dir is writable: {:?}",
+                            parent
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "[Database::open] parent dir NOT writable ({:?}): {} \
+                            — SQLite will very likely fail with disk I/O error next.",
+                            parent,
+                            e
+                        );
+                    }
+                }
             }
         }
 
         let conn = Connection::open(path).map_err(|e| {
+            // 尽量把 SQLite 的原始 code / extended code 都打出来，方便
+            // 区分 SQLITE_CANTOPEN / SQLITE_IOERR / SQLITE_READONLY 等。
+            let (primary, extended) = match &e {
+                rusqlite::Error::SqliteFailure(err, _) => {
+                    (err.code as i32, err.extended_code)
+                }
+                _ => (-1, -1),
+            };
             tracing::error!(
-                "[Database::open] sqlite open failed (path={:?}, exists={}): {}",
+                "[Database::open] sqlite open failed (path={:?}, exists={}, primary={}, extended={}): {}",
                 path,
                 path.exists(),
+                primary,
+                extended,
                 e
             );
             e
@@ -46,8 +79,21 @@ impl Database {
 
         // Enable foreign key enforcement (SQLite disables by default)
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        // Use WAL mode for better concurrent read performance
-        let _ = conn.execute_batch("PRAGMA journal_mode = WAL;");
+        // Try WAL for better concurrent read performance. On MSIX-sandboxed
+        // paths WAL sometimes cannot create the -shm shared-memory file
+        // (Package Framework blocks it); if WAL fails we silently fall back
+        // to DELETE journal mode so the app still starts.
+        match conn.execute_batch("PRAGMA journal_mode = WAL;") {
+            Ok(_) => tracing::info!("[Database::init] journal_mode=WAL enabled"),
+            Err(e) => {
+                tracing::warn!(
+                    "[Database::init] WAL not available ({}); falling back to DELETE journal",
+                    e
+                );
+                // DELETE is the SQLite default; explicit set to make behaviour clear.
+                let _ = conn.execute_batch("PRAGMA journal_mode = DELETE;");
+            }
+        }
         // Set busy timeout to avoid "database is locked" under contention
         let _ = conn.execute_batch("PRAGMA busy_timeout = 5000;");
 

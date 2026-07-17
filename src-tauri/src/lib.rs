@@ -447,16 +447,47 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let _ = write_debug_log_all(&debug_paths, "[setup] Tauri setup started");
 
             // Resolve data/log directory based on environment.
-            // In production we MUST use a user-writable location (app_data_dir),
-            // because exe_dir is read-only on macOS (.app), Windows (Program Files)
-            // and Linux package installs.
+            // In production we MUST use a user-writable location.
+            //
+            // Windows MSIX 特殊说明：MSIX 包运行时，`app_data_dir()`（对应
+            // Windows 的 %APPDATA%\Roaming\<identifier>）会被 Package
+            // Framework 重定向到
+            // %LOCALAPPDATA%\Packages\<PackageFamilyName>\LocalCache\Roaming\<identifier>
+            // 这条路径下 SQLite 的 fsync/flock 有时会被沙盒拦下，导致
+            // Connection::open 直接返回 "disk I/O error"。
+            // `app_local_data_dir()`（对应 %LOCALAPPDATA%）在 MSIX 下
+            // 会被重定向到
+            // %LOCALAPPDATA%\Packages\<PackageFamilyName>\LocalCache\Local\<identifier>
+            // 这是 Microsoft 官方推荐的"MSIX 应用的本地可写目录"，SQLite
+            // 在这里可以正常打开、创建 -journal / -shm / -wal。
+            //
+            // 因此生产环境优先用 local_data_dir；只有拿不到时才回退到
+            // roaming data_dir。开发模式仍然沿用之前的 dev 目录。
             let (data_dir, log_dir) = if cfg!(debug_assertions) {
                 (get_dev_data_dir(), get_dev_log_dir())
             } else {
-                let data = app_handle
-                    .path()
-                    .app_data_dir()
-                    .map_err(|e| format!("failed to resolve app_data_dir: {}", e))?;
+                let data = match app_handle.path().app_local_data_dir() {
+                    Ok(p) => {
+                        let _ = write_debug_log_all(
+                            &debug_paths,
+                            &format!("[setup] using app_local_data_dir: {:?}", p),
+                        );
+                        p
+                    }
+                    Err(e_local) => {
+                        let _ = write_debug_log_all(
+                            &debug_paths,
+                            &format!(
+                                "[setup] app_local_data_dir failed ({}), falling back to app_data_dir",
+                                e_local
+                            ),
+                        );
+                        app_handle
+                            .path()
+                            .app_data_dir()
+                            .map_err(|e| format!("failed to resolve app_data_dir: {}", e))?
+                    }
+                };
                 let logs = data.join("logs");
                 (data, logs)
             };
@@ -491,46 +522,105 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             let _ = std::fs::create_dir_all(&notes_dir);
 
-            let db = match Database::open(&db_path) {
+            // 打开数据库；失败时尝试一次 fallback 到 %USERPROFILE%\biosphere-terminal
+            // （即使 MSIX 沙盒 + Package Framework 全部禁写 LocalAppData，
+            // 用户目录一般是可写的）。fallback 目录同样带 notes 子目录，
+            // 保证 NotebookService 也能工作。
+            let (db, effective_data_dir) = match Database::open(&db_path) {
                 Ok(db) => {
                     let _ = write_debug_log_all(&debug_paths, "[setup] database opened successfully");
-                    db
+                    (db, data_dir.clone())
                 }
                 Err(e) => {
-                    let _ = write_debug_log_all(&debug_paths, &format!("[setup] FAILED to open database: {}", e));
+                    let _ = write_debug_log_all(&debug_paths, &format!("[setup] FAILED to open database at primary path: {}", e));
                     tracing::error!("[app] failed to open database at {:?}: {}", db_path, e);
-                    // Show user-friendly error dialog before exiting.
-                    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-                    let _ = app_handle
-                        .dialog()
-                        .message(format!(
-                            "Biosphere Terminal failed to start.\n\nUnable to open the local database at:\n{}\n\nReason: {}\n\nPlease check folder permissions and try again.",
-                            db_path.display(),
-                            e
-                        ))
-                        .title("Database initialization failed")
-                        .kind(MessageDialogKind::Error)
-                        .blocking_show();
-                    return Err(Box::new(std::io::Error::other(format!(
-                        "failed to open database at {:?}: {}",
-                        db_path, e
-                    ))));
+
+                    // fallback: %USERPROFILE%\biosphere-terminal
+                    let fallback_dir = app_handle
+                        .path()
+                        .home_dir()
+                        .ok()
+                        .map(|home| home.join("biosphere-terminal"));
+
+                    if let Some(fb) = fallback_dir {
+                        let _ = std::fs::create_dir_all(&fb);
+                        let fb_notes = fb.join("notes");
+                        let _ = std::fs::create_dir_all(&fb_notes);
+                        let fb_db = fb.join("biosphere.db");
+                        let _ = write_debug_log_all(
+                            &debug_paths,
+                            &format!("[setup] retrying database at fallback: {:?}", fb_db),
+                        );
+                        match Database::open(&fb_db) {
+                            Ok(db) => {
+                                let _ = write_debug_log_all(
+                                    &debug_paths,
+                                    &format!(
+                                        "[setup] database opened at fallback path: {:?}",
+                                        fb_db
+                                    ),
+                                );
+                                (db, fb)
+                            }
+                            Err(fb_err) => {
+                                let _ = write_debug_log_all(
+                                    &debug_paths,
+                                    &format!("[setup] fallback also failed: {}", fb_err),
+                                );
+                                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                                let _ = app_handle
+                                    .dialog()
+                                    .message(format!(
+                                        "Biosphere Terminal failed to start.\n\nUnable to open the local database at:\n{}\n\nAlso failed at fallback:\n{}\n\nReason: {}\n\nPlease check folder permissions and try again.",
+                                        db_path.display(),
+                                        fb_db.display(),
+                                        fb_err
+                                    ))
+                                    .title("Database initialization failed")
+                                    .kind(MessageDialogKind::Error)
+                                    .blocking_show();
+                                return Err(Box::new(std::io::Error::other(format!(
+                                    "failed to open database at {:?} and fallback {:?}: primary={}, fallback={}",
+                                    db_path, fb_db, e, fb_err
+                                ))));
+                            }
+                        }
+                    } else {
+                        use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                        let _ = app_handle
+                            .dialog()
+                            .message(format!(
+                                "Biosphere Terminal failed to start.\n\nUnable to open the local database at:\n{}\n\nReason: {}\n\nPlease check folder permissions and try again.",
+                                db_path.display(),
+                                e
+                            ))
+                            .title("Database initialization failed")
+                            .kind(MessageDialogKind::Error)
+                            .blocking_show();
+                        return Err(Box::new(std::io::Error::other(format!(
+                            "failed to open database at {:?}: {}",
+                            db_path, e
+                        ))));
+                    }
                 }
             };
             let db_arc = Arc::new(db);
+            // 重新计算 notes_dir，指向真正使用的 data 目录（可能是 fallback）
+            let notes_dir = effective_data_dir.join("notes");
+            let _ = std::fs::create_dir_all(&notes_dir);
 
             let notebook_service = Arc::new(NotebookService::new(notes_dir, db_arc.clone()));
             let agent_service = Arc::new(AgentService::new(db_arc.clone(), notebook_service.clone(), terminal_service.clone()));
-            let plugin_service = Arc::new(PluginService::new(data_dir.clone(), db_arc.clone()));
+            let plugin_service = Arc::new(PluginService::new(effective_data_dir.clone(), db_arc.clone()));
             let linker_service = Arc::new(LinkerService::new(
                 notebook_service.clone(),
                 db_arc.clone(),
             ));
             let command_executor = Arc::new(CommandExecutor::new(db_arc.clone(), app_handle.clone()));
-            let icons_dir = data_dir.join("icons");
+            let icons_dir = effective_data_dir.join("icons");
             let icon_service = Arc::new(IconService::new(db_arc.clone(), icons_dir));
             let remote_desktop_service = Arc::new(RemoteDesktopService::new());
-            let licensing_service = Arc::new(LicensingService::new(data_dir.clone()));
+            let licensing_service = Arc::new(LicensingService::new(effective_data_dir.clone()));
             let _ = write_debug_log_all(&debug_paths, "[setup] all services initialized");
 
             // 启动后异步与 Microsoft Store 同步 entitlement，防止本地缓存被人工编辑。
