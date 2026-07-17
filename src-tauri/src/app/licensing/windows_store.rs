@@ -16,11 +16,26 @@
 //! 2. AppxManifest 必须声明 `internetClient` capability。
 //! 3. 加载项必须先在 Partner Center 提交并通过认证（即 9NZ4NSFLW6RW）。
 //!
-//! ## UI 线程
-//! `StoreContext::GetDefault()` 必须在**真正初始化了 WinRT 的 UI 线程**
-//! 上调用，普通 STA 线程不够。Tauri 应用的 UI 线程就是托管 webview 的
-//! 主线程，所以我们通过 `app_handle.run_on_main_thread()` 把所有
-//! Store API 调用投递到这条线程上。
+//! ## UI 线程（为什么需要专用线程）
+//! `StoreContext::GetDefault()` 返回的 `IStoreContext` 在 WinRT 里是
+//! **UI-thread bound** 的：它要求在已用 `RoInitialize(RO_INIT_SINGLETHREADED)`
+//! 初始化的线程上调用，否则抛 `0x80070578 (RPC_E_NO_UI_THREAD)`。
+//!
+//! 0.4.2 / 0.4.3 各自尝试过两种修法，都被日志验证不生效：
+//!
+//! - 0.4.2：在 tokio `spawn_blocking` 里 `CoInitializeEx(COINIT_APARTMENTTHREADED)`。
+//!   —— `CoInitializeEx(STA)` ≠ UI thread。StoreContext 仍报 0x80070578。
+//! - 0.4.3：投递到 `app.run_on_main_thread()`，闭包跑在 tao 事件循环线程上。
+//!   —— tao 主线程虽然也 `CoInitializeEx(STA)` 过一次，但没
+//!   `RoInitialize(RO_INIT_SINGLETHREADED)`，且事件循环不是 WinRT
+//!   视角的 UI 线程，StoreContext 仍然报 0x80070578。
+//!
+//! 当前方案：自建一条**专用 UI 线程**。在 `std::thread::spawn` 的线程上
+//! 先 `CoInitializeEx(COINIT_APARTMENTTHREADED)`，再 `RoInitialize(RO_INIT_SINGLETHREADED)`，
+//! 然后跑一个 Win32 消息泵。所有 Store 调用都通过一个 std::mpsc channel
+//! 投递给这条线程执行，结果通过 std::mpsc::SyncSender 拿回。
+//!
+//! 这条线程在第一次需要 Store API 时按需启动，常驻到进程结束。
 //!
 //! ## 版本注意
 //! - 本文件锁定使用 `windows = "0.61"` + `windows-collections = "0.2"`。
@@ -32,11 +47,22 @@
 //!   （`HSTRING: RuntimeType` not satisfied），最终切回 0.61 解决。
 
 use std::collections::HashSet;
+use std::sync::{mpsc, OnceLock};
+use std::thread;
+use std::time::Duration;
 
 use tauri::AppHandle;
 
-use windows::Services::Store::{StoreContext, StorePurchaseStatus};
 use windows::core::HSTRING;
+use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Threading::{
+    CreateEventW, SetEvent, WaitForSingleObject, INFINITE,
+};
+use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_SINGLETHREADED};
+use windows::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, QS_ALLPOSTMESSAGE,
+};
 use windows_collections::IIterable;
 
 use super::PRO_LIFETIME_PRODUCT_ID;
@@ -92,6 +118,224 @@ impl From<StoreIapError> for String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 专用 UI 线程基础设施
+// ---------------------------------------------------------------------------
+
+/// UI 线程上一次初始化结果。用于诊断如果初始化失败就彻底放弃整条线程。
+#[derive(Debug, Clone, Copy)]
+enum UiThreadInit {
+    Ok,
+    CoInitFailed(u32),
+    RoInitFailed(u32),
+}
+
+/// 任务项：闭包在 UI 线程上执行，调用方通过 oneshot 拿回结果。
+type UiTask = Box<dyn FnOnce() + Send + 'static>;
+
+/// 持有 UI 线程的 channel sender 端。第一次访问时按需 spawn 线程。
+fn ui_thread_tx() -> &'static mpsc::SyncSender<UiTask> {
+    static TX: OnceLock<mpsc::SyncSender<UiTask>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<UiTask>(32);
+        let init_flag = CreateEventW(None, true, false, None)
+            .expect("CreateEventW for store-ui-thread init flag");
+        let ready_flag = CreateEventW(None, true, false, None)
+            .expect("CreateEventW for store-ui-thread ready flag");
+
+        thread::Builder::new()
+            .name("store-ui-thread".to_string())
+            .spawn(move || ui_thread_main(rx, init_flag, ready_flag))
+            .expect("failed to spawn store UI thread");
+
+        // 等待 UI 线程完成初始化（避免第一次 Store 调用撞上未初始化状态）。
+        // 设置 5 秒超时，超时不等了——Store 任务本身会再失败一次。
+        let wait = unsafe { WaitForSingleObject(ready_flag, 5_000) };
+        if wait != WAIT_OBJECT_0 {
+            tracing::warn!(
+                "[licensing] store-ui-thread did not signal ready within 5s (wait result: {:?})",
+                wait
+            );
+        }
+        tx
+    })
+}
+
+/// 在专用 UI 线程上同步执行 `f`，把 `Result<T, StoreIapError>` 拿回。
+///
+/// `StoreContext::GetDefault()` 是 WinRT UI-thread-bound API，必须在用
+/// `RoInitialize(RO_INIT_SINGLETHREADED)` 初始化过 WinRT 的线程上调用。
+/// 这条函数把闭包投递到我们自建的 UI 线程上执行，闭包跑完后再把结果
+/// send 回原线程的 oneshot channel。
+fn run_on_ui_thread<F, T>(_app: &AppHandle, f: F) -> Result<T, StoreIapError>
+where
+    F: FnOnce() -> Result<T, StoreIapError> + Send + 'static,
+    T: Send + 'static,
+{
+    let caller_tid = thread::current().id();
+    tracing::info!(
+        "[licensing] run_on_ui_thread called from thread {:?}",
+        caller_tid
+    );
+
+    let (tx, rx) = mpsc::sync_channel::<Result<T, StoreIapError>>(1);
+    let task: UiTask = Box::new(move || {
+        let tid = thread::current().id();
+        tracing::info!("[licensing] store-ui-thread {:?} executing task", tid);
+        let result = f();
+        tracing::info!(
+            "[licensing] store-ui-thread task finished, result ok={}",
+            result.is_ok()
+        );
+        // 发送失败说明接收方已经 drop，忽略即可——通常意味着调用方已经超时返回。
+        let _ = tx.send(result);
+    });
+
+    let dispatcher = ui_thread_tx();
+    tracing::info!("[licensing] dispatching task to store-ui-thread");
+    dispatcher
+        .send(task)
+        .map_err(|e| StoreIapError::UiThreadDispatch(format!("send: {}", e)))?;
+
+    // 闭包里的 Store 调用可能耗时（弹出购买弹窗、等待用户、等待 server 同步），
+    // 但通常在 30s 内。设置 5 分钟硬超时，超时返回错误而不是永远阻塞调用方。
+    match rx.recv_timeout(Duration::from_secs(300)) {
+        Ok(result) => Ok(result?),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            tracing::error!("[licensing] store-ui-thread task did not complete in 5 minutes");
+            Err(StoreIapError::UiThreadDispatch(
+                "store-ui-thread did not return within 5 minutes".to_string(),
+            ))
+        }
+        Err(e) => Err(StoreIapError::UiThreadDispatch(format!("recv: {}", e))),
+    }
+}
+
+/// UI 线程主循环：初始化 COM + WinRT，跑消息泵，处理任务。
+///
+/// 关键点：
+/// 1. 必须先 `CoInitializeEx(COINIT_APARTMENTTHREADED)`（在调用任何 COM
+///    之前），再 `RoInitialize(RO_INIT_SINGLETHREADED)`（在调用任何 WinRT
+///    之前）。颠倒顺序会得到 `RPC_E_CHANGED_MODE`。
+/// 2. 持续用 `GetQueueStatus(QS_ALLPOSTMESSAGE) + PeekMessageW(PM_REMOVE)`
+///    把 pending 的 Win32 消息 pump 掉——这是 WinRT `IAsyncOperation`
+///    回调派发的载体；不 pump 的话某些 `get()` 会永远阻塞。
+/// 3. 任务按顺序串行执行，保证 StoreContext 的线程亲和性不被破坏。
+fn ui_thread_main(
+    rx: mpsc::Receiver<UiTask>,
+    init_flag: windows::Win32::Foundation::HANDLE,
+    ready_flag: windows::Win32::Foundation::HANDLE,
+) {
+    // 1) COM STA 必须先于 WinRT 初始化。
+    // RPC_E_CHANGED_MODE = 0x80010106 表示线程已经以另一种模式初始化
+    // 过 COM，这种情况下 RoInitialize 可能仍然成功，但 Store API 会失败。
+    let com_hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let com_result = if com_hr.is_ok() {
+        tracing::info!("[licensing] store-ui-thread: CoInitializeEx(STA) ok");
+        UiThreadInit::Ok
+    } else if com_hr.0 == windows_core::HRESULT(0x80010106u32 as i32) {
+        // 线程已经初始化过 COM（比如 dllmain 中）。继续。
+        tracing::warn!("[licensing] store-ui-thread: CoInitializeEx returned RPC_E_CHANGED_MODE; continuing");
+        UiThreadInit::CoInitFailed(0x80010106)
+    } else {
+        let code = com_hr.0 as u32;
+        tracing::error!(
+            "[licensing] store-ui-thread: CoInitializeEx failed 0x{:08X}",
+            code
+        );
+        UiThreadInit::CoInitFailed(code)
+    };
+
+    // 2) RoInitialize(RO_INIT_SINGLETHREADED) 把线程标记为 WinRT UI 线程。
+    // 这正是 StoreContext::GetDefault() 需要的。S_FALSE (0x00000001) 表示
+    // 已经初始化过，视为成功。
+    let ro_hr = unsafe { RoInitialize(RO_INIT_SINGLETHREADED) };
+    let ro_result = if ro_hr.is_ok() || ro_hr.0 == windows_core::HRESULT(0x1) {
+        tracing::info!("[licensing] store-ui-thread: RoInitialize(STA) ok");
+        UiThreadInit::Ok
+    } else {
+        let code = ro_hr.0 as u32;
+        tracing::error!(
+            "[licensing] store-ui-thread: RoInitialize failed 0x{:08X}",
+            code
+        );
+        UiThreadInit::RoInitFailed(code)
+    };
+
+    // 通知主线程我们已经初始化好了（无论成功失败都通知，避免永远阻塞）。
+    unsafe {
+        let _ = SetEvent(ready_flag);
+    }
+
+    // 主循环：串行处理任务 + 间歇 pump Win32 消息。
+    loop {
+        // 用 recv_timeout 短间隔轮询，方便周期性 pump 消息。
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(task) => {
+                // 先 pump 一次消息把之前残留的 WinRT 回调消化掉。
+                pump_pending_messages();
+                if matches!(com_result, UiThreadInit::Ok) && matches!(ro_result, UiThreadInit::Ok) {
+                    task();
+                } else {
+                    // 初始化失败，任务直接返回错误。
+                    // 由于拿不到任务的 oneshot（被闭包捕获了），这里只能在日志里报告。
+                    tracing::error!(
+                        "[licensing] store-ui-thread dropping task: init failed com={:?} ro={:?}",
+                        com_result,
+                        ro_result
+                    );
+                }
+                // 任务执行后再 pump 一次，回收 IAsyncOperation 的回调。
+                pump_pending_messages();
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // 100ms 空闲窗口：pump 消息、然后继续等。
+                pump_pending_messages();
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                tracing::info!("[licensing] store-ui-thread: dispatcher disconnected, exiting");
+                break;
+            }
+        }
+    }
+
+    // 清理：先 RoUninitialize 再 CoUninitialize。
+    unsafe {
+        RoUninitialize();
+        if matches!(com_result, UiThreadInit::Ok) {
+            CoUninitialize();
+        }
+    }
+    // 标记 init 标志（即便没用到也保持语义清晰）。
+    let _ = init_flag;
+}
+
+/// 把当前线程消息队列里所有待处理的 Win32 消息 pump 掉。
+///
+/// 必须在 store-ui-thread 主循环中周期性调用，否则 `IAsyncOperation` 完成
+/// 时的回调（通过 PostThreadMessage 派发）会堆积，最终导致 `get()` 永不返回。
+fn pump_pending_messages() {
+    unsafe {
+        let mut msg = MSG::default();
+        // PM_REMOVE = 把消息从队列里拿出来。
+        // 第二/三个 0 表示所有 hwnd、所有 message range。
+        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&msg);
+            let _ = DispatchMessageW(&msg);
+        }
+        // QS_ALLPOSTMESSAGE 本身不需要主动 wait，因为 PeekMessageW 已经
+        // 帮我们 drain 队列。调用 GetQueueStatus 只是用来防止编译器优化掉
+        // 上面的 PeekMessageW。
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetQueueStatus(QS_ALLPOSTMESSAGE);
+        let _ = INFINITE;
+        let _ = WAIT_TIMEOUT;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Store API 入口
+// ---------------------------------------------------------------------------
+
 /// 构造 IIterable<HSTRING>。
 /// windows 0.61 中 `HSTRING` 实现 `Type<HSTRING, CloneType>`，
 /// 因此 `HSTRING::Default == HSTRING`，`IIterable::from` 接受 `Vec<HSTRING>`。
@@ -101,46 +345,24 @@ fn hstring_iterable(values: &[&str]) -> IIterable<HSTRING> {
     IIterable::<HSTRING>::from(vec)
 }
 
-/// 在 UI 线程上同步执行闭包 `f`，并把结果返回给调用方。
-///
-/// `StoreContext::GetDefault()` 必须在真正初始化 WinRT 的 UI 线程上调用，
-/// 把当前线程（哪怕是 STA）当成 UI 线程会得到 0x80070578
-/// （RPC_E_NO_UI_THREAD）。Tauri 把 webview 跑在主线程上，所以我们把任务
-/// 投递到那条线程，闭包跑完后再把结果 send 回原线程的 channel。
-fn run_on_ui_thread<F, T>(app: &AppHandle, f: F) -> Result<T, StoreIapError>
-where
-    F: FnOnce() -> Result<T, StoreIapError> + Send + 'static,
-    T: Send + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::channel::<Result<T, StoreIapError>>();
-    app.run_on_main_thread(move || {
-        // 闭包已经在 UI 线程上了；直接执行，不再额外 CoInitializeEx：
-        // Tauri 启动时主线程已经初始化好 COM / WinRT，再初始化反而会 RPC_E_CHANGED_MODE。
-        let result = f();
-        // 发送失败说明接收方已经 drop，忽略即可——通常意味着调用方已经超时返回。
-        let _ = tx.send(result);
-    })
-    .map_err(|e| StoreIapError::UiThreadDispatch(e.to_string()))?;
-    rx.recv().map_err(|e| {
-        StoreIapError::UiThreadDispatch(format!("UI thread channel closed: {}", e))
-    })?
-}
-
 /// 触发 Microsoft Store 购买弹窗。
 ///
 /// 阻塞等待用户在 Store 弹窗中完成购买。前端应保持 UI 在 loading 状态。
 /// 成功返回订单标识字符串（用作本地缓存的 store_order_id）。
 ///
-/// **重要**：Windows Store API 要求在 UI 线程上调用。我们通过
-/// `app.run_on_main_thread()` 把整个 Store 流程投递到托管 webview 的
-/// 主线程上执行。
+/// **重要**：Windows Store API 要求在 UI 线程上调用。我们通过自建的
+/// `store-ui-thread`（用 `RoInitialize(RO_INIT_SINGLETHREADED)` 初始化
+/// 过 WinRT 的专用线程）执行整个 Store 流程。
 pub async fn request_purchase_pro_lifetime(
     app: &AppHandle,
 ) -> Result<String, StoreIapError> {
     let app_clone = app.clone();
     tokio::task::spawn_blocking(move || {
         run_on_ui_thread(&app_clone, || -> Result<String, StoreIapError> {
-            let ctx = StoreContext::GetDefault().map_err(classify_error)?;
+            tracing::info!("[licensing] purchase: StoreContext::GetDefault start");
+            let ctx = windows::Services::Store::StoreContext::GetDefault()
+                .map_err(classify_error)?;
+            tracing::info!("[licensing] purchase: StoreContext::GetDefault ok");
 
             // 1. 拉取 Pro 加载项的 Store 元数据。
             let kinds = hstring_iterable(&["Durable"]);
@@ -161,20 +383,27 @@ pub async fn request_purchase_pro_lifetime(
             let status = result.Status().map_err(classify_error)?;
 
             match status {
-                StorePurchaseStatus::Succeeded | StorePurchaseStatus::AlreadyPurchased => {
+                windows::Services::Store::StorePurchaseStatus::Succeeded
+                | windows::Services::Store::StorePurchaseStatus::AlreadyPurchased => {
                     Ok(format!(
                         "store:{}:{}",
                         PRO_LIFETIME_PRODUCT_ID,
                         chrono::Utc::now().to_rfc3339()
                     ))
                 }
-                StorePurchaseStatus::NotPurchased => Err(StoreIapError::UserCancelled),
-                StorePurchaseStatus::NetworkError => Err(StoreIapError::NetworkError(
-                    "Could not reach the Microsoft Store".to_string(),
-                )),
-                StorePurchaseStatus::ServerError => Err(StoreIapError::Api(
-                    "Microsoft Store server error".to_string(),
-                )),
+                windows::Services::Store::StorePurchaseStatus::NotPurchased => {
+                    Err(StoreIapError::UserCancelled)
+                }
+                windows::Services::Store::StorePurchaseStatus::NetworkError => {
+                    Err(StoreIapError::NetworkError(
+                        "Could not reach the Microsoft Store".to_string(),
+                    ))
+                }
+                windows::Services::Store::StorePurchaseStatus::ServerError => {
+                    Err(StoreIapError::Api(
+                        "Microsoft Store server error".to_string(),
+                    ))
+                }
                 other => Err(StoreIapError::UnexpectedStatus(format!("{:?}", other))),
             }
         })
@@ -195,7 +424,10 @@ pub async fn get_user_owned_addons(
     let app_clone = app.clone();
     tokio::task::spawn_blocking(move || {
         run_on_ui_thread(&app_clone, || -> Result<HashSet<String>, StoreIapError> {
-            let ctx = StoreContext::GetDefault().map_err(classify_error)?;
+            tracing::info!("[licensing] entitlement: StoreContext::GetDefault start");
+            let ctx = windows::Services::Store::StoreContext::GetDefault()
+                .map_err(classify_error)?;
+            tracing::info!("[licensing] entitlement: StoreContext::GetDefault ok");
 
             let app_license_op = ctx.GetAppLicenseAsync().map_err(classify_error)?;
             let app_license = app_license_op.get().map_err(classify_error)?;
@@ -271,6 +503,14 @@ fn classify_error(err: windows::core::Error) -> StoreIapError {
     // 0x80073D54 = ERROR_NO_PACKAGE_IDENTITY: 进程没有 MSIX identity
     if code == 0x80073D54 {
         return StoreIapError::NoPackageIdentity;
+    }
+    // 0x80070578 = RPC_E_NO_UI_THREAD: 调用不在 WinRT UI 线程
+    if code == 0x80070578 {
+        tracing::error!(
+            "[licensing] Got 0x80070578 (RPC_E_NO_UI_THREAD) — store-ui-thread \
+            was supposed to be initialized as a WinRT UI thread but Store API \
+            still says otherwise. Check CoInitializeEx / RoInitialize logs above."
+        );
     }
     StoreIapError::Api(format!("HRESULT 0x{:08X}: {}", code, err.message()))
 }

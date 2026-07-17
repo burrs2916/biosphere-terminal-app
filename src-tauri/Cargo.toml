@@ -1,6 +1,6 @@
 [package]
 name = "biosphere-terminal-app"
-version = "0.4.3"
+version = "0.4.4"
 description = "Biosphere Terminal - Visual Terminal Application"
 authors = ["Biosphere Team"]
 edition = "2021"
@@ -52,11 +52,24 @@ tauri-plugin-clipboard-manager = "2.3.2"
 # crate (it is NOT re-exported from `windows::Foundation::Collections`),
 # so we must depend on it explicitly. windows 0.61 itself depends on
 # windows-collections 0.2 internally, so this stays single-version.
+#
+# Win32_* features here are for the dedicated `store-ui-thread` we spin up to
+# host the WinRT UI thread:
+#   * Win32_System_Com      — CoInitializeEx / CoUninitialize
+#   * Win32_System_WinRT    — RoInitialize / RoUninitialize
+#   * Win32_System_Threading — CreateEventW / SetEvent / WaitForSingleObject
+#   * Win32_UI_WindowsAndMessaging — PeekMessageW / DispatchMessageW
+#   * Win32_Foundation      — HANDLE / WAIT_EVENT constants
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
     "Foundation",
     "Foundation_Collections",
     "Services_Store",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_System_WinRT",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 windows-core = "0.61"
 windows-collections = "0.2"

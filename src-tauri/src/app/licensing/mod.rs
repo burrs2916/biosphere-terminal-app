@@ -146,6 +146,7 @@ impl LicensingService {
         // 避免非 Windows 编译时出现 unused_variable 警告。Windows 分支里
         // 会真正用到 app_handle。
         #[cfg(not(target_os = "windows"))]
+        #[allow(clippy::needless_return)]
         {
             let _ = app_handle;
             return;
