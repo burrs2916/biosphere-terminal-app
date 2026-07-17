@@ -86,7 +86,11 @@ export function UpgradeDialog() {
 
   const headline = useMemo(() => {
     if (isTrial && trialDaysLeft > 0) {
+      // 注意：i18next 只会替换那些作为参数传入的插值变量。
+      // 之前只传了 defaultValue 却没传 trialDaysLeft，
+      // 结果 UI 上出现字面量 "{{trialDaysLeft}} day(s)"。
       return t('license.upgrade.headlineTrial', {
+        trialDaysLeft,
         defaultValue: `Your trial ends in ${trialDaysLeft} day(s). Unlock Pro to keep everything.`,
       });
     }
