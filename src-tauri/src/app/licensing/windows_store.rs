@@ -30,6 +30,7 @@ use std::collections::HashSet;
 use windows::Services::Store::{StoreContext, StorePurchaseStatus};
 use windows::core::HSTRING;
 use windows_collections::IIterable;
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 
 use super::PRO_LIFETIME_PRODUCT_ID;
 
@@ -92,8 +93,21 @@ fn hstring_iterable(values: &[&str]) -> IIterable<HSTRING> {
 ///
 /// 阻塞等待用户在 Store 弹窗中完成购买。前端应保持 UI 在 loading 状态。
 /// 成功返回订单标识字符串（用作本地缓存的 store_order_id）。
+///
+/// **重要**：Windows Store API 要求在 STA 线程上调用。我们通过 CoInitializeEx
+/// 初始化当前线程为 STA 模式来满足这一要求。
 pub async fn request_purchase_pro_lifetime() -> Result<String, StoreIapError> {
     tokio::task::spawn_blocking(|| -> Result<String, StoreIapError> {
+        // 初始化 COM 为 STA 模式（Single Threaded Apartment）
+        // 这是 Windows Store API 的必需条件
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .map_err(|e| StoreIapError::Api(format!("CoInitializeEx failed: {}", e)))?;
+
+        // 确保在函数退出时清理 COM
+        let _guard = scopeguard::guard(|| {
+            CoUninitialize();
+        });
+
         let ctx = StoreContext::GetDefault().map_err(classify_error)?;
 
         // 1. 拉取 Pro 加载项的 Store 元数据。
@@ -138,8 +152,21 @@ pub async fn request_purchase_pro_lifetime() -> Result<String, StoreIapError> {
 ///
 /// 通过 `StoreContext::GetAppLicenseAsync` 获取应用的 License，
 /// 然后遍历 `AddOnLicenses`，收集所有 `IsActive=true` 的产品 ID。
+///
+/// **重要**：Windows Store API 要求在 STA 线程上调用。我们通过 CoInitializeEx
+/// 初始化当前线程为 STA 模式来满足这一要求。
 pub async fn get_user_owned_addons() -> Result<HashSet<String>, StoreIapError> {
     tokio::task::spawn_blocking(|| -> Result<HashSet<String>, StoreIapError> {
+        // 初始化 COM 为 STA 模式（Single Threaded Apartment）
+        // 这是 Windows Store API 的必需条件
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .map_err(|e| StoreIapError::Api(format!("CoInitializeEx failed: {}", e)))?;
+
+        // 确保在函数退出时清理 COM
+        let _guard = scopeguard::guard(|| {
+            CoUninitialize();
+        });
+
         let ctx = StoreContext::GetDefault().map_err(classify_error)?;
 
         let app_license_op = ctx.GetAppLicenseAsync().map_err(classify_error)?;
