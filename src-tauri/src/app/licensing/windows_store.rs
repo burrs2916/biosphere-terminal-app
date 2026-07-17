@@ -51,11 +51,13 @@ use std::sync::{mpsc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
-use windows::core::HSTRING;
+use windows::core::{Interface, HSTRING};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_SINGLETHREADED};
+use windows::Win32::UI::Shell::IInitializeWithWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
 };
@@ -159,9 +161,16 @@ fn ui_thread_tx() -> &'static mpsc::SyncSender<UiTask> {
 /// `RoInitialize(RO_INIT_SINGLETHREADED)` 初始化过 WinRT 的线程上调用。
 /// 这条函数把闭包投递到我们自建的 UI 线程上执行，闭包跑完后再把结果
 /// send 回原线程的 oneshot channel。
-fn run_on_ui_thread<F, T>(_app: &AppHandle, f: F) -> Result<T, StoreIapError>
+///
+/// **未打包 desktop app 关键**：Tauri 应用是 sideloaded exe，没有 MSIX
+/// identity，Store API 会走一条要求"关联窗口"的路径。因此我们把主窗口
+/// 的 HWND 也塞进闭包，闭包里对 `StoreContext` 调
+/// `IInitializeWithWindow::Initialize(hwnd)`——这样 Store 弹窗才有 owner，
+/// StoreContext 也才不会报 0x80070578（未打包情况下 0x80070578 的真正
+/// 原因是"缺少 initializer window"，不是"线程模式不对"）。
+fn run_on_ui_thread<F, T>(app: &AppHandle, f: F) -> Result<T, StoreIapError>
 where
-    F: FnOnce() -> Result<T, StoreIapError> + Send + 'static,
+    F: FnOnce(HWND) -> Result<T, StoreIapError> + Send + 'static,
     T: Send + 'static,
 {
     let caller_tid = thread::current().id();
@@ -170,11 +179,37 @@ where
         caller_tid
     );
 
+    // 拿主窗口 HWND。HWND 内部是 *mut c_void，不 impl Send；跨线程时用它
+    // 的 isize 表示搬运，进入 store-ui-thread 后再包回 HWND。
+    let hwnd_isize: isize = match app.get_webview_window("main") {
+        Some(win) => match win.hwnd() {
+            Ok(h) => {
+                let v = h.0 as isize;
+                tracing::info!("[licensing] main window HWND = 0x{:X}", v);
+                v
+            }
+            Err(e) => {
+                tracing::error!("[licensing] failed to get HWND: {}", e);
+                return Err(StoreIapError::UiThreadDispatch(format!(
+                    "get HWND failed: {}",
+                    e
+                )));
+            }
+        },
+        None => {
+            tracing::error!("[licensing] main webview window not found");
+            return Err(StoreIapError::UiThreadDispatch(
+                "main webview window not found".to_string(),
+            ));
+        }
+    };
+
     let (tx, rx) = mpsc::sync_channel::<Result<T, StoreIapError>>(1);
     let task: UiTask = Box::new(move || {
         let tid = thread::current().id();
         tracing::info!("[licensing] store-ui-thread {:?} executing task", tid);
-        let result = f();
+        let hwnd = HWND(hwnd_isize as *mut _);
+        let result = f(hwnd);
         tracing::info!(
             "[licensing] store-ui-thread task finished, result ok={}",
             result.is_ok()
@@ -348,11 +383,12 @@ pub async fn request_purchase_pro_lifetime(
 ) -> Result<String, StoreIapError> {
     let app_clone = app.clone();
     tokio::task::spawn_blocking(move || {
-        run_on_ui_thread(&app_clone, || -> Result<String, StoreIapError> {
+        run_on_ui_thread(&app_clone, |hwnd| -> Result<String, StoreIapError> {
             tracing::info!("[licensing] purchase: StoreContext::GetDefault start");
             let ctx = windows::Services::Store::StoreContext::GetDefault()
                 .map_err(classify_error)?;
             tracing::info!("[licensing] purchase: StoreContext::GetDefault ok");
+            associate_with_window(&ctx, hwnd)?;
 
             // 1. 拉取 Pro 加载项的 Store 元数据。
             let kinds = hstring_iterable(&["Durable"]);
@@ -413,11 +449,12 @@ pub async fn get_user_owned_addons(
 ) -> Result<HashSet<String>, StoreIapError> {
     let app_clone = app.clone();
     tokio::task::spawn_blocking(move || {
-        run_on_ui_thread(&app_clone, || -> Result<HashSet<String>, StoreIapError> {
+        run_on_ui_thread(&app_clone, |hwnd| -> Result<HashSet<String>, StoreIapError> {
             tracing::info!("[licensing] entitlement: StoreContext::GetDefault start");
             let ctx = windows::Services::Store::StoreContext::GetDefault()
                 .map_err(classify_error)?;
             tracing::info!("[licensing] entitlement: StoreContext::GetDefault ok");
+            associate_with_window(&ctx, hwnd)?;
 
             let app_license_op = ctx.GetAppLicenseAsync().map_err(classify_error)?;
             let app_license = app_license_op.get().map_err(classify_error)?;
@@ -485,6 +522,43 @@ pub async fn verify_pro_entitlement(
         owned
     );
     Ok(true)
+}
+
+/// 把 StoreContext 关联到主窗口。
+///
+/// 为什么必须做这一步：
+/// 未打包（sideloaded / not from Microsoft Store）的 desktop app 里，
+/// `StoreContext` 属于 Windows 官方文档明确说需要 `IInitializeWithWindow`
+/// 关联的 WinRT 对象——因为 Store 相关 UI（购买弹窗、登录弹窗）都要弹在
+/// 应用窗口之上，Windows 用这个接口来知道 owner HWND。如果不关联，
+/// StoreContext 内部的 broker 找不到宿主窗口就会返回 0x80070578
+/// (`RPC_E_NO_UI_THREAD`)——这个错误码在这里的含义其实是"缺少 initializer
+/// window"，而不是字面意思的"线程模式不对"。
+///
+/// MSIX 打包运行时 Windows 会自动帮我们做这个关联，`Initialize` 是无害的
+/// no-op，所以两种情况都调是安全的。
+fn associate_with_window(
+    ctx: &windows::Services::Store::StoreContext,
+    hwnd: HWND,
+) -> Result<(), StoreIapError> {
+    tracing::info!(
+        "[licensing] IInitializeWithWindow::Initialize(hwnd=0x{:X}) start",
+        hwnd.0 as isize
+    );
+    let init: IInitializeWithWindow = ctx.cast().map_err(|e| {
+        tracing::error!("[licensing] StoreContext.cast::<IInitializeWithWindow> failed: {}", e);
+        classify_error(e)
+    })?;
+    unsafe { init.Initialize(hwnd) }.map_err(|e| {
+        tracing::error!(
+            "[licensing] IInitializeWithWindow::Initialize failed 0x{:08X}: {}",
+            e.code().0 as u32,
+            e.message()
+        );
+        classify_error(e)
+    })?;
+    tracing::info!("[licensing] IInitializeWithWindow::Initialize ok");
+    Ok(())
 }
 
 /// 把 windows::core::Error 翻译成更友好的 StoreIapError。
