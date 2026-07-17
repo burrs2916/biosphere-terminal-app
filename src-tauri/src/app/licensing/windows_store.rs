@@ -16,6 +16,12 @@
 //! 2. AppxManifest 必须声明 `internetClient` capability。
 //! 3. 加载项必须先在 Partner Center 提交并通过认证（即 9NZ4NSFLW6RW）。
 //!
+//! ## UI 线程
+//! `StoreContext::GetDefault()` 必须在**真正初始化了 WinRT 的 UI 线程**
+//! 上调用，普通 STA 线程不够。Tauri 应用的 UI 线程就是托管 webview 的
+//! 主线程，所以我们通过 `app_handle.run_on_main_thread()` 把所有
+//! Store API 调用投递到这条线程上。
+//!
 //! ## 版本注意
 //! - 本文件锁定使用 `windows = "0.61"` + `windows-collections = "0.2"`。
 //!   IIterable 在 windows 0.61 没有 re-export 到 `windows::Foundation::Collections`，
@@ -27,10 +33,11 @@
 
 use std::collections::HashSet;
 
+use tauri::AppHandle;
+
 use windows::Services::Store::{StoreContext, StorePurchaseStatus};
 use windows::core::HSTRING;
 use windows_collections::IIterable;
-use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 
 use super::PRO_LIFETIME_PRODUCT_ID;
 
@@ -49,6 +56,8 @@ pub enum StoreIapError {
     NetworkError(String),
     /// 购买流程返回了未知/异常状态。
     UnexpectedStatus(String),
+    /// 未能把任务投递到 UI 线程（run_on_main_thread 返回错误）。
+    UiThreadDispatch(String),
 }
 
 impl std::fmt::Display for StoreIapError {
@@ -68,6 +77,9 @@ impl std::fmt::Display for StoreIapError {
             StoreIapError::UserCancelled => write!(f, "User cancelled the purchase"),
             StoreIapError::NetworkError(msg) => write!(f, "Network error: {}", msg),
             StoreIapError::UnexpectedStatus(s) => write!(f, "Unexpected purchase status: {}", s),
+            StoreIapError::UiThreadDispatch(msg) => {
+                write!(f, "Failed to dispatch Store call to UI thread: {}", msg)
+            }
         }
     }
 }
@@ -89,65 +101,83 @@ fn hstring_iterable(values: &[&str]) -> IIterable<HSTRING> {
     IIterable::<HSTRING>::from(vec)
 }
 
+/// 在 UI 线程上同步执行闭包 `f`，并把结果返回给调用方。
+///
+/// `StoreContext::GetDefault()` 必须在真正初始化 WinRT 的 UI 线程上调用，
+/// 把当前线程（哪怕是 STA）当成 UI 线程会得到 0x80070578
+/// （RPC_E_NO_UI_THREAD）。Tauri 把 webview 跑在主线程上，所以我们把任务
+/// 投递到那条线程，闭包跑完后再把结果 send 回原线程的 channel。
+fn run_on_ui_thread<F, T>(app: &AppHandle, f: F) -> Result<T, StoreIapError>
+where
+    F: FnOnce() -> Result<T, StoreIapError> + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel::<Result<T, StoreIapError>>();
+    app.run_on_main_thread(move || {
+        // 闭包已经在 UI 线程上了；直接执行，不再额外 CoInitializeEx：
+        // Tauri 启动时主线程已经初始化好 COM / WinRT，再初始化反而会 RPC_E_CHANGED_MODE。
+        let result = f();
+        // 发送失败说明接收方已经 drop，忽略即可——通常意味着调用方已经超时返回。
+        let _ = tx.send(result);
+    })
+    .map_err(|e| StoreIapError::UiThreadDispatch(e.to_string()))?;
+    rx.recv().map_err(|e| {
+        StoreIapError::UiThreadDispatch(format!("UI thread channel closed: {}", e))
+    })?
+}
+
 /// 触发 Microsoft Store 购买弹窗。
 ///
 /// 阻塞等待用户在 Store 弹窗中完成购买。前端应保持 UI 在 loading 状态。
 /// 成功返回订单标识字符串（用作本地缓存的 store_order_id）。
 ///
-/// **重要**：Windows Store API 要求在 STA 线程上调用。我们通过 CoInitializeEx
-/// 初始化当前线程为 STA 模式来满足这一要求。
-pub async fn request_purchase_pro_lifetime() -> Result<String, StoreIapError> {
-    tokio::task::spawn_blocking(|| -> Result<String, StoreIapError> {
-        // 初始化 COM 为 STA 模式（Single Threaded Apartment）
-        // 这是 Windows Store API 的必需条件
-        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        if hr.is_err() {
-            return Err(StoreIapError::Api(format!(
-                "CoInitializeEx failed: HRESULT 0x{:08X}",
-                hr.0 as u32
-            )));
-        }
+/// **重要**：Windows Store API 要求在 UI 线程上调用。我们通过
+/// `app.run_on_main_thread()` 把整个 Store 流程投递到托管 webview 的
+/// 主线程上执行。
+pub async fn request_purchase_pro_lifetime(
+    app: &AppHandle,
+) -> Result<String, StoreIapError> {
+    let app_clone = app.clone();
+    tokio::task::spawn_blocking(move || {
+        run_on_ui_thread(&app_clone, || -> Result<String, StoreIapError> {
+            let ctx = StoreContext::GetDefault().map_err(classify_error)?;
 
-        // 确保在函数退出时清理 COM
-        let _guard = scopeguard::guard((), |_| {
-            unsafe { CoUninitialize() };
-        });
+            // 1. 拉取 Pro 加载项的 Store 元数据。
+            let kinds = hstring_iterable(&["Durable"]);
+            let ids = hstring_iterable(&[PRO_LIFETIME_PRODUCT_ID]);
+            let query_op = ctx
+                .GetStoreProductsAsync(&kinds, &ids)
+                .map_err(classify_error)?;
+            let query_result = query_op.get().map_err(classify_error)?;
 
-        let ctx = StoreContext::GetDefault().map_err(classify_error)?;
+            let products = query_result.Products().map_err(classify_error)?;
+            let product = products
+                .Lookup(&HSTRING::from(PRO_LIFETIME_PRODUCT_ID))
+                .map_err(|_| StoreIapError::ProductNotFound)?;
 
-        // 1. 拉取 Pro 加载项的 Store 元数据。
-        let kinds = hstring_iterable(&["Durable"]);
-        let ids = hstring_iterable(&[PRO_LIFETIME_PRODUCT_ID]);
-        let query_op = ctx
-            .GetStoreProductsAsync(&kinds, &ids)
-            .map_err(classify_error)?;
-        let query_result = query_op.get().map_err(classify_error)?;
+            // 2. 触发购买弹窗，阻塞等待用户操作。
+            let purchase_op = product.RequestPurchaseAsync().map_err(classify_error)?;
+            let result = purchase_op.get().map_err(classify_error)?;
+            let status = result.Status().map_err(classify_error)?;
 
-        let products = query_result.Products().map_err(classify_error)?;
-        let product = products
-            .Lookup(&HSTRING::from(PRO_LIFETIME_PRODUCT_ID))
-            .map_err(|_| StoreIapError::ProductNotFound)?;
-
-        // 2. 触发购买弹窗，阻塞等待用户操作。
-        let purchase_op = product.RequestPurchaseAsync().map_err(classify_error)?;
-        let result = purchase_op.get().map_err(classify_error)?;
-        let status = result.Status().map_err(classify_error)?;
-
-        match status {
-            StorePurchaseStatus::Succeeded | StorePurchaseStatus::AlreadyPurchased => Ok(format!(
-                "store:{}:{}",
-                PRO_LIFETIME_PRODUCT_ID,
-                chrono::Utc::now().to_rfc3339()
-            )),
-            StorePurchaseStatus::NotPurchased => Err(StoreIapError::UserCancelled),
-            StorePurchaseStatus::NetworkError => Err(StoreIapError::NetworkError(
-                "Could not reach the Microsoft Store".to_string(),
-            )),
-            StorePurchaseStatus::ServerError => Err(StoreIapError::Api(
-                "Microsoft Store server error".to_string(),
-            )),
-            other => Err(StoreIapError::UnexpectedStatus(format!("{:?}", other))),
-        }
+            match status {
+                StorePurchaseStatus::Succeeded | StorePurchaseStatus::AlreadyPurchased => {
+                    Ok(format!(
+                        "store:{}:{}",
+                        PRO_LIFETIME_PRODUCT_ID,
+                        chrono::Utc::now().to_rfc3339()
+                    ))
+                }
+                StorePurchaseStatus::NotPurchased => Err(StoreIapError::UserCancelled),
+                StorePurchaseStatus::NetworkError => Err(StoreIapError::NetworkError(
+                    "Could not reach the Microsoft Store".to_string(),
+                )),
+                StorePurchaseStatus::ServerError => Err(StoreIapError::Api(
+                    "Microsoft Store server error".to_string(),
+                )),
+                other => Err(StoreIapError::UnexpectedStatus(format!("{:?}", other))),
+            }
+        })
     })
     .await
     .map_err(|e| StoreIapError::Api(format!("blocking task panicked: {}", e)))?
@@ -158,60 +188,49 @@ pub async fn request_purchase_pro_lifetime() -> Result<String, StoreIapError> {
 /// 通过 `StoreContext::GetAppLicenseAsync` 获取应用的 License，
 /// 然后遍历 `AddOnLicenses`，收集所有 `IsActive=true` 的产品 ID。
 ///
-/// **重要**：Windows Store API 要求在 STA 线程上调用。我们通过 CoInitializeEx
-/// 初始化当前线程为 STA 模式来满足这一要求。
-pub async fn get_user_owned_addons() -> Result<HashSet<String>, StoreIapError> {
-    tokio::task::spawn_blocking(|| -> Result<HashSet<String>, StoreIapError> {
-        // 初始化 COM 为 STA 模式（Single Threaded Apartment）
-        // 这是 Windows Store API 的必需条件
-        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        if hr.is_err() {
-            return Err(StoreIapError::Api(format!(
-                "CoInitializeEx failed: HRESULT 0x{:08X}",
-                hr.0 as u32
-            )));
-        }
+/// **重要**：Windows Store API 要求在 UI 线程上调用。
+pub async fn get_user_owned_addons(
+    app: &AppHandle,
+) -> Result<HashSet<String>, StoreIapError> {
+    let app_clone = app.clone();
+    tokio::task::spawn_blocking(move || {
+        run_on_ui_thread(&app_clone, || -> Result<HashSet<String>, StoreIapError> {
+            let ctx = StoreContext::GetDefault().map_err(classify_error)?;
 
-        // 确保在函数退出时清理 COM
-        let _guard = scopeguard::guard((), |_| {
-            unsafe { CoUninitialize() };
-        });
+            let app_license_op = ctx.GetAppLicenseAsync().map_err(classify_error)?;
+            let app_license = app_license_op.get().map_err(classify_error)?;
 
-        let ctx = StoreContext::GetDefault().map_err(classify_error)?;
-
-        let app_license_op = ctx.GetAppLicenseAsync().map_err(classify_error)?;
-        let app_license = app_license_op.get().map_err(classify_error)?;
-
-        let mut owned = HashSet::new();
-        let addon_licenses = app_license.AddOnLicenses().map_err(classify_error)?;
-        let iter = addon_licenses.First().map_err(classify_error)?;
-        loop {
-            if !iter.HasCurrent().map_err(classify_error)? {
-                break;
-            }
-            let kvp = iter.Current().map_err(classify_error)?;
-            let key = kvp.Key().map_err(classify_error)?.to_string();
-            let license = kvp.Value().map_err(classify_error)?;
-            if license.IsActive().map_err(classify_error)? {
-                if !key.is_empty() {
-                    owned.insert(key);
+            let mut owned = HashSet::new();
+            let addon_licenses = app_license.AddOnLicenses().map_err(classify_error)?;
+            let iter = addon_licenses.First().map_err(classify_error)?;
+            loop {
+                if !iter.HasCurrent().map_err(classify_error)? {
+                    break;
                 }
-                if let Ok(token) = license.InAppOfferToken() {
-                    let token_str = token.to_string();
-                    if !token_str.is_empty() {
-                        owned.insert(token_str);
+                let kvp = iter.Current().map_err(classify_error)?;
+                let key = kvp.Key().map_err(classify_error)?.to_string();
+                let license = kvp.Value().map_err(classify_error)?;
+                if license.IsActive().map_err(classify_error)? {
+                    if !key.is_empty() {
+                        owned.insert(key);
+                    }
+                    if let Ok(token) = license.InAppOfferToken() {
+                        let token_str = token.to_string();
+                        if !token_str.is_empty() {
+                            owned.insert(token_str);
+                        }
+                    }
+                    if let Ok(sku) = license.SkuStoreId() {
+                        let sku_str = sku.to_string();
+                        if !sku_str.is_empty() {
+                            owned.insert(sku_str);
+                        }
                     }
                 }
-                if let Ok(sku) = license.SkuStoreId() {
-                    let sku_str = sku.to_string();
-                    if !sku_str.is_empty() {
-                        owned.insert(sku_str);
-                    }
-                }
+                iter.MoveNext().map_err(classify_error)?;
             }
-            iter.MoveNext().map_err(classify_error)?;
-        }
-        Ok(owned)
+            Ok(owned)
+        })
     })
     .await
     .map_err(|e| StoreIapError::Api(format!("blocking task panicked: {}", e)))?
@@ -226,8 +245,10 @@ pub async fn get_user_owned_addons() -> Result<HashSet<String>, StoreIapError> {
 /// 这避免了 Store API 返回的 key 可能是 SkuStoreId / InAppOfferToken 等
 /// 多种格式时的精确字符串匹配难题。如果将来引入第二个加载项，需要改为
 /// 精确比较 product.StoreId。
-pub async fn verify_pro_entitlement() -> Result<bool, StoreIapError> {
-    let owned = get_user_owned_addons().await?;
+pub async fn verify_pro_entitlement(
+    app: &AppHandle,
+) -> Result<bool, StoreIapError> {
+    let owned = get_user_owned_addons(app).await?;
     if owned.is_empty() {
         return Ok(false);
     }

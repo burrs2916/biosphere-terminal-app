@@ -535,10 +535,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             // 启动后异步与 Microsoft Store 同步 entitlement，防止本地缓存被人工编辑。
             // 仅 Windows 平台有意义，其他平台是 no-op。
+            // 必须把 app_handle 传下去：Windows Store API 要求在 UI 线程
+            // 上调用，sync_with_store 内部会用 run_on_main_thread 投递。
             {
                 let licensing_for_sync = licensing_service.clone();
+                let app_handle_for_sync = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    licensing_for_sync.sync_with_store().await;
+                    licensing_for_sync.sync_with_store(&app_handle_for_sync).await;
                 });
             }
 

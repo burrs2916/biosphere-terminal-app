@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
 use tokio::sync::RwLock;
 
 #[cfg(target_os = "windows")]
@@ -135,7 +136,21 @@ impl LicensingService {
     /// - 若 Store API 不可用（侧载、网络异常）→ 保留本地状态，不做改动。
     ///
     /// 仅在 Windows 平台上有意义，其他平台是 no-op。
-    pub async fn sync_with_store(&self) {
+    ///
+    /// `app_handle` 用于把 `Windows.Services.Store` 的调用投递到 UI 线程
+    /// （Tauri 托管 webview 的主线程）。这是 Store API 的硬性要求：在
+    /// 普通线程（哪怕 STA）上调用会得到 0x80070578
+    /// （RPC_E_NO_UI_THREAD）。
+    pub async fn sync_with_store(&self, app_handle: &AppHandle) {
+        // 非 Windows 平台整个函数体是 no-op，参数未被读取——显式消费一次以
+        // 避免非 Windows 编译时出现 unused_variable 警告。Windows 分支里
+        // 会真正用到 app_handle。
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = app_handle;
+            return;
+        }
+        #[allow(unused_variables)]
         #[cfg(target_os = "windows")]
         {
             /// 刚购买后给 Store 后台同步留出的宽限期。期间内若 Store 端
@@ -143,7 +158,7 @@ impl LicensingService {
             /// 24 小时是 Microsoft 官方文档建议的同步上限。
             const PURCHASE_GRACE_HOURS: i64 = 24;
 
-            let owned = match windows_store::verify_pro_entitlement().await {
+            let owned = match windows_store::verify_pro_entitlement(app_handle).await {
                 Ok(v) => v,
                 Err(err) => {
                     tracing::info!(

@@ -1,6 +1,6 @@
 use crate::app::licensing::{LicenseStatus, LicensingService, PRO_LIFETIME_PRODUCT_ID};
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 /// Return the current license status (trial / free / pro).
 #[tauri::command]
@@ -28,6 +28,7 @@ pub async fn check_pro_status(
 #[tauri::command]
 pub async fn purchase_pro_lifetime(
     service: State<'_, Arc<LicensingService>>,
+    app_handle: AppHandle,
 ) -> Result<LicenseStatus, String> {
     #[cfg(target_os = "windows")]
     {
@@ -35,7 +36,8 @@ pub async fn purchase_pro_lifetime(
         // Step 1: 弹出 Store 购买窗口，等待用户支付。
         // RequestPurchaseAsync 返回 Succeeded 时，Store 客户端已经原子性
         // 确认了支付与 entitlement 授权（即使 server 端同步还没传播过来）。
-        let order_id = windows_store::request_purchase_pro_lifetime()
+        // app_handle 用于把 Store 调用投递到 UI 线程，否则 0x80070578。
+        let order_id = windows_store::request_purchase_pro_lifetime(&app_handle)
             .await
             .map_err(String::from)?;
         // Step 2: 直接写入本地缓存。后续启动 sync_with_store 会慢慢核对
@@ -45,7 +47,7 @@ pub async fn purchase_pro_lifetime(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = service;
+        let _ = (service, app_handle);
         Err("In-app purchases are only available on the Windows Microsoft Store build.".to_string())
     }
 }
@@ -59,11 +61,13 @@ pub async fn purchase_pro_lifetime(
 #[tauri::command]
 pub async fn restore_pro_license(
     service: State<'_, Arc<LicensingService>>,
+    app_handle: AppHandle,
 ) -> Result<LicenseStatus, String> {
     #[cfg(target_os = "windows")]
     {
         use crate::app::licensing::windows_store;
-        let owned = windows_store::verify_pro_entitlement()
+        // app_handle 用于把 Store 调用投递到 UI 线程，否则 0x80070578。
+        let owned = windows_store::verify_pro_entitlement(&app_handle)
             .await
             .map_err(String::from)?;
         if owned {
@@ -81,7 +85,7 @@ pub async fn restore_pro_license(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = service;
+        let _ = (service, app_handle);
         Err("Restore Purchase is only available on the Windows Microsoft Store build.".to_string())
     }
 }
