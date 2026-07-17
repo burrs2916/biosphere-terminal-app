@@ -1,6 +1,6 @@
 [package]
 name = "biosphere-terminal-app"
-version = "0.4.4"
+version = "0.4.5"
 description = "Biosphere Terminal - Visual Terminal Application"
 authors = ["Biosphere Team"]
 edition = "2021"
@@ -57,9 +57,8 @@ tauri-plugin-clipboard-manager = "2.3.2"
 # host the WinRT UI thread:
 #   * Win32_System_Com      — CoInitializeEx / CoUninitialize
 #   * Win32_System_WinRT    — RoInitialize / RoUninitialize
-#   * Win32_System_Threading — CreateEventW / SetEvent / WaitForSingleObject
 #   * Win32_UI_WindowsAndMessaging — PeekMessageW / DispatchMessageW
-#   * Win32_Foundation      — HANDLE / WAIT_EVENT constants
+#   * Win32_Foundation      — HANDLE / HRESULT / BOOL
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
     "Foundation",
@@ -67,7 +66,6 @@ windows = { version = "0.61", features = [
     "Services_Store",
     "Win32_Foundation",
     "Win32_System_Com",
-    "Win32_System_Threading",
     "Win32_System_WinRT",
     "Win32_UI_WindowsAndMessaging",
 ] }

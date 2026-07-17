@@ -54,14 +54,10 @@ use std::time::Duration;
 use tauri::AppHandle;
 
 use windows::core::HSTRING;
-use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
-use windows::Win32::System::Threading::{
-    CreateEventW, SetEvent, WaitForSingleObject, INFINITE,
-};
 use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_SINGLETHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, QS_ALLPOSTMESSAGE,
+    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
 };
 use windows_collections::IIterable;
 
@@ -138,23 +134,19 @@ fn ui_thread_tx() -> &'static mpsc::SyncSender<UiTask> {
     static TX: OnceLock<mpsc::SyncSender<UiTask>> = OnceLock::new();
     TX.get_or_init(|| {
         let (tx, rx) = mpsc::sync_channel::<UiTask>(32);
-        let init_flag = CreateEventW(None, true, false, None)
-            .expect("CreateEventW for store-ui-thread init flag");
-        let ready_flag = CreateEventW(None, true, false, None)
-            .expect("CreateEventW for store-ui-thread ready flag");
+        // 用普通 std::mpsc 的 sync_channel(0) 替代 Win32 Event 做 ready 通知，
+        // 避免引入 Win32_Security feature 才能用的 CreateEventW。
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<()>(0);
 
         thread::Builder::new()
             .name("store-ui-thread".to_string())
-            .spawn(move || ui_thread_main(rx, init_flag, ready_flag))
+            .spawn(move || ui_thread_main(rx, ready_tx))
             .expect("failed to spawn store UI thread");
 
-        // 等待 UI 线程完成初始化（避免第一次 Store 调用撞上未初始化状态）。
-        // 设置 5 秒超时，超时不等了——Store 任务本身会再失败一次。
-        let wait = unsafe { WaitForSingleObject(ready_flag, 5_000) };
-        if wait != WAIT_OBJECT_0 {
+        // 等待 UI 线程完成 COM+WinRT 初始化再返回 tx。5 秒超时兜底。
+        if ready_rx.recv_timeout(Duration::from_secs(5)).is_err() {
             tracing::warn!(
-                "[licensing] store-ui-thread did not signal ready within 5s (wait result: {:?})",
-                wait
+                "[licensing] store-ui-thread did not signal ready within 5s"
             );
         }
         tx
@@ -223,49 +215,55 @@ where
 /// 3. 任务按顺序串行执行，保证 StoreContext 的线程亲和性不被破坏。
 fn ui_thread_main(
     rx: mpsc::Receiver<UiTask>,
-    init_flag: windows::Win32::Foundation::HANDLE,
-    ready_flag: windows::Win32::Foundation::HANDLE,
+    ready_tx: mpsc::SyncSender<()>,
 ) {
     // 1) COM STA 必须先于 WinRT 初始化。
-    // RPC_E_CHANGED_MODE = 0x80010106 表示线程已经以另一种模式初始化
-    // 过 COM，这种情况下 RoInitialize 可能仍然成功，但 Store API 会失败。
+    // CoInitializeEx 返回 HRESULT（不是 Result）。RPC_E_CHANGED_MODE
+    // (0x80010106) 表示线程已经以另一种模式初始化过 COM。
     let com_hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let com_code = com_hr.0 as u32;
     let com_result = if com_hr.is_ok() {
-        tracing::info!("[licensing] store-ui-thread: CoInitializeEx(STA) ok");
+        tracing::info!(
+            "[licensing] store-ui-thread: CoInitializeEx(STA) ok (hr=0x{:08X})",
+            com_code
+        );
         UiThreadInit::Ok
-    } else if com_hr.0 == windows_core::HRESULT(0x80010106u32 as i32) {
+    } else if com_code == 0x80010106 {
         // 线程已经初始化过 COM（比如 dllmain 中）。继续。
-        tracing::warn!("[licensing] store-ui-thread: CoInitializeEx returned RPC_E_CHANGED_MODE; continuing");
-        UiThreadInit::CoInitFailed(0x80010106)
+        tracing::warn!(
+            "[licensing] store-ui-thread: CoInitializeEx returned RPC_E_CHANGED_MODE; continuing"
+        );
+        UiThreadInit::CoInitFailed(com_code)
     } else {
-        let code = com_hr.0 as u32;
         tracing::error!(
             "[licensing] store-ui-thread: CoInitializeEx failed 0x{:08X}",
-            code
+            com_code
         );
-        UiThreadInit::CoInitFailed(code)
+        UiThreadInit::CoInitFailed(com_code)
     };
 
     // 2) RoInitialize(RO_INIT_SINGLETHREADED) 把线程标记为 WinRT UI 线程。
-    // 这正是 StoreContext::GetDefault() 需要的。S_FALSE (0x00000001) 表示
-    // 已经初始化过，视为成功。
-    let ro_hr = unsafe { RoInitialize(RO_INIT_SINGLETHREADED) };
-    let ro_result = if ro_hr.is_ok() || ro_hr.0 == windows_core::HRESULT(0x1) {
-        tracing::info!("[licensing] store-ui-thread: RoInitialize(STA) ok");
-        UiThreadInit::Ok
-    } else {
-        let code = ro_hr.0 as u32;
-        tracing::error!(
-            "[licensing] store-ui-thread: RoInitialize failed 0x{:08X}",
-            code
-        );
-        UiThreadInit::RoInitFailed(code)
+    // 这正是 StoreContext::GetDefault() 需要的。
+    // RoInitialize 返回 windows_core::Result<()>（内部已经处理了 S_FALSE）。
+    let ro_result = match unsafe { RoInitialize(RO_INIT_SINGLETHREADED) } {
+        Ok(()) => {
+            tracing::info!("[licensing] store-ui-thread: RoInitialize(STA) ok");
+            UiThreadInit::Ok
+        }
+        Err(e) => {
+            let code = e.code().0 as u32;
+            tracing::error!(
+                "[licensing] store-ui-thread: RoInitialize failed 0x{:08X}: {}",
+                code,
+                e.message()
+            );
+            UiThreadInit::RoInitFailed(code)
+        }
     };
 
     // 通知主线程我们已经初始化好了（无论成功失败都通知，避免永远阻塞）。
-    unsafe {
-        let _ = SetEvent(ready_flag);
-    }
+    let _ = ready_tx.send(());
+    drop(ready_tx);
 
     // 主循环：串行处理任务 + 间歇 pump Win32 消息。
     loop {
@@ -306,8 +304,6 @@ fn ui_thread_main(
             CoUninitialize();
         }
     }
-    // 标记 init 标志（即便没用到也保持语义清晰）。
-    let _ = init_flag;
 }
 
 /// 把当前线程消息队列里所有待处理的 Win32 消息 pump 掉。
@@ -323,12 +319,6 @@ fn pump_pending_messages() {
             let _ = TranslateMessage(&msg);
             let _ = DispatchMessageW(&msg);
         }
-        // QS_ALLPOSTMESSAGE 本身不需要主动 wait，因为 PeekMessageW 已经
-        // 帮我们 drain 队列。调用 GetQueueStatus 只是用来防止编译器优化掉
-        // 上面的 PeekMessageW。
-        let _ = windows::Win32::UI::WindowsAndMessaging::GetQueueStatus(QS_ALLPOSTMESSAGE);
-        let _ = INFINITE;
-        let _ = WAIT_TIMEOUT;
     }
 }
 
