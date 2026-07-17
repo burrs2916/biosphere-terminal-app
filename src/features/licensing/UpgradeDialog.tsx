@@ -211,7 +211,7 @@ export function UpgradeDialog() {
             <Alert severity="info" variant="outlined">
               {t('license.upgrade.sideloadHint', {
                 defaultValue:
-                  'In-app purchase is only available when the app is installed from Microsoft Store. Please use the "Buy on Microsoft Store" button below to complete the purchase in your browser.',
+                  'In-app purchase is only available when the app is installed from Microsoft Store. To purchase Pro: (1) click "Buy on Microsoft Store" below, (2) after buying, uninstall this sideloaded copy, (3) install the app from Microsoft Store — your purchase will unlock automatically on next launch.',
               })}
             </Alert>
           )}

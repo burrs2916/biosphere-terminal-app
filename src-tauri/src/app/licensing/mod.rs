@@ -129,18 +129,24 @@ impl LicensingService {
     }
 
     /// 启动后异步与 Microsoft Store 同步 entitlement 状态：
-    /// - 若 Store 报告已购买但本地未标记 Pro → 自动 unlock；
-    /// - 若 Store 报告未购买但本地标记 Pro → 仅当超过宽限期才撤销，
-    ///   防止刚刚购买的用户因 Store 后台同步延迟（5-30 秒，偶尔几小时）
-    ///   而被错误降级；
+    ///
+    /// **策略（v0.4.9 起）：只加不减。**
+    /// - 若 Store 报告已购买但本地未标记 Pro → 自动 unlock 并 emit
+    ///   `license-changed` 事件通知前端刷新。
+    /// - 若 Store 报告未购买但本地标记 Pro → **不做任何撤销**。
+    ///   理由：Store server 端 entitlement 同步偶发性会跨天（甚至更久，
+    ///   且没有官方 SLA）。撤销真实付费用户的 Pro 状态，无论宽限期设多长，
+    ///   都会造成商业上极坏的体验（用户已付款却被降级）。本地 license.json
+    ///   的写保护成本远低于错杀成本。
+    ///   如果确实出现"退款/欺诈"场景，需要走客服人工处理（未来可加
+    ///   服务端签名 receipt 才能真正判断是否应撤销）。
     /// - 若 Store API 不可用（侧载、网络异常）→ 保留本地状态，不做改动。
     ///
     /// 仅在 Windows 平台上有意义，其他平台是 no-op。
     ///
-    /// `app_handle` 用于把 `Windows.Services.Store` 的调用投递到 UI 线程
-    /// （Tauri 托管 webview 的主线程）。这是 Store API 的硬性要求：在
-    /// 普通线程（哪怕 STA）上调用会得到 0x80070578
-    /// （RPC_E_NO_UI_THREAD）。
+    /// `app_handle` 用途：
+    /// 1. 传给 windows_store 用于把调用投递到 UI 线程；
+    /// 2. 自动解锁成功后用于 emit 前端事件。
     pub async fn sync_with_store(&self, app_handle: &AppHandle) {
         // 非 Windows 平台整个函数体是 no-op，参数未被读取——显式消费一次以
         // 避免非 Windows 编译时出现 unused_variable 警告。Windows 分支里
@@ -151,14 +157,8 @@ impl LicensingService {
             let _ = app_handle;
             return;
         }
-        #[allow(unused_variables)]
         #[cfg(target_os = "windows")]
         {
-            /// 刚购买后给 Store 后台同步留出的宽限期。期间内若 Store 端
-            /// 暂时还没看到 entitlement，仍然保留本地 Pro 状态。
-            /// 24 小时是 Microsoft 官方文档建议的同步上限。
-            const PURCHASE_GRACE_HOURS: i64 = 24;
-
             let owned = match windows_store::verify_pro_entitlement(app_handle).await {
                 Ok(v) => v,
                 Err(err) => {
@@ -172,84 +172,43 @@ impl LicensingService {
 
             let mut state = self.state.write().await;
             let local_pro = state.pro_unlocked_at.is_some();
-            match (owned, local_pro) {
-                (true, false) => {
-                    // 先构造新状态并写盘，写盘成功后才修改内存状态，确保两者一致。
-                    let mut new_state = state.clone();
-                    new_state.pro_unlocked_at = Some(Utc::now().to_rfc3339());
-                    new_state.store_order_id = Some(format!(
-                        "store-sync:{}:{}",
-                        PRO_LIFETIME_PRODUCT_ID,
-                        Utc::now().to_rfc3339()
-                    ));
-                    if let Err(e) = Self::save_state(&self.state_path, &new_state) {
-                        tracing::warn!("[licensing] failed to persist store sync: {}", e);
-                        // 写盘失败：不修改内存状态，保持与磁盘一致。
-                        return;
-                    }
-                    *state = new_state;
-                    drop(state);
-                    tracing::info!("[licensing] store sync: Pro auto-unlocked from Store entitlement");
+
+            if owned && !local_pro {
+                // 先构造新状态并写盘，写盘成功后才修改内存状态，确保两者一致。
+                let mut new_state = state.clone();
+                new_state.pro_unlocked_at = Some(Utc::now().to_rfc3339());
+                new_state.store_order_id = Some(format!(
+                    "store-sync:{}:{}",
+                    PRO_LIFETIME_PRODUCT_ID,
+                    Utc::now().to_rfc3339()
+                ));
+                if let Err(e) = Self::save_state(&self.state_path, &new_state) {
+                    tracing::warn!("[licensing] failed to persist store sync: {}", e);
+                    // 写盘失败：不修改内存状态，保持与磁盘一致。
+                    return;
                 }
-                (false, true) => {
-                    // Store 端没找到 entitlement，但本地仍标记 Pro。
-                    // 仅当 store_order_id 来自真实 Store 流程（前缀 "store"）时才考虑撤销，
-                    // 因为开发模式下手动 unlock_pro 不应被清空。
-                    let from_store = state
-                        .store_order_id
-                        .as_deref()
-                        .map(|s| s.starts_with("store"))
-                        .unwrap_or(false);
-                    if !from_store {
-                        tracing::info!(
-                            "[licensing] store sync: local non-store unlock kept as-is"
-                        );
-                        return;
-                    }
-
-                    // 检查购买时间是否仍在宽限期内。pro_unlocked_at 比 store_order_id
-                    // 更稳定（始终是 RFC3339 时间），优先使用它。
-                    let purchased_at = state
-                        .pro_unlocked_at
-                        .as_deref()
-                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                        .map(|dt| dt.with_timezone(&Utc));
-
-                    let in_grace_period = match purchased_at {
-                        Some(t) => (Utc::now() - t).num_hours() < PURCHASE_GRACE_HOURS,
-                        // 时间戳损坏：保守起见认为仍在宽限期，宁可放过不可错杀。
-                        None => true,
-                    };
-
-                    if in_grace_period {
-                        tracing::info!(
-                            "[licensing] store sync: entitlement not yet visible but \
-                            purchase is within {}h grace period, keeping Pro state",
-                            PURCHASE_GRACE_HOURS
-                        );
-                        return;
-                    }
-
-                    // 先构造新状态并写盘，写盘成功后才修改内存状态，确保两者一致。
-                    let mut new_state = state.clone();
-                    new_state.pro_unlocked_at = None;
-                    new_state.store_order_id = None;
-                    if let Err(e) = Self::save_state(&self.state_path, &new_state) {
-                        tracing::warn!("[licensing] failed to persist store revoke: {}", e);
-                        // 写盘失败：不修改内存状态，保持与磁盘一致。
-                        return;
-                    }
-                    *state = new_state;
-                    drop(state);
+                let new_status = Self::compute_status(&new_state);
+                *state = new_state;
+                drop(state);
+                tracing::info!(
+                    "[licensing] store sync: Pro auto-unlocked from Store entitlement"
+                );
+                // 通知前端：新的 LicenseStatus 需要立刻在 UI 刷新，
+                // 不然用户在 Store 网页买完 → 装 MSIX 版启动，UI 还会一直
+                // 停留在 trial 状态，直到手动 Restore / 重启，体验极差。
+                use tauri::Emitter;
+                if let Err(e) = app_handle.emit("license-changed", &new_status) {
                     tracing::warn!(
-                        "[licensing] store sync: Pro revoked because no entitlement was \
-                        found after {}h grace period",
-                        PURCHASE_GRACE_HOURS
+                        "[licensing] failed to emit license-changed event: {}",
+                        e
                     );
                 }
-                _ => {
-                    tracing::debug!("[licensing] store sync: state matches Store, no change");
-                }
+            } else {
+                tracing::debug!(
+                    "[licensing] store sync: no auto-unlock needed (owned={}, local_pro={})",
+                    owned,
+                    local_pro
+                );
             }
         }
     }

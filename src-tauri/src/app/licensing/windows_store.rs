@@ -168,7 +168,22 @@ fn ui_thread_tx() -> &'static mpsc::SyncSender<UiTask> {
 /// `IInitializeWithWindow::Initialize(hwnd)`——这样 Store 弹窗才有 owner，
 /// StoreContext 也才不会报 0x80070578（未打包情况下 0x80070578 的真正
 /// 原因是"缺少 initializer window"，不是"线程模式不对"）。
-fn run_on_ui_thread<F, T>(app: &AppHandle, f: F) -> Result<T, StoreIapError>
+/// 在专用 UI 线程上同步执行 `f`，把 `Result<T, StoreIapError>` 拿回。
+///
+/// `timeout` 控制我们等 UI 线程完成任务的最大时间：
+/// - `None` = 无限等待。用于会弹出 Store 购买/登录窗口的调用
+///   （`RequestPurchaseAsync`）——用户可能花几十分钟登录 Microsoft
+///   账号 + 绑定支付方式；任何有限超时都可能在用户已经付款后中断链路，
+///   造成"付了钱但显示失败"的商业灾难。
+/// - `Some(dur)` = 有限超时。用于纯查询性质、不弹窗的调用
+///   （`GetAppLicenseAsync` / `verify_pro_entitlement`）——这些调用
+///   在网络异常时应当尽快 fallback 到"保留本地状态"，避免启动
+///   同步任务永远挂着。
+fn run_on_ui_thread<F, T>(
+    app: &AppHandle,
+    timeout: Option<Duration>,
+    f: F,
+) -> Result<T, StoreIapError>
 where
     F: FnOnce(HWND) -> Result<T, StoreIapError> + Send + 'static,
     T: Send + 'static,
@@ -224,17 +239,31 @@ where
         .send(task)
         .map_err(|e| StoreIapError::UiThreadDispatch(format!("send: {}", e)))?;
 
-    // 闭包里的 Store 调用可能耗时（弹出购买弹窗、等待用户、等待 server 同步），
-    // 但通常在 30s 内。设置 5 分钟硬超时，超时返回错误而不是永远阻塞调用方。
-    match rx.recv_timeout(Duration::from_secs(300)) {
-        Ok(result) => Ok(result?),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            tracing::error!("[licensing] store-ui-thread task did not complete in 5 minutes");
-            Err(StoreIapError::UiThreadDispatch(
-                "store-ui-thread did not return within 5 minutes".to_string(),
-            ))
+    // 闭包里的 Store 调用可能耗时——特别是购买流程要等用户登录 + 输入支付
+    // + 确认。若 `timeout=None` 我们无限等待，永远不打断用户；若
+    // `timeout=Some(dur)` 则超过时返回错误。
+    match timeout {
+        None => {
+            // recv() 返回 Result<Result<T, StoreIapError>, RecvError>
+            let inner = rx
+                .recv()
+                .map_err(|e| StoreIapError::UiThreadDispatch(format!("recv: {}", e)))?;
+            inner
         }
-        Err(e) => Err(StoreIapError::UiThreadDispatch(format!("recv: {}", e))),
+        Some(dur) => match rx.recv_timeout(dur) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                tracing::error!(
+                    "[licensing] store-ui-thread task did not complete in {:?}",
+                    dur
+                );
+                Err(StoreIapError::UiThreadDispatch(format!(
+                    "store-ui-thread did not return within {:?}",
+                    dur
+                )))
+            }
+            Err(e) => Err(StoreIapError::UiThreadDispatch(format!("recv: {}", e))),
+        },
     }
 }
 
@@ -383,7 +412,9 @@ pub async fn request_purchase_pro_lifetime(
 ) -> Result<String, StoreIapError> {
     let app_clone = app.clone();
     tokio::task::spawn_blocking(move || {
-        run_on_ui_thread(&app_clone, |hwnd| -> Result<String, StoreIapError> {
+        // 购买流程会弹出 Store 窗口等用户交互，可能耗时数十分钟；
+        // 传 None 表示无限等待，避免用户已经付款后被超时中断。
+        run_on_ui_thread(&app_clone, None, |hwnd| -> Result<String, StoreIapError> {
             tracing::info!("[licensing] purchase: StoreContext::GetDefault start");
             let ctx = windows::Services::Store::StoreContext::GetDefault()
                 .map_err(classify_error)?;
@@ -449,7 +480,9 @@ pub async fn get_user_owned_addons(
 ) -> Result<HashSet<String>, StoreIapError> {
     let app_clone = app.clone();
     tokio::task::spawn_blocking(move || {
-        run_on_ui_thread(&app_clone, |hwnd| -> Result<HashSet<String>, StoreIapError> {
+        // Entitlement 查询是纯网络调用，不弹窗；60s 超时足够，超时则视为
+        // 网络异常 fallback（不影响用户本地已有的 Pro 状态）。
+        run_on_ui_thread(&app_clone, Some(Duration::from_secs(60)), |hwnd| -> Result<HashSet<String>, StoreIapError> {
             tracing::info!("[licensing] entitlement: StoreContext::GetDefault start");
             let ctx = windows::Services::Store::StoreContext::GetDefault()
                 .map_err(classify_error)?;

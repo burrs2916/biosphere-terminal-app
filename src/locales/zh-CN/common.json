@@ -173,7 +173,7 @@
       "requiredChip": "需要 Pro",
       "oneTime": "一次性",
       "lifetimeAccess": "终身使用",
-      "sideloadHint": "应用内购买仅在从 Microsoft Store 安装的应用中可用。请使用下方的「在 Microsoft Store 购买」按钮在浏览器中完成购买。",
+      "sideloadHint": "应用内购买仅在从 Microsoft Store 安装的应用中可用。购买 Pro 步骤：(1) 点击下方「在 Microsoft Store 购买」按钮完成付款；(2) 卸载当前侧载版本；(3) 从 Microsoft Store 重新安装本应用 —— 下次启动时您的购买记录会自动解锁。",
       "processing": "处理中…",
       "cta": "解锁 Pro · $9.99",
       "buyOnStore": "在 Microsoft Store 购买 · $9.99",
