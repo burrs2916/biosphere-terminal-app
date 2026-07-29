@@ -1,6 +1,6 @@
 [package]
 name = "biosphere-terminal-app"
-version = "0.4.9"
+version = "0.5.0"
 description = "Biosphere Terminal - Visual Terminal Application"
 authors = ["Biosphere Team"]
 edition = "2021"
