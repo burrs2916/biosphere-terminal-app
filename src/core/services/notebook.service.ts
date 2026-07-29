@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { NoteDto, NoteDetailDto, CreateNoteInput, UpdateNoteInput, LinkCommandInput, CommandNoteLinkDto, NoteGroupDto, CreateGroupInput, UpdateGroupInput, NoteCategoryDto, CreateCategoryInput, UpdateCategoryInput } from '../../proto/notebook';
+import type { NoteDto, NoteDetailDto, CreateNoteInput, UpdateNoteInput, LinkCommandInput, CommandNoteLinkDto, NoteGroupDto, CreateGroupInput, UpdateGroupInput, NoteCategoryDto, CreateCategoryInput, UpdateCategoryInput, NoteTagDto, CreateTagInput, UpdateTagInput, NoteLinks } from '../../proto/notebook';
 
 export async function listNotes(groupId?: string, category?: string, search?: string): Promise<NoteDto[]> {
   return invoke('list_notes', { groupId: groupId || null, category: category || null, search: search || null });
@@ -7,6 +7,10 @@ export async function listNotes(groupId?: string, category?: string, search?: st
 
 export async function getNote(id: string): Promise<NoteDetailDto | null> {
   return invoke('get_note', { id });
+}
+
+export async function getNoteLinks(id: string): Promise<NoteLinks> {
+  return invoke('get_note_links', { id });
 }
 
 export async function createNote(input: CreateNoteInput): Promise<NoteDto> {
@@ -65,8 +69,16 @@ export async function updateNoteGroup(input: UpdateGroupInput): Promise<NoteGrou
   return invoke('update_note_group', { input });
 }
 
-export async function deleteNoteGroup(id: string): Promise<void> {
-  return invoke('delete_note_group', { id });
+export async function deleteNoteGroup(
+  id: string,
+  targetGroupId?: string | null,
+  deleteNotes?: boolean,
+): Promise<void> {
+  return invoke('delete_note_group', {
+    id,
+    targetGroupId: targetGroupId ?? null,
+    deleteNotes: deleteNotes ?? false,
+  });
 }
 
 export async function listNoteCategoriesByGroup(groupId: string): Promise<NoteCategoryDto[]> {
@@ -83,4 +95,20 @@ export async function updateNoteCategory(input: UpdateCategoryInput): Promise<No
 
 export async function deleteNoteCategory(id: string): Promise<void> {
   return invoke('delete_note_category', { id });
+}
+
+export async function listNoteTagsByGroup(groupId: string): Promise<NoteTagDto[]> {
+  return invoke('list_note_tags_by_group', { groupId });
+}
+
+export async function createNoteTag(input: CreateTagInput): Promise<NoteTagDto> {
+  return invoke('create_note_tag', { input });
+}
+
+export async function updateNoteTag(input: UpdateTagInput): Promise<NoteTagDto> {
+  return invoke('update_note_tag', { input });
+}
+
+export async function deleteNoteTag(id: string): Promise<void> {
+  return invoke('delete_note_tag', { id });
 }

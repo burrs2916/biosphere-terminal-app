@@ -72,6 +72,8 @@ impl LinkerService {
     }
 
     pub fn unlink(&self, link_id: &str) -> Result<(), String> {
-        CommandNoteLinkRepo::delete(&self.db, link_id)
+        CommandNoteLinkRepo::delete(&self.db, link_id)?;
+        self.notebook.notify_links_changed();
+        Ok(())
     }
 }

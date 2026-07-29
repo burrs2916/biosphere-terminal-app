@@ -63,7 +63,7 @@ impl RemoteDesktopService {
             ssh.host, ssh.username, ssh.auth_method, ssh.password.is_some()
         );
 
-        let ssh_output = run_ssh_command(ssh, "which tigervncserver x11vnc vncserver 2>/dev/null; echo SEP123456; cat /etc/os-release 2>/dev/null | head -3; echo SEP123456; vncserver -list 2>/dev/null; echo SEP123456; ss -tlnp 2>/dev/null | grep 590 || netstat -tlnp 2>/dev/null | grep 590 || true; echo SEP123456; test -f ~/.vnc/passwd && echo PASSWD_EXISTS || echo NO_PASSWD; echo SEP123456; which startxfce4 gnome-session xterm 2>/dev/null || true")
+        let ssh_output = run_ssh_command(ssh, "which tigervncserver x11vnc vncserver Xvnc Xtightvnc 2>/dev/null; echo SEP123456; ( grep -E '^(ID|ID_LIKE)=' /etc/os-release 2>/dev/null | tr 'A-Z' 'a-z' ) ; echo SEP123456; vncserver -list 2>/dev/null; echo SEP123456; ( if uname -s 2>/dev/null | grep -qi darwin; then netstat -an -f inet -p tcp 2>/dev/null | grep -E ':590[0-9]' || lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -E ':590[0-9]'; else ss -tlnp 2>/dev/null | grep -E ':590[0-9]' || netstat -tlnp 2>/dev/null | grep -E ':590[0-9]'; fi ) || true; echo SEP123456; test -f ~/.vnc/passwd && echo PASSWD_EXISTS || echo NO_PASSWD; echo SEP123456; uname -s 2>/dev/null || echo UNKNOWN_UNAME; echo SEP123456; which startxfce4 gnome-session xterm 2>/dev/null || true")
             .map_err(|e| format!("SSH connection failed: {}", e))?;
 
         tracing::info!("[remote-desktop-setup] SSH output ({} bytes): {}", ssh_output.len(), if ssh_output.len() > 500 { &ssh_output[..500] } else { &ssh_output });
@@ -74,22 +74,71 @@ impl RemoteDesktopService {
         let vnc_list_output = parts.get(2).unwrap_or(&"").trim();
         let port_output = parts.get(3).unwrap_or(&"").trim();
         let passwd_output = parts.get(4).unwrap_or(&"").trim();
-        let desktop_output = parts.get(5).unwrap_or(&"").trim();
+        let uname_output = parts.get(5).unwrap_or(&"").trim();
+        let desktop_output = parts.get(6).unwrap_or(&"").trim();
 
-        let has_tigervnc = which_output.contains("tigervncserver") || which_output.contains("vncserver");
+        // 精确判定 TigerVNC：其专属产物是 tigervncserver（部分发行版）或 Xvnc（X 服务器）。
+        // 注意 TightVNC 也提供名为 `vncserver` 的脚本与 Xtightvnc，若仅凭 vncserver 判定会把 TightVNC
+        // 误判成 TigerVNC，导致前端对 TightVNC 运行 `vncpasswd -f`（-f 是 TigerVNC 专属参数）直接报错。
+        let has_tigervnc = which_output.contains("tigervncserver") || which_output.contains("Xvnc");
+        // 宽泛判定"任意 VNC server"（TigerVNC / TightVNC / 其它），用于启动与桌面环境引导，
+        // 因为 `vncserver :1` 对二者都通用，不应因精确判定而漏掉 TightVNC 的启动路径。
+        let has_vncserver = which_output.contains("vncserver") || which_output.contains("Xvnc")
+            || which_output.contains("Xtightvnc");
         let has_x11vnc = which_output.contains("x11vnc");
-        let vnc_installed = has_tigervnc || has_x11vnc;
+        let vnc_installed = has_vncserver || has_x11vnc;
 
-        let is_debian = os_output.to_lowercase().contains("debian") || os_output.to_lowercase().contains("ubuntu");
-        let is_rhel = os_output.to_lowercase().contains("rhel") || os_output.to_lowercase().contains("centos") || os_output.to_lowercase().contains("fedora") || os_output.to_lowercase().contains("rocky") || os_output.to_lowercase().contains("almalinux");
+        // 解析发行版家族。注意 CentOS Stream 等 id_like 含 "fedora"，故 rhel 家族需显式枚举、不放 fedora，
+        // 并在后续匹配时优先判定 is_rhel 再判定 is_fedora，避免 CentOS 被误判为 Fedora。
+        let os = os_output.to_lowercase();
+        let is_macos = uname_output.to_lowercase().contains("darwin");
+        let is_debian = os.contains("debian") || os.contains("ubuntu");
+        // Oracle Linux 的 os-release 是 `ID=ol`（且 ID_LIKE=fedora），必须用精确令牌 `id=ol` 匹配，
+        // 不能用宽泛的 contains("ol") —— 否则 Solus(`ID=solus`) 等含 "ol" 子串的发行版会被误判成 RHEL、拿到 yum 命令。
+        let is_rhel = os.contains("rhel") || os.contains("centos") || os.contains("rocky")
+            || os.contains("almalinux") || os.contains("id=ol") || os.contains("oracle")
+            || os.contains("amzn") || os.contains("scientific");
+        let is_fedora = os.contains("fedora");
+        let is_suse = os.contains("suse") || os.contains("opensuse");
+        let is_arch = os.contains("arch") || os.contains("archlinux") || os.contains("manjaro");
+        // 非 systemd / 小众发行版：用 `id=xxx` 精确令牌匹配，避免被主流家族误吞。
+        // 这些发行版的包管理器与 Debian/RHEL 体系不同，必须给出真实安装命令（见 install_hint）。
+        let is_alpine = os.contains("id=alpine");
+        let is_gentoo = os.contains("id=gentoo");
+        let is_void = os.contains("id=void");
+        let is_nixos = os.contains("id=nixos");
+        let is_solus = os.contains("id=solus");
 
         let port_listening = port_output.contains("590");
 
+        // 解析 `vncserver -list` 的活跃会话，兼容两种格式：
+        //  - TigerVNC: `:1` 或 `:1  5901  pid`（行首以冒号开头）
+        //  - TightVNC: `1: 5901`（数字开头后跟冒号）
+        // 跳过表头/分隔行（含 DISPLAY / PROCESS ID / RFB PORT / SESSION 等字样）。
         let vnc_has_active_session = vnc_list_output
             .lines()
             .any(|line| {
-                let trimmed = line.trim();
-                trimmed.starts_with(':') && trimmed.chars().any(|c| c.is_ascii_digit())
+                let t = line.trim();
+                if t.is_empty()
+                    || t.to_lowercase().contains("display")
+                    || t.to_lowercase().contains("process id")
+                    || t.to_lowercase().contains("rfb port")
+                    || t.to_lowercase().contains("session")
+                {
+                    return false;
+                }
+                // TigerVNC: `:1`
+                if t.starts_with(':') && t.chars().any(|c| c.is_ascii_digit()) {
+                    return true;
+                }
+                // TightVNC: `1: 5901`（数字开头后紧跟冒号）
+                let mut chars = t.chars();
+                if let Some(first) = chars.next() {
+                    if first.is_ascii_digit() && chars.next() == Some(':') {
+                        return true;
+                    }
+                }
+                false
             });
 
         let vnc_running = port_listening || vnc_has_active_session;
@@ -101,21 +150,80 @@ impl RemoteDesktopService {
         } else if port_output.contains("5900") {
             5900
         } else if vnc_has_active_session {
+            // 端口探测失败时的兜底：从 `vncserver -list` 解析显示号/端口。
+            // 兼容 TigerVNC `:1`（→5900+1）与 TightVNC `1: 5901`（→直接取 5901）。
             vnc_list_output
                 .lines()
-                .find(|line| line.trim().starts_with(':'))
-                .and_then(|line| {
-                    let display_num: String = line.trim()[1..]
-                        .chars()
-                        .take_while(|c| c.is_ascii_digit())
-                        .collect();
-                    display_num.parse::<u16>().ok()
+                .find_map(|line| {
+                    let t = line.trim();
+                    if t.is_empty()
+                        || t.to_lowercase().contains("display")
+                        || t.to_lowercase().contains("process id")
+                        || t.to_lowercase().contains("rfb port")
+                        || t.to_lowercase().contains("session")
+                    {
+                        return None;
+                    }
+                    if t.starts_with(':') && t.chars().any(|c| c.is_ascii_digit()) {
+                        let display_num: String = t[1..]
+                            .chars()
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect();
+                        return display_num.parse::<u16>().ok().map(|n| 5900 + n);
+                    }
+                    // TightVNC: `1: 5901` → 第二列即 RFB 端口
+                    let mut parts = t.split_whitespace();
+                    if let (Some(first), Some(second)) = (parts.next(), parts.next()) {
+                        if first.chars().next().map_or(false, |c| c.is_ascii_digit())
+                            && first.contains(':')
+                            && second.parse::<u16>().map_or(false, |p| (5900..=5999).contains(&p))
+                        {
+                            return second.parse::<u16>().ok();
+                        }
+                    }
+                    None
                 })
-                .map(|n| 5900 + n)
                 .unwrap_or(vnc_port)
         } else {
             vnc_port
         };
+
+        // 真实解析当前活跃 VNC 会话的 display（如 `:1`），供前端重置密码重启时精准 kill 对应会话，
+        // 而非 `pkill -f vncserver` 误杀机器上所有 VNC 会话。兼容 TigerVNC `:1` 与 TightVNC `1: 5901` 两种格式。
+        let detected_display = vnc_list_output
+            .lines()
+            .find_map(|line| {
+                let t = line.trim();
+                if t.is_empty()
+                    || t.to_lowercase().contains("display")
+                    || t.to_lowercase().contains("process id")
+                    || t.to_lowercase().contains("rfb port")
+                    || t.to_lowercase().contains("session")
+                {
+                    return None;
+                }
+                // TigerVNC: `:1`（或 `:1  5901  pid`）
+                if t.starts_with(':') && t.chars().any(|c| c.is_ascii_digit()) {
+                    return Some(t.split_whitespace().next().unwrap_or(":1").to_string());
+                }
+                // TightVNC: `1: 5901` → display `:1`
+                let mut parts = t.split_whitespace();
+                if let Some(first) = parts.next() {
+                    if first.chars().next().map_or(false, |c| c.is_ascii_digit())
+                        && first.contains(':')
+                    {
+                        let num: String = first
+                            .chars()
+                            .skip(1)
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect();
+                        if !num.is_empty() {
+                            return Some(format!(":{}", num));
+                        }
+                    }
+                }
+                None
+            });
 
         let has_passwd = passwd_output.contains("PASSWD_EXISTS");
 
@@ -129,15 +237,43 @@ impl RemoteDesktopService {
             vnc_installed, vnc_running, port_listening, vnc_has_active_session, detected_port, has_passwd, has_xfce, has_gnome, has_xterm, has_desktop
         );
 
-        let install_hint = if is_debian {
+        let install_hint = if is_macos {
+            // macOS 原生屏幕共享使用独立的 VNC 密码机制（非 ~/.vnc/passwd），本工具统一在 macOS 上
+            // 安装 TigerVNC（Homebrew）来管理，故走与 Linux 一致的 TigerVNC 路径。TigerVNC 依赖 X11，
+            // 故同时装 XQuartz（Homebrew cask）。若未装 Homebrew 给出可读的兜底提示。
+            "brew install --cask xquartz; brew install tigervnc || echo '[WARN] Homebrew not found. Install from https://brew.sh then retry the step.'".to_string()
+        } else if is_debian {
             "sudo apt update && sudo apt install -y tigervnc-standalone-server tigervnc-common xfce4 dbus-x11".to_string()
         } else if is_rhel {
-            "sudo yum groupinstall -y 'Xfce' && sudo yum install -y tigervnc-server dbus-x11".to_string()
+            // Xfce 组来自 EPEL，默认源里没有会导致 `groupinstall` 失败并因 && 短路连 tigervnc-server 都不装。
+            // 改为：始终先装 tigervnc-server + dbus-x11 + xterm（基础源必有，xterm 作 xstartup 兜底），
+            // Xfce 组作为可选步骤非致命安装，失败也不影响 VNC 起一个可用的 xterm 会话。
+            "sudo yum install -y tigervnc-server dbus-x11 xterm; (sudo yum install -y epel-release && sudo yum groupinstall -y 'Xfce') || echo '[WARN] Xfce group unavailable; VNC will start an xterm session'".to_string()
+        } else if is_fedora {
+            "sudo dnf install -y tigervnc-server dbus-x11 xterm; sudo dnf groupinstall -y 'Xfce' || echo '[WARN] Xfce unavailable; xterm session will be used'".to_string()
+        } else if is_suse {
+            "sudo zypper install -y tigervnc xterm; sudo zypper install -y patterns-xfce || sudo zypper install -y xfce4-session || echo '[WARN] Xfce unavailable; xterm session will be used'".to_string()
+        } else if is_arch {
+            "sudo pacman -S --noconfirm tigervnc xterm; sudo pacman -S --noconfirm xfce4 || echo '[WARN] xfce4 unavailable; xterm session will be used'".to_string()
+        } else if is_alpine {
+            "sudo apk add --update tigervnc xterm || echo '[WARN] Failed to install TigerVNC via apk'".to_string()
+        } else if is_gentoo {
+            "sudo emerge --ask tigervnc xterm || echo '[WARN] Failed to install TigerVNC via emerge'".to_string()
+        } else if is_void {
+            "sudo xbps-install -S tigervnc xterm || echo '[WARN] Failed to install TigerVNC via xbps'".to_string()
+        } else if is_nixos {
+            "nix-env -iA nixos.tigervnc || echo '[WARN] Failed to install TigerVNC via nix-env'".to_string()
+        } else if is_solus {
+            "sudo eopkg it tigervnc xterm || echo '[WARN] Failed to install TigerVNC via eopkg'".to_string()
         } else {
-            "Install TigerVNC and a desktop environment (e.g. Xfce) using your package manager".to_string()
+            "Install TigerVNC (package tigervnc-server / tigervnc) and a desktop environment (e.g. Xfce), then run: vncserver :1 -geometry 1280x800 -depth 24 -localhost no".to_string()
         };
 
-        let start_hint = if has_tigervnc {
+        let start_hint = if is_macos && has_vncserver {
+            // macOS 上 TigerVNC/TightVNC 依赖 XQuartz（X11 环境）。若 XQuartz 未运行，
+            // `vncserver :1` 会立即失败且无明确原因，故在启动前先拉起 XQuartz。
+            "open -a XQuartz && vncserver :1 -geometry 1280x800 -depth 24 -localhost no".to_string()
+        } else if has_vncserver {
             "vncserver :1 -geometry 1280x800 -depth 24 -localhost no".to_string()
         } else if has_x11vnc {
             "x11vnc -display :0 -forever -shared -rfbport 5900".to_string()
@@ -152,40 +288,91 @@ impl RemoteDesktopService {
                 if is_debian {
                     cmds.push("sudo apt update && sudo apt install -y xfce4 dbus-x11".to_string());
                 } else if is_rhel {
-                    cmds.push("sudo yum groupinstall -y 'Xfce' && sudo yum install -y dbus-x11".to_string());
+                    // 与 install_hint 一致：始终装 xterm 兜底，Xfce 组非致命
+                    cmds.push("sudo yum install -y dbus-x11 xterm; (sudo yum install -y epel-release && sudo yum groupinstall -y 'Xfce') || echo '[WARN] Xfce unavailable; xterm session will be used'".to_string());
+                } else if is_fedora {
+                    cmds.push("sudo dnf install -y dbus-x11 xterm; sudo dnf groupinstall -y 'Xfce' || echo '[WARN] Xfce unavailable; xterm session will be used'".to_string());
+                } else if is_suse {
+                    cmds.push("sudo zypper install -y dbus-x11 xterm; sudo zypper install -y patterns-xfce || sudo zypper install -y xfce4-session || echo '[WARN] Xfce unavailable; xterm session will be used'".to_string());
+                } else if is_arch {
+                    cmds.push("sudo pacman -S --noconfirm dbus xterm; sudo pacman -S --noconfirm xfce4 || echo '[WARN] xfce4 unavailable; xterm session will be used'".to_string());
                 }
             }
-            let xstartup = if has_xfce || !has_desktop {
-                "#!/bin/sh\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nexec startxfce4\n"
-            } else if has_gnome {
-                "#!/bin/sh\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nexec gnome-session\n"
-            } else {
-                "#!/bin/sh\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nexec xterm\n"
-            };
+            // xstartup 自检式多兜底：不依赖探测时的桌面状态，实际装了什么就启动什么，
+            // 彻底避免「装了 xterm 却仍 exec startxfce4」的错配（Xfce 组缺失时尤其关键）。
+            let xstartup = "#!/bin/sh\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nif command -v startxfce4 >/dev/null 2>&1; then\n  exec startxfce4\nelif command -v gnome-session >/dev/null 2>&1; then\n  exec gnome-session\nelif command -v xterm >/dev/null 2>&1; then\n  exec xterm\nelse\n  exec xterm\nfi\n";
             cmds.push(format!("printf '{}\\n' > ~/.vnc/xstartup && chmod +x ~/.vnc/xstartup", xstartup.replace('\n', "\\n")));
             cmds.join(" && ")
+        } else if has_vncserver {
+            // TightVNC / Xtightvnc：同样使用 ~/.vnc/xstartup 机制，但避免猜测发行版专属桌面包名，
+            // 仅建 ~/.vnc 与自检式 xstartup（装了什么就起什么，否则回落 xterm）。
+            let xstartup = "#!/bin/sh\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nif command -v startxfce4 >/dev/null 2>&1; then\n  exec startxfce4\nelif command -v gnome-session >/dev/null 2>&1; then\n  exec gnome-session\nelif command -v xterm >/dev/null 2>&1; then\n  exec xterm\nelse\n  exec xterm\nfi\n";
+            format!("mkdir -p ~/.vnc && printf '{}\\n' > ~/.vnc/xstartup && chmod +x ~/.vnc/xstartup", xstartup.replace('\n', "\\n"))
+        } else if is_macos {
+            // macOS + TigerVNC(Homebrew)：brew 不提供标准 Linux 桌面环境，仅建 ~/.vnc 与自检式 xstartup，
+            // 优先起用户已装的 DE（startxfce4/gnome-session），都没有则回落 xterm，保证 VNC 至少可用。
+            let xstartup = "#!/bin/sh\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nif command -v startxfce4 >/dev/null 2>&1; then\n  exec startxfce4\nelif command -v gnome-session >/dev/null 2>&1; then\n  exec gnome-session\nelif command -v xterm >/dev/null 2>&1; then\n  exec xterm\nelse\n  exec xterm\nfi\n";
+            format!("mkdir -p ~/.vnc && printf '{}\\n' > ~/.vnc/xstartup && chmod +x ~/.vnc/xstartup", xstartup.replace('\n', "\\n"))
         } else {
             String::new()
         };
 
         let passwd_hint = if has_tigervnc && !has_passwd {
+            // 自动设置走前端的 `vncpasswd -f`；此处仅作手动兜底提示
             "vncpasswd".to_string()
+        } else if has_vncserver && !has_passwd {
+            // TightVNC / 其它 VNC 实现的 vncpasswd 不支持 -f（TigerVNC 专属），只能交互式设置；
+            // 该情况 needs_password 为 false（前端不会跑 -f），改为在 UI 提示用户手动执行。
+            "vncpasswd ~/.vnc/passwd".to_string()
         } else {
             String::new()
         };
+
+        // macOS 平台提示：TigerVNC 跑在 XQuartz 上，且 brew 不提供 Linux 风格桌面环境，
+        // 默认只会起一个 xterm 会话——这与用户预期「看到完整桌面」不同，需提前告知以免困惑。
+        let mut messages: Vec<String> = Vec::new();
+        if is_macos {
+            messages.push(
+                "macOS note: TigerVNC on macOS requires XQuartz (auto-launched before start). Without a Linux-style desktop (Xfce/GNOME) installed, the VNC session shows a terminal (xterm) window — this is expected, not an error.".to_string()
+            );
+        }
 
         Ok(VncSetupResult {
             vnc_installed,
             vnc_running,
             vnc_port: detected_port,
-            display: None,
-            messages: vec![],
+            display: detected_display,
+            messages,
             needs_password: !has_passwd && has_tigervnc,
             install_hint,
             start_hint,
             setup_hint,
             passwd_hint,
-            os_name: if is_debian { "debian".to_string() } else if is_rhel { "rhel".to_string() } else { "unknown".to_string() },
+            os_name: if is_macos {
+                "macos".to_string()
+            } else if is_debian {
+                "debian".to_string()
+            } else if is_rhel {
+                "rhel".to_string()
+            } else if is_fedora {
+                "fedora".to_string()
+            } else if is_suse {
+                "suse".to_string()
+            } else if is_arch {
+                "arch".to_string()
+            } else if is_alpine {
+                "alpine".to_string()
+            } else if is_gentoo {
+                "gentoo".to_string()
+            } else if is_void {
+                "void".to_string()
+            } else if is_nixos {
+                "nixos".to_string()
+            } else if is_solus {
+                "solus".to_string()
+            } else {
+                "unknown".to_string()
+            },
         })
     }
 

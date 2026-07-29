@@ -2,18 +2,10 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use super::parser::ShellScript;
+use super::parser::{ShellScript, detect_unresolved_placeholders};
 use super::template::render_template_shell_safe;
 use super::safety::is_dangerous_command;
 use super::executor::{ExecutionResult, ExecutionContext};
-
-fn detect_unresolved_placeholders(command: &str) -> Vec<String> {
-    let re = regex::Regex::new(r"\{\{(\w+)\}\}").unwrap();
-    re.captures_iter(command)
-        .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
-        .filter(|name| name != "output_path" && name != "workspace_dir")
-        .collect()
-}
 
 pub async fn execute_shell(
     shell_script: &ShellScript,

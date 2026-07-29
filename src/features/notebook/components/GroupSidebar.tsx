@@ -10,6 +10,7 @@ import {
 } from '@phosphor-icons/react';
 import { IconRenderer } from './IconRenderer';
 import { useNotebookStore } from '../store/notebookStore';
+import { DeleteGroupDialog } from './DeleteGroupDialog';
 import type { NoteGroupDto } from '../../../proto/notebook';
 import { GroupManageDialog } from './GroupManageDialog';
 import { useTheme } from '@mui/material/styles';
@@ -22,16 +23,24 @@ export function GroupSidebar() {
   const mutedColor = isDark ? '#8B949E' : '#6B7280';
 
   const {
-    groups, activeGroupId, loadGroups, setActiveGroupId, setActiveCategory,
+    groups, activeGroupId, loadGroups, setActiveGroupId, setActiveCategory, deleteGroup,
   } = useNotebookStore();
 
   const [groupManageOpen, setGroupManageOpen] = useState(false);
+  const [groupManageEditId, setGroupManageEditId] = useState<string | null>(null);
   const [groupMenuAnchor, setGroupMenuAnchor] = useState<null | HTMLElement>(null);
   const [menuGroupId, setMenuGroupId] = useState<string | null>(null);
+  const [groupDeleteConfirmOpen, setGroupDeleteConfirmOpen] = useState(false);
+  const [groupToDelete, setGroupToDelete] = useState<NoteGroupDto | null>(null);
 
   useEffect(() => {
     loadGroups();
   }, [loadGroups]);
+
+  const openGroupManage = (editId?: string | null) => {
+    setGroupManageEditId(editId ?? null);
+    setGroupManageOpen(true);
+  };
 
   const handleGroupClick = useCallback((groupId: string) => {
     setActiveGroupId(groupId);
@@ -47,6 +56,24 @@ export function GroupSidebar() {
   const handleGroupMenuClose = () => {
     setGroupMenuAnchor(null);
     setMenuGroupId(null);
+  };
+
+  const confirmDeleteGroup = (group: NoteGroupDto) => {
+    setGroupToDelete(group);
+    setGroupDeleteConfirmOpen(true);
+    handleGroupMenuClose();
+  };
+
+  const executeDeleteGroup = async (targetGroupId: string | null, deleteNotes: boolean) => {
+    if (!groupToDelete) return;
+    setGroupDeleteConfirmOpen(false);
+    await deleteGroup(groupToDelete.id, targetGroupId, deleteNotes);
+    setGroupToDelete(null);
+  };
+
+  const cancelDeleteGroup = () => {
+    setGroupDeleteConfirmOpen(false);
+    setGroupToDelete(null);
   };
 
   const renderGroupItem = (group: NoteGroupDto) => {
@@ -114,7 +141,7 @@ export function GroupSidebar() {
           {t('group.title')}
         </Typography>
         <Tooltip title={t('group.manage') || ''}>
-          <IconButton size="small" onClick={() => setGroupManageOpen(true)}>
+          <IconButton size="small" onClick={() => openGroupManage()}>
             <FolderSimplePlusIcon size={14} color={primaryColor} />
           </IconButton>
         </Tooltip>
@@ -145,17 +172,30 @@ export function GroupSidebar() {
       </List>
 
       <Menu anchorEl={groupMenuAnchor} open={Boolean(groupMenuAnchor)} onClose={handleGroupMenuClose}>
-        <MenuItem onClick={() => { setGroupManageOpen(true); handleGroupMenuClose(); }}>
+        <MenuItem onClick={() => { openGroupManage(menuGroupId); handleGroupMenuClose(); }}>
           <IconRenderer value="✏️" size={14} sx={{ mr: 1.5 }} />
           {t('group.edit')}
         </MenuItem>
-        <MenuItem onClick={() => { if (menuGroupId) useNotebookStore.getState().deleteGroup(menuGroupId); handleGroupMenuClose(); }}>
-          <TrashIcon size={14} color={isDark ? '#FF5252' : '#D32F2F'} style={{ marginRight: 8 }} />
-          {t('group.delete')}
-        </MenuItem>
+        {menuGroupId !== 'uncategorized' && (
+          <MenuItem onClick={() => { const g = groups.find((x) => x.id === menuGroupId); if (g) confirmDeleteGroup(g); }}>
+            <TrashIcon size={14} color={isDark ? '#FF5252' : '#D32F2F'} style={{ marginRight: 8 }} />
+            {t('group.delete')}
+          </MenuItem>
+        )}
       </Menu>
 
-      <GroupManageDialog open={groupManageOpen} onClose={() => setGroupManageOpen(false)} />
+      <DeleteGroupDialog
+        open={groupDeleteConfirmOpen}
+        group={groupToDelete}
+        onClose={cancelDeleteGroup}
+        onConfirm={executeDeleteGroup}
+      />
+
+      <GroupManageDialog
+        open={groupManageOpen}
+        editGroupId={groupManageEditId}
+        onClose={() => { setGroupManageOpen(false); setGroupManageEditId(null); }}
+      />
     </Box>
   );
 }

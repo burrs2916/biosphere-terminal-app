@@ -20,6 +20,8 @@ import InputLabel from '@mui/material/InputLabel';
 import FormControl from '@mui/material/FormControl';
 import CircularProgress from '@mui/material/CircularProgress';
 import Alert from '@mui/material/Alert';
+import InputAdornment from '@mui/material/InputAdornment';
+import IconButton from '@mui/material/IconButton';
 import { useTheme } from '@mui/material/styles';
 import {
   DesktopIcon,
@@ -30,6 +32,8 @@ import {
   ArrowSquareOutIcon,
   CheckCircleIcon,
   WarningIcon,
+  EyeIcon,
+  EyeSlashIcon,
 } from '@phosphor-icons/react';
 import { useNavigate } from 'react-router-dom';
 import { listConnections, saveConnection, testConnection } from '../../../core/services/connection.service';
@@ -41,6 +45,8 @@ export interface ConnectionPickerResult {
   connectionType: 'local' | 'ssh';
   ssh?: SshConnectionInfo;
   name: string;
+  /** 既有连接发起时携带其 id，用于在连接管理页标记"使用中"；新建/本地连接无此值 */
+  connectionId?: string;
 }
 
 interface ConnectionPickerProps {
@@ -65,6 +71,7 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
   });
   const [testState, setTestState] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [testMsg, setTestMsg] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
 
   const localColor = isDark ? '#4FC3F7' : '#1565C0';
@@ -99,6 +106,7 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
       connectionType: conn.connection_type as 'local' | 'ssh',
       ssh: sshInfo,
       name: conn.name,
+      connectionId: conn.id,
     });
   };
 
@@ -115,6 +123,7 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
       connectionType: 'ssh',
       ssh,
       name: conn.name,
+      connectionId: conn.id,
     });
   };
 
@@ -208,24 +217,58 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
               {ssh.auth_method === 'password' && (
                 <TextField
                   label={t('picker.password_optional')}
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   value={ssh.password ?? ''}
                   onChange={(e) => setSsh((s) => ({ ...s, password: e.target.value }))}
                   fullWidth
                   size="small"
                   placeholder={t('picker.password_placeholder')}
+                  slotProps={{
+                    input: {
+                      style: { fontFamily: 'monospace' },
+                      endAdornment: (
+                        <InputAdornment position="end">
+                          <IconButton
+                            aria-label={t('picker.toggle_password_visibility')}
+                            onClick={() => setShowPassword((v) => !v)}
+                            edge="end"
+                            size="small"
+                          >
+                            {showPassword ? <EyeSlashIcon size={18} /> : <EyeIcon size={18} />}
+                          </IconButton>
+                        </InputAdornment>
+                      ),
+                    },
+                  }}
                 />
               )}
               {ssh.auth_method === 'private_key' && (
                 <TextField
                   label={t('picker.private_key_path')}
+                  type={showPassword ? 'text' : 'password'}
                   value={ssh.private_key_path ?? ''}
                   onChange={(e) => setSsh((s) => ({ ...s, private_key_path: e.target.value }))}
                   fullWidth
                   size="small"
                   placeholder="~/.ssh/id_rsa"
                   helperText={t('picker.private_key_helper')}
-                  slotProps={{ input: { style: { fontFamily: 'monospace' } } }}
+                  slotProps={{
+                    input: {
+                      style: { fontFamily: 'monospace' },
+                      endAdornment: (
+                        <InputAdornment position="end">
+                          <IconButton
+                            aria-label={t('picker.toggle_password_visibility')}
+                            onClick={() => setShowPassword((v) => !v)}
+                            edge="end"
+                            size="small"
+                          >
+                            {showPassword ? <EyeSlashIcon size={18} /> : <EyeIcon size={18} />}
+                          </IconButton>
+                        </InputAdornment>
+                      ),
+                    },
+                  }}
                 />
               )}
 

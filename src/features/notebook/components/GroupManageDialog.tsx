@@ -4,6 +4,7 @@ import Dialog from '@mui/material/Dialog';
 import DialogTitle from '@mui/material/DialogTitle';
 import DialogContent from '@mui/material/DialogContent';
 import DialogActions from '@mui/material/DialogActions';
+import Divider from '@mui/material/Divider';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import TextField from '@mui/material/TextField';
@@ -19,11 +20,14 @@ import { PlusIcon, TrashIcon, PencilSimpleIcon, CheckIcon, XIcon, CaretDownIcon,
 import { useNotebookStore } from '../store/notebookStore';
 import { IconPicker } from './IconPicker';
 import { IconRenderer } from './IconRenderer';
-import type { NoteGroupDto, NoteCategoryDto } from '../../../proto/notebook';
+import { DeleteGroupDialog } from './DeleteGroupDialog';
+import type { NoteGroupDto, NoteCategoryDto, NoteTagDto } from '../../../proto/notebook';
 
 interface GroupManageDialogProps {
   open: boolean;
   onClose: () => void;
+  /** 打开时直接预填并进入「编辑」模式的分组 id（侧栏「编辑」菜单使用）；不传则为「新建」模式。 */
+  editGroupId?: string | null;
 }
 
 const PRESET_COLORS = [
@@ -32,13 +36,14 @@ const PRESET_COLORS = [
   '#7986CB', '#4DB6AC', '#FF8A65', '#A1887F', '#90A4AE',
 ];
 
-export function GroupManageDialog({ open, onClose }: GroupManageDialogProps) {
+export function GroupManageDialog({ open, onClose, editGroupId }: GroupManageDialogProps) {
   const { t } = useTranslation('notebook');
   const { t: tCommon } = useTranslation('common');
 
   const {
     groups, createGroup, updateGroup, deleteGroup, loadGroups,
     categories, loadCategoriesByGroup, createCategory, updateCategory, deleteCategory,
+    tags, loadTagsByGroup, createTag, updateTag, deleteTag,
   } = useNotebookStore();
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -54,12 +59,29 @@ export function GroupManageDialog({ open, onClose }: GroupManageDialogProps) {
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
   const [editingCatName, setEditingCatName] = useState('');
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [groupDeleteOpen, setGroupDeleteOpen] = useState(false);
+  const [groupToDelete, setGroupToDelete] = useState<NoteGroupDto | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [categoryToDelete, setCategoryToDelete] = useState<NoteCategoryDto | null>(null);
+  const [newTagName, setNewTagName] = useState('');
+  const [addingTagForGroup, setAddingTagForGroup] = useState<string | null>(null);
+  const [editingTagId, setEditingTagId] = useState<string | null>(null);
+  const [editingTagName, setEditingTagName] = useState('');
+  const [tagDeleteConfirmOpen, setTagDeleteConfirmOpen] = useState(false);
+  const [tagToDelete, setTagToDelete] = useState<NoteTagDto | null>(null);
 
   useEffect(() => {
-    if (open) loadGroups();
-  }, [open, loadGroups]);
+    if (open) {
+      loadGroups().then(() => {
+        // 侧栏「编辑」菜单带 editGroupId 打开：分组列表异步加载完成后，预填该分组进入编辑态。
+        // 否则（创建模式）保持空白表单。避免「点编辑却只弹出新建表单」的功能错配（R24 修复）。
+        if (editGroupId) {
+          const g = useNotebookStore.getState().groups.find((x) => x.id === editGroupId);
+          if (g) startEdit(g);
+        }
+      });
+    }
+  }, [open, editGroupId, loadGroups]);
 
   const resetForm = () => {
     setFormName('');
@@ -121,15 +143,24 @@ export function GroupManageDialog({ open, onClose }: GroupManageDialogProps) {
     }
   };
 
-  const handleDelete = async (id: string) => {
+  const handleDeleteGroup = (group: NoteGroupDto) => {
+    setGroupToDelete(group);
+    setGroupDeleteOpen(true);
+  };
+
+  const executeDeleteGroup = async (targetGroupId: string | null, deleteNotes: boolean) => {
+    if (!groupToDelete) return;
+    setGroupDeleteOpen(false);
     setErrorMsg(null);
     try {
-      await deleteGroup(id);
-      if (editingId === id) resetForm();
-      if (expandedGroupId === id) setExpandedGroupId(null);
+      await deleteGroup(groupToDelete.id, targetGroupId, deleteNotes);
+      if (editingId === groupToDelete.id) resetForm();
+      if (expandedGroupId === groupToDelete.id) setExpandedGroupId(null);
+      setGroupToDelete(null);
       await loadGroups();
     } catch (e) {
       setErrorMsg(String(e));
+      setGroupToDelete(null);
     }
   };
 
@@ -155,6 +186,7 @@ export function GroupManageDialog({ open, onClose }: GroupManageDialogProps) {
     } else {
       setExpandedGroupId(groupId);
       loadCategoriesByGroup(groupId);
+      loadTagsByGroup(groupId);
     }
   };
 
@@ -222,6 +254,72 @@ export function GroupManageDialog({ open, onClose }: GroupManageDialogProps) {
     } catch (e) {
       setErrorMsg(String(e));
     }
+  };
+
+  const handleAddTag = async (groupId: string) => {
+    if (!newTagName.trim()) return;
+    setErrorMsg(null);
+    try {
+      await createTag({ name: newTagName.trim(), groupId, sortOrder: tags.length });
+      setNewTagName('');
+      setAddingTagForGroup(null);
+      await loadTagsByGroup(groupId);
+    } catch (e) {
+      setErrorMsg(String(e));
+    }
+  };
+
+  const handleUpdateTag = async (tg: NoteTagDto) => {
+    if (!editingTagName.trim()) return;
+    setErrorMsg(null);
+    try {
+      await updateTag({ id: tg.id, name: editingTagName.trim(), sortOrder: tg.sortOrder });
+      setEditingTagId(null);
+      setEditingTagName('');
+      setSuccessMsg(t('tag.update_success') || 'Tag updated');
+      await loadTagsByGroup(tg.groupId);
+    } catch (e) {
+      setErrorMsg(String(e));
+    }
+  };
+
+  const handleDeleteTag = async (tg: NoteTagDto) => {
+    setErrorMsg(null);
+    try {
+      await deleteTag(tg.id);
+      await loadTagsByGroup(tg.groupId);
+      setSuccessMsg(t('tag.delete_success') || 'Tag deleted');
+    } catch (e) {
+      setErrorMsg(String(e));
+    }
+  };
+
+  const startEditTag = (tg: NoteTagDto) => {
+    setEditingTagId(tg.id);
+    setEditingTagName(tg.name);
+    setAddingTagForGroup(null);
+  };
+
+  const cancelEditTag = () => {
+    setEditingTagId(null);
+    setEditingTagName('');
+  };
+
+  const confirmDeleteTag = (tg: NoteTagDto) => {
+    setTagToDelete(tg);
+    setTagDeleteConfirmOpen(true);
+  };
+
+  const executeDeleteTag = async () => {
+    if (!tagToDelete) return;
+    setTagDeleteConfirmOpen(false);
+    await handleDeleteTag(tagToDelete);
+    setTagToDelete(null);
+  };
+
+  const cancelDeleteTag = () => {
+    setTagDeleteConfirmOpen(false);
+    setTagToDelete(null);
   };
 
   const isFormVisible = showCreate || editingId;
@@ -363,7 +461,7 @@ export function GroupManageDialog({ open, onClose }: GroupManageDialogProps) {
                 <IconButton size="small" onClick={() => startEdit(group)}>
                   <PencilSimpleIcon size={14} color="#8B949E" />
                 </IconButton>
-                <IconButton size="small" onClick={() => handleDelete(group.id)}>
+                <IconButton size="small" onClick={() => handleDeleteGroup(group)}>
                   <TrashIcon size={14} color="#FF5252" />
                 </IconButton>
               </Box>
@@ -452,6 +550,90 @@ export function GroupManageDialog({ open, onClose }: GroupManageDialogProps) {
                       {t('category.add')}
                     </Button>
                   )}
+
+                  <Divider sx={{ my: 1, borderColor: 'divider' }} />
+                  <Typography variant="caption" color="text.secondary" sx={{ mb: 0.5, display: 'block', fontWeight: 600 }}>
+                    {t('tag.title')}
+                  </Typography>
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 1, alignItems: 'center' }}>
+                    {tags
+                      .filter((tg) => tg.groupId === group.id)
+                      .map((tg) => (
+                        editingTagId === tg.id ? (
+                          <Box key={tg.id} sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+                            <TextField
+                              size="small"
+                              value={editingTagName}
+                              onChange={(e) => setEditingTagName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleUpdateTag(tg);
+                                if (e.key === 'Escape') cancelEditTag();
+                              }}
+                              sx={{
+                                '& .MuiOutlinedInput-root': { borderRadius: 1, fontSize: 11 },
+                                '& .MuiInputBase-input': { py: 0.5, px: 1, fontSize: 11 },
+                              }}
+                              autoFocus
+                            />
+                            <IconButton size="small" onClick={() => handleUpdateTag(tg)} disabled={!editingTagName.trim()}>
+                              <CheckIcon size={12} color="#6C63FF" />
+                            </IconButton>
+                            <IconButton size="small" onClick={cancelEditTag}>
+                              <XIcon size={12} color="#8B949E" />
+                            </IconButton>
+                          </Box>
+                        ) : (
+                          <Chip
+                            key={tg.id}
+                            label={tg.name}
+                            size="small"
+                            icon={<TagIcon size={12} />}
+                            onClick={() => startEditTag(tg)}
+                            onDelete={() => confirmDeleteTag(tg)}
+                            sx={{
+                              borderRadius: 1,
+                              fontSize: 11,
+                              cursor: 'pointer',
+                              '& .MuiChip-label': { px: 0.75 },
+                              bgcolor: 'rgba(255,255,255,0.06)',
+                              '&:hover': { bgcolor: 'rgba(108,99,255,0.12)' },
+                            }}
+                          />
+                        )
+                      ))}
+                  </Box>
+
+                  {addingTagForGroup === group.id ? (
+                    <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
+                      <TextField
+                        size="small"
+                        placeholder={t('tag.new_name') || ''}
+                        value={newTagName}
+                        onChange={(e) => setNewTagName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleAddTag(group.id);
+                          if (e.key === 'Escape') { setAddingTagForGroup(null); setNewTagName(''); }
+                        }}
+                        sx={{ flex: 1, '& .MuiOutlinedInput-root': { borderRadius: 1, fontSize: 12 } }}
+                        autoFocus
+                      />
+                      <IconButton size="small" onClick={() => handleAddTag(group.id)} disabled={!newTagName.trim()}>
+                        <CheckIcon size={14} color="#6C63FF" />
+                      </IconButton>
+                      <IconButton size="small" onClick={() => { setAddingTagForGroup(null); setNewTagName(''); }}>
+                        <XIcon size={14} color="#8B949E" />
+                      </IconButton>
+                    </Box>
+                  ) : (
+                    <Button
+                      size="small"
+                      startIcon={<PlusIcon size={12} />}
+                      onClick={() => { setAddingTagForGroup(group.id); setNewTagName(''); }}
+                      sx={{ fontSize: 11, textTransform: 'none', color: '#6C63FF' }}
+                    >
+                      {t('tag.add')}
+                    </Button>
+                  )}
                 </Box>
               </Collapse>
             </Box>
@@ -517,6 +699,39 @@ export function GroupManageDialog({ open, onClose }: GroupManageDialogProps) {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <Dialog open={tagDeleteConfirmOpen} onClose={cancelDeleteTag} maxWidth="xs">
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <WarningIcon size={20} color="#FF8A80" />
+          {t('tag.delete_confirm')}
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            {t('tag.delete_confirm_desc', { name: tagToDelete?.name })}
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={cancelDeleteTag} startIcon={<XIcon size={14} />}>
+            {tCommon('action.cancel')}
+          </Button>
+          <Button
+            onClick={executeDeleteTag}
+            color="error"
+            variant="contained"
+            startIcon={<TrashIcon size={14} />}
+            sx={{ bgcolor: '#FF5252', '&:hover': { bgcolor: '#D32F2F' } }}
+          >
+            {tCommon('action.delete')}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <DeleteGroupDialog
+        open={groupDeleteOpen}
+        group={groupToDelete}
+        onClose={() => { setGroupDeleteOpen(false); setGroupToDelete(null); }}
+        onConfirm={executeDeleteGroup}
+      />
     </Dialog>
   );
 }

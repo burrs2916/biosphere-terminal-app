@@ -103,6 +103,11 @@ function buildTheme(mode: 'dark' | 'light') {
           root: { fontWeight: 500 },
         },
       },
+      MuiFormLabel: {
+        styleOverrides: {
+          asterisk: { color: '#FF7B72', fontSize: '0.85em' },
+        },
+      },
       MuiPaper: {
         styleOverrides: {
           root: { backgroundImage: 'none' },

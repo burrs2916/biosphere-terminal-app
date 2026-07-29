@@ -6,12 +6,16 @@ import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
 import Paper from '@mui/material/Paper';
 import Button from '@mui/material/Button';
+import TextField from '@mui/material/TextField';
+import InputAdornment from '@mui/material/InputAdornment';
 import {
   ArrowsOutIcon,
   ArrowRightIcon,
   XIcon,
   InfoIcon,
   WarningIcon,
+  EyeIcon,
+  EyeSlashIcon,
 } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
@@ -35,6 +39,7 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [desktopName, setDesktopName] = useState<string>('');
   const [pendingPassword, setPendingPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [ready, setReady] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const authFailedRef = useRef(false);
@@ -350,8 +355,8 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
               Enter the VNC password you set via vncpasswd on the remote server.
             </Typography>
             <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
-              <input
-                type="password"
+              <TextField
+                type={showPassword ? 'text' : 'password'}
                 placeholder="VNC Password"
                 value={pendingPassword}
                 onChange={(e) => {
@@ -370,17 +375,25 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
                     }
                   }
                 }}
-                style={{
-                  padding: '6px 12px',
-                  borderRadius: 4,
-                  border: `1px solid ${isDark ? '#30363d' : '#d0d7de'}`,
-                  background: isDark ? '#0d1117' : '#ffffff',
-                  color: textColor,
-                  fontSize: 13,
-                  width: 200,
-                  outline: 'none',
-                }}
+                size="small"
                 autoFocus
+                sx={{ width: 220 }}
+                slotProps={{
+                  input: {
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          aria-label={t('toggle_password_visibility')}
+                          onClick={() => setShowPassword((v) => !v)}
+                          edge="end"
+                          size="small"
+                        >
+                          {showPassword ? <EyeSlashIcon size={16} /> : <EyeIcon size={16} />}
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  },
+                }}
               />
               <IconButton
                 size="small"

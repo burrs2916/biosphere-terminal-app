@@ -70,6 +70,12 @@ impl Database {
         };
         db.initialize()?;
         db.migrate()?;
+        // 迁移完成后才开启 FK 强制，避免迁移中的 DROP TABLE 等操作被 FK 拦截
+        // （迁移代码内部已处理孤儿数据和 FK 一致性，不需要 SQLite 层面的实时校验）
+        {
+            let conn = db.conn.lock().map_err(|e| Error::Internal(format!("DB lock poisoned: {}", e)))?;
+            conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        }
         tracing::info!("[Database::open] database opened and migrated successfully");
         Ok(db)
     }
@@ -77,12 +83,7 @@ impl Database {
     fn initialize(&self) -> crate::core::error::Result<()> {
         let conn = self.conn.lock().map_err(|e| Error::Internal(format!("DB lock poisoned: {}", e)))?;
 
-        // Enable foreign key enforcement (SQLite disables by default)
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        // Try WAL for better concurrent read performance. On MSIX-sandboxed
-        // paths WAL sometimes cannot create the -shm shared-memory file
-        // (Package Framework blocks it); if WAL fails we silently fall back
-        // to DELETE journal mode so the app still starts.
+        // WAL mode 用于更好的并发读性能（MSIX 沙盒可能不可用，静默回退 DELETE）
         match conn.execute_batch("PRAGMA journal_mode = WAL;") {
             Ok(_) => tracing::info!("[Database::init] journal_mode=WAL enabled"),
             Err(e) => {
@@ -150,6 +151,7 @@ impl Database {
                 file_path TEXT NOT NULL,
                 category TEXT NOT NULL DEFAULT 'uncategorized',
                 tags TEXT NOT NULL DEFAULT '[]',
+                content TEXT NOT NULL DEFAULT '',
                 word_count INTEGER NOT NULL DEFAULT 0,
                 is_pinned INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
@@ -176,7 +178,8 @@ impl Database {
                 note_id TEXT NOT NULL,
                 context TEXT NOT NULL DEFAULT '',
                 created_at INTEGER NOT NULL,
-                FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
+                FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE,
+                FOREIGN KEY (command_id) REFERENCES command_history(id) ON DELETE CASCADE
             );
 
             CREATE INDEX IF NOT EXISTS idx_cnl_command ON command_note_links(command_id);
@@ -293,6 +296,32 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_note_categories_group ON note_categories(group_id);
 
+            CREATE TABLE IF NOT EXISTS note_tags (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(group_id, name),
+                FOREIGN KEY (group_id) REFERENCES note_groups(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_note_tags_group ON note_tags(group_id);
+
+            CREATE TABLE IF NOT EXISTS note_tag_links (
+                id TEXT PRIMARY KEY,
+                note_id TEXT NOT NULL,
+                tag_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(note_id, tag_id),
+                FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id) REFERENCES note_tags(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_note_tag_links_note ON note_tag_links(note_id);
+            CREATE INDEX IF NOT EXISTS idx_note_tag_links_tag ON note_tag_links(tag_id);
+
             CREATE TABLE IF NOT EXISTS plugin_groups (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -325,7 +354,7 @@ impl Database {
     }
 
     fn migrate(&self) -> crate::core::error::Result<()> {
-        let conn = self.conn.lock().map_err(|e| Error::Internal(format!("DB lock poisoned: {}", e)))?;
+        let mut conn = self.conn.lock().map_err(|e| Error::Internal(format!("DB lock poisoned: {}", e)))?;
 
         let has_group_id: bool = {
             let stmt = conn.prepare("SELECT group_id FROM notes LIMIT 1");
@@ -387,7 +416,13 @@ impl Database {
             result.contains("command_id) REFERENCES command_history(id) ON DELETE CASCADE")
         };
 
-        if has_cnl_cascade {
+        // 重建仅当 command_note_links 尚无 command_id 外键（新库建表已带双 FK，则不重建，幂等收敛）
+        if !has_cnl_cascade {
+            // 先清理孤儿 command_id（指向已不存在命令的关联），否则带 FK 的新表 INSERT 会因外键校验失败。
+            let _ = conn.execute(
+                "DELETE FROM command_note_links WHERE command_id NOT IN (SELECT id FROM command_history)",
+                [],
+            );
             conn.execute_batch(
                 "
                 CREATE TABLE IF NOT EXISTS command_note_links_new (
@@ -396,7 +431,8 @@ impl Database {
                     note_id TEXT NOT NULL,
                     context TEXT NOT NULL DEFAULT '',
                     created_at INTEGER NOT NULL,
-                    FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE
+                    FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE CASCADE,
+                    FOREIGN KEY (command_id) REFERENCES command_history(id) ON DELETE CASCADE
                 );
                 INSERT OR IGNORE INTO command_note_links_new SELECT id, command_id, note_id, context, created_at FROM command_note_links;
                 DROP TABLE command_note_links;
@@ -405,6 +441,71 @@ impl Database {
                 CREATE INDEX IF NOT EXISTS idx_cnl_note ON command_note_links(note_id);
                 CREATE INDEX IF NOT EXISTS idx_cnl_context ON command_note_links(context);
                 "
+            )?;
+        }
+
+        // notes.group_id → note_groups(id) ON DELETE CASCADE
+        // 既存 DB 早期用 DEFAULT 'uncategorized' 填充 group_id（非合法 group id），
+        // 直接建 FK 会因外键校验失败。故先确保有默认组、再把非法 group_id 清洗到真实组，最后重建带 FK 的表。
+        let has_notes_group_fk: bool = {
+            let result: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='notes'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or_default();
+            result.contains("group_id) REFERENCES note_groups(id)")
+        };
+
+        if !has_notes_group_fk {
+            // 确保 note_groups 至少有默认组（用固定 id，与 ensure_default_groups 一致），供清洗兜底。
+            let groups_empty: bool = conn
+                .query_row("SELECT COUNT(*) FROM note_groups", [], |row| row.get(0))
+                .unwrap_or(0) == 0;
+            if groups_empty {
+                conn.execute_batch(
+                    "
+                    INSERT OR IGNORE INTO note_groups (id, name, icon, color, sort_order, created_at, updated_at) VALUES
+                        ('linux', 'Linux', '🐧', '#4FC3F7', 0, 0, 0),
+                        ('database', 'Database', '🗄️', '#CE93D8', 1, 0, 0),
+                        ('devops', 'DevOps', '🔧', '#FFD740', 2, 0, 0),
+                        ('docker', 'Docker', '🐳', '#4DD0E1', 3, 0, 0),
+                        ('kubernetes', 'Kubernetes', '☸️', '#6C63FF', 4, 0, 0),
+                        ('network', 'Network', '🌐', '#81C784', 5, 0, 0),
+                        ('programming', 'Programming', '💻', '#FF8A80', 6, 0, 0),
+                        ('snippet', 'Snippet', '⚡', '#FFD740', 7, 0, 0);
+                    ",
+                )?;
+            }
+            // 清洗：非法（NULL 或指向不存在组，如字面量 'uncategorized'）的 group_id → 第一个真实组。
+            let _ = conn.execute(
+                "UPDATE notes SET group_id = (SELECT id FROM note_groups ORDER BY sort_order ASC LIMIT 1) WHERE group_id IS NULL OR group_id NOT IN (SELECT id FROM note_groups)",
+                [],
+            );
+            conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS notes_new (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    group_id TEXT NOT NULL DEFAULT 'uncategorized',
+                    category TEXT NOT NULL DEFAULT 'uncategorized',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    word_count INTEGER NOT NULL DEFAULT 0,
+                    is_pinned INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    FOREIGN KEY (group_id) REFERENCES note_groups(id) ON DELETE CASCADE
+                );
+                INSERT OR IGNORE INTO notes_new SELECT id, title, file_path, group_id, category, tags, word_count, is_pinned, created_at, updated_at FROM notes;
+                DROP TABLE notes;
+                ALTER TABLE notes_new RENAME TO notes;
+                CREATE INDEX IF NOT EXISTS idx_notes_category ON notes(category);
+                CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_notes_pinned ON notes(is_pinned);
+                CREATE INDEX IF NOT EXISTS idx_notes_group ON notes(group_id);
+                ",
             )?;
         }
 
@@ -669,6 +770,98 @@ impl Database {
                 ALTER TABLE ai_agents_new RENAME TO ai_agents;
                 "
             )?;
+        }
+
+        // 标签一等公民建模：note_tags + note_tag_links 存量对账。
+        // 把存量 notes.tags（JSON 数组自由字符串）拆分为 note_tags 行（按组）+ note_tag_links 关联。
+        // 幂等：UNIQUE(group_id, name) / UNIQUE(note_id, tag_id) 保证 INSERT OR IGNORE 安全，且只在首次（表为空）跑。
+        let has_note_tags_tbl: bool = {
+            let stmt = conn.prepare("SELECT id FROM note_tags LIMIT 1");
+            stmt.is_ok()
+        };
+        if has_note_tags_tbl {
+            let tag_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM note_tags", [], |r| r.get(0))
+                .unwrap_or(0);
+            if tag_count == 0 {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                let mut stmt = conn.prepare(
+                    "SELECT id, group_id, tags FROM notes WHERE tags IS NOT NULL AND tags != '' AND tags != '[]'",
+                )?;
+                let collected: Vec<(String, String, String)> = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                drop(stmt);
+                let tx = conn.transaction()?;
+                for (note_id, group_id, tags_json) in collected {
+                    if group_id.trim().is_empty() {
+                        continue;
+                    }
+                    let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+                    for tag in tags {
+                        let tag = tag.trim();
+                        if tag.is_empty() {
+                            continue;
+                        }
+                        tx.execute(
+                            "INSERT OR IGNORE INTO note_tags (id, name, group_id, sort_order, created_at, updated_at) SELECT ?1, ?2, ?3, 999, ?4, ?4 WHERE (SELECT COUNT(*) FROM note_tags WHERE group_id = ?3 AND name = ?2) = 0",
+                            rusqlite::params![format!("tag-{}-{}", group_id, tag), tag, group_id, now],
+                        )?;
+                        tx.execute(
+                            "INSERT OR IGNORE INTO note_tag_links (id, note_id, tag_id, created_at) SELECT ?1, ?2, t.id, ?3 FROM note_tags t WHERE t.group_id = ?4 AND t.name = ?5",
+                            rusqlite::params![format!("link-{}-{}", note_id, tag), note_id, now, group_id, tag],
+                        )?;
+                    }
+                }
+                tx.commit()?;
+            }
+        }
+
+        // ⑦ 搜索改查 DB：notes 表新增 content 列（正文），用于 SQLite LIKE 搜索正文。
+        // 幂等：先检查列是否存在，无则 ALTER；再把存量笔记的正文从 .md 回填进 content 列。
+        let has_content_col: bool = {
+            match conn.prepare("PRAGMA table_info(notes)") {
+                Ok(mut s) => match s.query_map([], |row| Ok(row.get::<_, String>(1).unwrap_or_default())) {
+                    Ok(rows) => rows.filter_map(|c| c.ok()).any(|name| name == "content"),
+                    Err(_) => false,
+                },
+                Err(_) => false,
+            }
+        };
+        if !has_content_col {
+            conn.execute("ALTER TABLE notes ADD COLUMN content TEXT NOT NULL DEFAULT ''", [])?;
+        }
+        // 存量回填：content 为空（新列默认空串，或 NULL）的笔记，从文件系统 .md 读取正文写入。
+        {
+            let mut stmt = conn.prepare("SELECT id, file_path FROM notes WHERE content IS NULL OR content = ''")?;
+            let items: Vec<(String, String)> = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            for (id, fp) in items {
+                if let Ok(raw) = std::fs::read_to_string(&fp) {
+                    let body = {
+                        let c = raw.trim_start();
+                        if c.starts_with("---") {
+                            if let Some(pos) = c.find("\n---") {
+                                c[pos + 4..].trim_start().to_string()
+                            } else {
+                                c.to_string()
+                            }
+                        } else {
+                            c.to_string()
+                        }
+                    };
+                    conn.execute("UPDATE notes SET content = ?1 WHERE id = ?2", rusqlite::params![body, id])?;
+                }
+            }
         }
 
         Ok(())

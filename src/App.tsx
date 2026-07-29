@@ -1,6 +1,7 @@
 import Box from '@mui/material/Box';
 import { HashRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { useEffect } from 'react';
+import { initWindowCloseFlush } from './features/notebook/utils/registerWindowCloseFlush';
 import { AppTheme } from './theme';
 import { AppShell, Sidebar, Header, StatusBar } from './components/layout';
 import { NotificationProvider } from './core/notification';
@@ -10,7 +11,6 @@ import i18n from './core/i18n';
 import { TerminalPage } from './pages/TerminalPage';
 import { CommandPage } from './pages/CommandPage';
 import { ConnectionPage } from './pages/ConnectionPage';
-import { PluginPage } from './pages/PluginPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { NotebookPage } from './pages/NotebookPage';
 import { AgentPage } from './pages/AgentPage';
@@ -19,8 +19,6 @@ import { NotFoundPage } from './pages/NotFoundPage';
 import { CategoryNotesPage } from './features/notebook/components/CategoryNotesPage';
 import { NotesReferencePage } from './features/notebook/components/NotesReferencePage';
 import { AiCopilotPage } from './pages/AiCopilotPage';
-import { PluginWorkshopPage } from './pages/PluginWorkshopPage';
-import { PluginScriptViewerPage } from './pages/PluginScriptViewerPage';
 import { RemoteDesktopPage } from './pages/RemoteDesktopPage';
 import { LicenseProvider, UpgradeDialog } from './features/licensing';
 
@@ -80,7 +78,6 @@ function AppLayout() {
               <Route path="/notebook" element={<NotebookPage />} />
               <Route path="/agent" element={<AgentPage />} />
               <Route path="/connections" element={<ConnectionPage />} />
-              <Route path="/plugins" element={<PluginPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/profile" element={<ProfilePage />} />
               <Route path="*" element={<NotFoundPage />} />
@@ -99,8 +96,6 @@ function StandaloneLayout() {
       <Route path="/category-notes" element={<CategoryNotesPage />} />
       <Route path="/notes-reference" element={<NotesReferencePage />} />
       <Route path="/ai-copilot" element={<AiCopilotPage />} />
-      <Route path="/plugin-workshop" element={<PluginWorkshopPage />} />
-      <Route path="/plugin-script-viewer" element={<PluginScriptViewerPage />} />
       <Route path="/remote-desktop" element={<RemoteDesktopPage />} />
       <Route path="*" element={<NotFoundPage />} />
     </Routes>
@@ -113,7 +108,7 @@ function RootRouter() {
   // WebviewWindow urls (e.g. "/#/category-notes") are loaded as pathname "/<any>" with hash "#/category-notes"
   // So we need to inspect both pathname AND hash to determine if we are in a standalone window.
   const checkPath = (location.hash.replace(/^#/, '') || location.pathname);
-  const isStandalone = checkPath.startsWith('/category-notes') || checkPath.startsWith('/notes-reference') || checkPath.startsWith('/ai-copilot') || checkPath.startsWith('/plugin-workshop') || checkPath.startsWith('/plugin-script-viewer') || checkPath.startsWith('/remote-desktop');
+  const isStandalone = checkPath.startsWith('/category-notes') || checkPath.startsWith('/notes-reference') || checkPath.startsWith('/ai-copilot') || checkPath.startsWith('/remote-desktop');
 
   return isStandalone ? <StandaloneLayout /> : <AppLayout />;
 }
@@ -125,6 +120,11 @@ export default function App() {
   useEffect(() => {
     initSettings();
   }, [initSettings]);
+
+  useEffect(() => {
+    // 关窗前 flush 所有未落盘笔记改动，避免 2s 自动保存防抖窗口内输入丢失（R6-1）。
+    void initWindowCloseFlush();
+  }, []);
 
   useEffect(() => {
     if (language && i18n.language !== language) {

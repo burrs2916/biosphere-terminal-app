@@ -3,11 +3,11 @@ import {
   Box, Typography, Divider, Chip, IconButton, Tooltip,
 } from '@mui/material';
 import {
-  RobotIcon, SparkleIcon, PlusIcon,
+  RobotIcon, SparkleIcon, PlusIcon, ListIcon, TrashIcon,
 } from '@phosphor-icons/react';
 import { useAgentStore } from '../features/agent/store/agentStore';
-import { runAgent, saveMessage, listMessages, createConversation, listConversations, stopAgent, updateConversationTitle } from '../core/services/agent.service';
-import type { MessageDto } from '../proto/agent';
+import { runAgent, saveMessage, listMessages, createConversation, listConversations, stopAgent, updateConversationTitle, deleteConversation } from '../core/services/agent.service';
+import type { MessageDto, ConversationDto } from '../proto/agent';
 import { listen } from '@tauri-apps/api/event';
 import { useTheme } from '@mui/material/styles';
 import { useTranslation } from 'react-i18next';
@@ -62,39 +62,105 @@ export function AiCopilotPage() {
   const [messages, setMessages] = useState<MessageDto[]>([]);
   const [toolCalls, setToolCalls] = useState<ToolCallDisplay[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [convList, setConvList] = useState<ConversationDto[]>([]);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const streamingMsgIdRef = useRef<string | null>(null);
   const toolCallCounterRef = useRef(0);
 
-  const boundAgentId = getTerminalCopilotAgentId();
+  const storedAgentId = getTerminalCopilotAgentId();
+  const boundAgentId = storedAgentId;
   const boundAgent = agents.find((a) => a.id === boundAgentId);
   const boundModel = boundAgent ? models.find((m) => m.id === boundAgent.modelId) : null;
+  // 绑定 id 残留但对应智能体已不存在（被删/改）时，给出明确提示，而非运行期崩溃
+  const boundAgentMissing = boundAgentId != null && agents.length > 0 && !boundAgent;
   const notify = useNotify().notify;
+
+  // 若回退发生了，持久化新选择，保证后续加载稳定。
+  useEffect(() => {
+    if (boundAgentId && boundAgentId !== storedAgentId) {
+      setTerminalCopilotAgentId(boundAgentId);
+    }
+  }, [boundAgentId, storedAgentId]);
 
   useEffect(() => {
     loadAgents();
     loadModels();
   }, [loadAgents, loadModels]);
 
-  useEffect(() => {
-    if (!boundAgentId) return;
-
-    const initConversation = async () => {
-      try {
-        const convs = await listConversations(boundAgentId);
-        if (convs.length > 0) {
-          const conv = convs[0];
-          setConversationId(conv.id);
-          const msgs = await listMessages(conv.id);
-          setMessages(msgs);
-        } else {
-          const conv = await createConversation(boundAgentId, 'AI Copilot');
-          setConversationId(conv.id);
-          setMessages([]);
-        }
-      } catch (err) { console.error('AiCopilotPage: operation failed', err); }
-    };
-    initConversation();
+  const loadConversations = useCallback(async (): Promise<ConversationDto[]> => {
+    if (!boundAgentId) return [];
+    try {
+      const convs = await listConversations(boundAgentId);
+      const sorted = [...convs].sort((a, b) => b.updatedAt - a.updatedAt);
+      setConvList(sorted);
+      return sorted;
+    } catch (err) { console.error('AiCopilotPage: operation failed', err); return []; }
   }, [boundAgentId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const sorted = await loadConversations();
+      if (cancelled) return;
+      if (sorted.length > 0) {
+        const conv = sorted[0];
+        setConversationId(conv.id);
+        try {
+          const msgs = await listMessages(conv.id);
+          if (!cancelled) setMessages(msgs);
+        } catch (e) { console.error('AiCopilotPage: operation failed', e); }
+      } else {
+        try {
+          const conv = await createConversation(boundAgentId!, 'AI Copilot');
+          if (!cancelled) {
+            setConversationId(conv.id);
+            setMessages([]);
+            setConvList([conv]);
+          }
+        } catch (e) { console.error('AiCopilotPage: operation failed', e); }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [boundAgentId, loadConversations]);
+
+  const selectConversation = useCallback(async (id: string) => {
+    setConversationId(id);
+    setMessages([]);
+    try {
+      const msgs = await listMessages(id);
+      setMessages(msgs);
+    } catch (e) { console.error('AiCopilotPage: operation failed', e); }
+  }, []);
+
+  const handleNewChat = async () => {
+    if (!boundAgentId) return;
+    try {
+      const conv = await createConversation(boundAgentId, 'AI Copilot');
+      setConvList((prev) => [conv, ...prev].sort((a, b) => b.updatedAt - a.updatedAt));
+      setConversationId(conv.id);
+      setMessages([]);
+    } catch (err) { console.error('AiCopilotPage: operation failed', err); }
+  };
+
+  const handleDeleteConv = async (id: string) => {
+    try {
+      await deleteConversation(id);
+      setConvList((prev) => {
+        const next = prev.filter((c) => c.id !== id);
+        if (conversationId === id) {
+          if (next.length > 0) {
+            const recent = next[0];
+            setConversationId(recent.id);
+            listMessages(recent.id).then((msgs) => setMessages(msgs)).catch(() => {});
+          } else {
+            setConversationId(null);
+            setMessages([]);
+          }
+        }
+        return next;
+      });
+    } catch (err) { console.error('AiCopilotPage: operation failed', err); }
+  };
 
   useEffect(() => {
     if (!conversationId) return;
@@ -119,6 +185,7 @@ export function AiCopilotPage() {
             const autoTitle = firstUserMsg.content.replace(/\[(?:附件|Attachment):.*?\]\s*/g, '').trim().slice(0, 40);
             if (autoTitle) {
               updateConversationTitle(conversationId, autoTitle).catch((e) => notify(String(e)));
+              setConvList((prev) => prev.map((c) => c.id === conversationId ? { ...c, title: autoTitle } : c));
             }
           }
         } catch (err) { console.error('AiCopilotPage: operation failed', err); }
@@ -272,24 +339,15 @@ export function AiCopilotPage() {
     streamingMsgIdRef.current = null;
   };
 
-  const handleNewChat = async () => {
-    if (!boundAgentId) return;
-    try {
-      const conv = await createConversation(boundAgentId, 'AI Copilot');
-      setConversationId(conv.id);
-      setMessages([]);
-    } catch (err) { console.error('AiCopilotPage: operation failed', err); }
-  };
-
-  if (!boundAgentId) {
+  if (!boundAgentId || boundAgentMissing) {
     return (
       <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 3, bgcolor: 'background.default' }}>
         <SparkleIcon size={48} weight="duotone" color="#6C63FF" />
         <Typography variant="body1" sx={{ fontWeight: 600, textAlign: 'center' }}>
-          {t('copilot.no_agent_bound')}
+          {boundAgentMissing ? t('copilot.agent_missing') : t('copilot.no_agent_bound')}
         </Typography>
-        <Typography variant="body2" sx={{ color: 'text.secondary', textAlign: 'center', maxWidth: 300, lineHeight: 1.6 }}>
-          {t('copilot.no_agent_bound_desc')}
+        <Typography variant="body2" sx={{ color: 'text.secondary', textAlign: 'center', maxWidth: 320, lineHeight: 1.6 }}>
+          {boundAgentMissing ? t('copilot.agent_missing_desc') : t('copilot.no_agent_bound_desc')}
         </Typography>
       </Box>
     );
@@ -301,58 +359,117 @@ export function AiCopilotPage() {
   }
 
   return (
-    <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', bgcolor: 'background.default' }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2, py: 0.75 }}>
+    <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'row', bgcolor: 'background.default' }}>
+      {sidebarOpen && (
         <Box sx={{
-          width: 24, height: 24, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          background: `linear-gradient(135deg, ${agentColor} 0%, ${isDark ? '#29B6F6' : '#0277BD'} 100%)`,
-          color: '#fff', flexShrink: 0,
+          width: 240, flexShrink: 0, borderRight: `1px solid ${mutedBorder}`,
+          display: 'flex', flexDirection: 'column',
+          bgcolor: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)',
         }}>
-          <RobotIcon size={12} weight="bold" />
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 1.5, py: 1, borderBottom: `1px solid ${mutedBorder}` }}>
+            <Typography variant="caption" sx={{ fontWeight: 600, color: 'text.secondary', fontSize: 11 }}>
+              {t('copilot.sessions_title')}
+            </Typography>
+            <Tooltip title={t('copilot.new_chat')} arrow>
+              <IconButton size="small" onClick={handleNewChat} sx={{ borderRadius: 2, border: `1px solid ${agentColor}30`, color: agentColor }}>
+                <PlusIcon size={14} weight="bold" />
+              </IconButton>
+            </Tooltip>
+          </Box>
+          <Box sx={{ flex: 1, overflow: 'auto', p: 1 }}>
+            {convList.length === 0 ? (
+              <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', textAlign: 'center', mt: 2, fontSize: 11 }}>
+                {t('copilot.no_sessions')}
+              </Typography>
+            ) : (
+              convList.map((c) => (
+                <Box
+                  key={c.id}
+                  onClick={() => selectConversation(c.id)}
+                  sx={{
+                    display: 'flex', alignItems: 'center', gap: 0.5, p: 1, mb: 0.5, borderRadius: 2, cursor: 'pointer',
+                    bgcolor: c.id === conversationId ? `${agentColor}18` : 'transparent',
+                    border: c.id === conversationId ? `1px solid ${agentColor}40` : '1px solid transparent',
+                    '&:hover': { bgcolor: `${agentColor}10` },
+                  }}
+                >
+                  <Box sx={{ flex: 1, minWidth: 0 }}>
+                    <Typography variant="body2" sx={{ fontSize: 12, fontWeight: c.id === conversationId ? 600 : 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {c.title || 'AI Copilot'}
+                    </Typography>
+                    <Typography variant="caption" sx={{ fontSize: 10, color: 'text.secondary' }}>
+                      {new Date(c.updatedAt).toLocaleString(undefined, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                    </Typography>
+                  </Box>
+                  <IconButton
+                    size="small"
+                    onClick={(e) => { e.stopPropagation(); handleDeleteConv(c.id); }}
+                    sx={{ p: 0.25, opacity: 0.5, '&:hover': { opacity: 1, color: 'error.main' } }}
+                  >
+                    <TrashIcon size={14} />
+                  </IconButton>
+                </Box>
+              ))
+            )}
+          </Box>
         </Box>
-        <Typography variant="body2" sx={{ fontWeight: 600, fontSize: 13, flex: 1 }}>
-          {boundAgent?.name || 'AI Copilot'}
-        </Typography>
-        {boundModel && (
-          <Chip label={boundModel.name} size="small" sx={{ height: 18, fontSize: 9 }} />
-        )}
-        <Tooltip title={t('copilot.new_chat')} arrow>
-          <IconButton size="small" onClick={handleNewChat} sx={{ borderRadius: 2, border: `1px solid ${agentColor}30` }}>
-            <PlusIcon size={14} weight="bold" color={agentColor} />
+      )}
+      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2, py: 0.75 }}>
+          <IconButton size="small" onClick={() => setSidebarOpen((o) => !o)} sx={{ borderRadius: 2, border: `1px solid ${agentColor}30`, color: agentColor }}>
+            <ListIcon size={14} weight="bold" />
           </IconButton>
-        </Tooltip>
+          <Box sx={{
+            width: 24, height: 24, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: `linear-gradient(135deg, ${agentColor} 0%, ${isDark ? '#29B6F6' : '#0277BD'} 100%)`,
+            color: '#fff', flexShrink: 0,
+          }}>
+            <RobotIcon size={12} weight="bold" />
+          </Box>
+          <Typography variant="body2" sx={{ fontWeight: 600, fontSize: 13, flex: 1 }}>
+            {boundAgent?.name || 'AI Copilot'}
+          </Typography>
+          {boundModel && (
+            <Chip label={boundModel.name} size="small" sx={{ height: 18, fontSize: 9 }} />
+          )}
+          <Tooltip title={t('copilot.new_chat')} arrow>
+            <IconButton size="small" onClick={handleNewChat} sx={{ borderRadius: 2, border: `1px solid ${agentColor}30` }}>
+              <PlusIcon size={14} weight="bold" color={agentColor} />
+            </IconButton>
+          </Tooltip>
+        </Box>
+        <Divider sx={{ borderColor: mutedBorder }} />
+        <ChatMessagesArea
+          messages={messages}
+          streamingContent={streamingContent}
+          streamingMsgId={streamingMsgIdRef.current}
+          loading={loading}
+          toolCalls={toolCalls}
+          agentColor={agentColor}
+          userColor={userColor}
+          isDark={isDark}
+          conversationId={conversationId ?? undefined}
+          emptyIcon={<RobotIcon size={40} weight="duotone" color={agentColor} />}
+          emptyText={t('copilot.empty_hint')}
+          thinkingText={t('copilot.thinking')}
+        />
+        <ChatInputArea
+          input={input}
+          setInput={setInput}
+          handleSend={handleSend}
+          handleKeyDown={handleKeyDown}
+          loading={loading}
+          conversationId={conversationId}
+          agentName={boundAgent?.name}
+          agentColor={agentColor}
+          userColor={userColor}
+          isDark={isDark}
+          placeholder={t('copilot.input_placeholder')}
+          onStop={handleStop}
+          attachments={attachments}
+          onAttachmentsChange={setAttachments}
+        />
       </Box>
-      <Divider sx={{ borderColor: mutedBorder }} />
-      <ChatMessagesArea
-        messages={messages}
-        streamingContent={streamingContent}
-        streamingMsgId={streamingMsgIdRef.current}
-        loading={loading}
-        toolCalls={toolCalls}
-        agentColor={agentColor}
-        userColor={userColor}
-        isDark={isDark}
-        conversationId={conversationId ?? undefined}
-        emptyIcon={<RobotIcon size={40} weight="duotone" color={agentColor} />}
-        emptyText={t('copilot.empty_hint')}
-        thinkingText={t('copilot.thinking')}
-      />
-      <ChatInputArea
-        input={input}
-        setInput={setInput}
-        handleSend={handleSend}
-        handleKeyDown={handleKeyDown}
-        loading={loading}
-        conversationId={conversationId}
-        agentName={boundAgent?.name}
-        agentColor={agentColor}
-        userColor={userColor}
-        isDark={isDark}
-        placeholder={t('copilot.input_placeholder')}
-        onStop={handleStop}
-        attachments={attachments}
-        onAttachmentsChange={setAttachments}
-      />
     </Box>
   );
 }

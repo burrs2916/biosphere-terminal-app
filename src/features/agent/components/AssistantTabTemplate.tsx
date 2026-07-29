@@ -29,7 +29,7 @@ export interface AssistantTabConfig {
 }
 
 export function createAssistantTab(config: AssistantTabConfig) {
-  return function AssistantTab({ onStartChat }: { onStartChat: (agentId: string) => void }) {
+  return function AssistantTab({ onStartChat, onManageAgent }: { onStartChat: (agentId: string) => void; onManageAgent?: (agentId: string, toolId?: string) => void }) {
     const { t } = useTranslation('agent');
     const theme = useTheme();
     const isDark = theme.palette.mode === 'dark';
@@ -193,6 +193,21 @@ export function createAssistantTab(config: AssistantTabConfig) {
             <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10, lineHeight: 1.5 }}>
               {hasRequiredTool ? t(config.hasToolDescKey) : t(config.noToolDescKey)}
             </Typography>
+            {!hasRequiredTool && onManageAgent && (
+              <Button
+                size="small"
+                variant="outlined"
+                fullWidth
+                onClick={() => onManageAgent(selectedAgentId!, requiredToolIds[0])}
+                sx={{
+                  mt: 1, textTransform: 'none', fontSize: 11, borderRadius: 2,
+                  borderColor: warningColor, color: warningColor,
+                  '&:hover': { borderColor: warningColor, bgcolor: `${warningColor}10` },
+                }}
+              >
+                {t('assistant.enable_tool')}
+              </Button>
+            )}
           </Paper>
         )}
 

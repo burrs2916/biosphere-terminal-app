@@ -6,8 +6,10 @@ import {
 import {
   PlusIcon, TagIcon,
 } from '@phosphor-icons/react';
+import { listen } from '@tauri-apps/api/event';
 import { useNotebookStore } from '../store/notebookStore';
 import { NoteEditor } from './NoteEditor';
+import { BacklinksPanel } from './BacklinksPanel';
 import { NoteListItem, NoteSearchBar } from './NoteListItem';
 import { IconRenderer } from './IconRenderer';
 import { getNote } from '../../../core/services/notebook.service';
@@ -20,7 +22,17 @@ export function CategoryNotesPage() {
   const isDark = theme.palette.mode === 'dark';
   const primaryColor = isDark ? '#6C63FF' : '#5B54E0';
 
-  const params = new URLSearchParams(window.location.search);
+  // 该页面以独立 webview 窗口打开，URL 形如
+  //   /#/category-notes?groupId=X&category=Y&noteId=Z
+  // query 参数在 hash 片段内，不在 location.search（后者恒为空），
+  // 故必须从 location.hash 解析，否则 groupId/category/noteId 永远为空，
+  // 导致 loadNotes() 拉全部笔记、标题退化成 All Notes（用户报的"打开分类却显示全部笔记"）。
+  const hashQuery = (() => {
+    const hash = window.location.hash;
+    const qIndex = hash.indexOf('?');
+    return qIndex >= 0 ? hash.substring(qIndex + 1) : '';
+  })();
+  const params = new URLSearchParams(hashQuery);
   const groupId = params.get('groupId') || '';
   const categoryName = params.get('category') || '';
   const noteIdParam = params.get('noteId') || '';
@@ -34,6 +46,9 @@ export function CategoryNotesPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [initialNoteLoaded, setInitialNoteLoaded] = useState(false);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 持有最新搜索词，供 notes-changed 监听器重建视图时使用（避免闭包捕获到过期的空搜索词，
+  // 导致笔记保存/AI 改动后搜索结果被静默清空，R24 修复）。
+  const searchQueryRef = useRef('');
 
   useEffect(() => {
     loadGroups();
@@ -44,6 +59,35 @@ export function CategoryNotesPage() {
       loadNotes();
     }
   }, [groupId, categoryName, loadNotes, loadGroups, loadCategoriesByGroup]);
+
+  // 本页面是独立 webview 窗口，同样需要订阅 notes-changed，使 AI 改动后即时刷新当前分组/分类视图（P1-5）。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<unknown>('notes-changed', () => {
+      // 若当前正在搜索，重建搜索结果而非退回全量列表，避免搜索被静默清空（R24 修复）。
+      if (searchQueryRef.current.trim()) {
+        loadCategoriesByGroup(groupId);
+        searchNotes(searchQueryRef.current);
+        return;
+      }
+      if (groupId) {
+        loadCategoriesByGroup(groupId);
+        loadNotes(groupId, categoryName || undefined);
+      } else {
+        loadNotes();
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => { if (unlisten) unlisten(); };
+  }, [groupId, categoryName, loadNotes, loadCategoriesByGroup, searchNotes]);
+
+  // 切换到不同分组/分类时，清掉上一个视图残留的选中笔记。
+  // 该组件为同路由只换 query 参数，组件不重新挂载，selectedNote 会残留
+  // 导致编辑器显示别的组的笔记详情（用户报的"打开空分类却弹出其他组笔记"）。
+  // 置于 noteIdParam effect 之前：深链接笔记会先被清、再被下方 effect 重新加载。
+  useEffect(() => {
+    setSelectedNote(null);
+    setInitialNoteLoaded(false);
+  }, [groupId, categoryName]);
 
   useEffect(() => {
     if (noteIdParam && !initialNoteLoaded && notes.length >= 0) {
@@ -70,19 +114,32 @@ export function CategoryNotesPage() {
   const pinnedNotes = notes.filter((n) => n.isPinned);
   const unpinnedNotes = notes.filter((n) => !n.isPinned);
 
-  const handleSaved = useCallback(() => {
+  const handleSaved = useCallback((newNoteId?: string) => {
+    if (newNoteId) {
+      // 新建笔记首次保存后把新笔记写回 selectedNote，避免 note prop 为空导致后续保存静默丢失（P0-1）
+      getNote(newNoteId).then((detail) => {
+        if (detail) setSelectedNote(detail.note);
+      }).catch(() => {});
+    }
     if (groupId) {
       loadNotes(groupId, categoryName || undefined);
       loadCategoriesByGroup(groupId);
     } else {
       loadNotes();
     }
-  }, [groupId, categoryName, loadNotes, loadCategoriesByGroup]);
+  }, [groupId, categoryName, loadNotes, loadCategoriesByGroup, getNote]);
 
   const handleDeleteNote = useCallback((noteId: string) => {
     deleteNote(noteId);
     if (selectedNote?.id === noteId) setSelectedNote(null);
   }, [deleteNote, selectedNote]);
+
+  // 反链/出链点击跳转：拉取目标笔记并切换选中（R6-2）。
+  const handleNavigate = useCallback((id: string) => {
+    getNote(id).then((detail) => {
+      if (detail) setSelectedNote(detail.note);
+    }).catch(() => {});
+  }, []);
 
   const handleTogglePin = useCallback((noteId: string) => {
     togglePin(noteId);
@@ -90,6 +147,7 @@ export function CategoryNotesPage() {
 
   const handleSearch = useCallback((value: string) => {
     setSearchQuery(value);
+    searchQueryRef.current = value;
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
     if (value.trim()) {
       searchTimerRef.current = setTimeout(() => {
@@ -187,6 +245,7 @@ export function CategoryNotesPage() {
 
         <Box sx={{ flex: 1, overflow: 'hidden' }}>
           <NoteEditor
+            key={selectedNote?.id ?? 'new'}
             note={selectedNote}
             onClose={() => setSelectedNote(null)}
             onSaved={handleSaved}
@@ -194,6 +253,8 @@ export function CategoryNotesPage() {
             defaultCategory={categoryName}
           />
         </Box>
+
+        <BacklinksPanel noteId={selectedNote?.id ?? null} groups={groups} onNavigate={handleNavigate} />
       </Box>
     </Box>
   );

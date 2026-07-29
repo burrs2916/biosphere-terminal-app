@@ -139,7 +139,7 @@ export function UpgradeDialog() {
             {t('license.upgrade.title', { defaultValue: 'Biosphere Pro' })}
           </Typography>
         </Stack>
-        <IconButton size="small" onClick={handleClose} aria-label={t('common.close', { defaultValue: 'Close' })}>
+        <IconButton size="small" onClick={handleClose} aria-label={t('action.close', { defaultValue: 'Close' })}>
           <XIcon size={18} />
         </IconButton>
       </DialogTitle>

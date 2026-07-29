@@ -162,6 +162,10 @@
     "bell_sound": "Sound"
   },
   "license": {
+    "header": {
+      "trialDaysLeft": "Trial · {{count}}d",
+      "upgrade": "Upgrade"
+    },
     "upgrade": {
       "title": "Biosphere Pro",
       "headlineTrial": "Your trial ends in {{trialDaysLeft}} day(s). Unlock Pro to keep everything.",

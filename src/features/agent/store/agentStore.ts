@@ -43,6 +43,10 @@ interface AgentState {
   updateMessage: (id: string, content: string) => void;
   setActiveConversation: (id: string | null) => void;
   setActiveAgent: (id: string | null) => void;
+  pendingAgentEditorId: string | null;
+  pendingHighlightTool: string | null;
+  requestAgentEditor: (agentId: string, toolId?: string | null) => void;
+  clearPendingAgentEditor: () => void;
   deleteMessagesAfter: (conversationId: string, afterMessageId: string) => Promise<void>;
 }
 
@@ -270,6 +274,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setActiveConversation: (id: string | null) => set({ activeConversationId: id }),
   setActiveAgent: (id: string | null) => set({ activeAgentId: id }),
+
+  pendingAgentEditorId: null,
+  pendingHighlightTool: null,
+  requestAgentEditor: (agentId: string, toolId: string | null = null) =>
+    set({ pendingAgentEditorId: agentId, pendingHighlightTool: toolId }),
+  clearPendingAgentEditor: () => set({ pendingAgentEditorId: null, pendingHighlightTool: null }),
 
   deleteMessagesAfter: async (conversationId: string, afterMessageId: string) => {
     await agentService.deleteMessagesAfter(conversationId, afterMessageId);

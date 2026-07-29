@@ -140,7 +140,7 @@ export function Header({ onToggleSidebar }: HeaderProps) {
             px: 1.5,
           }}
         >
-          {currentLang === 'zh-CN' ? `🌐 ${t('lang_en')}` : `🌐 ${t('lang_zh')}`}
+          {currentLang === 'zh-CN' ? `🌐 ${t('app.lang_en')}` : `🌐 ${t('app.lang_zh')}`}
         </Button>
       </Toolbar>
     </AppBar>

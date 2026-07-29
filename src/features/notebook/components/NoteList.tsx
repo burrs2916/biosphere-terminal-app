@@ -2,16 +2,18 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Box, List, ListItemButton, ListItemText, ListItemIcon,
-  IconButton, Typography, Menu, MenuItem, Tooltip, Divider,
+  IconButton, Typography, Menu, MenuItem, Tooltip, Divider, Chip,
 } from '@mui/material';
 import {
   TrashIcon, FolderOpenIcon, DotsThreeVerticalIcon, PlusIcon,
   FolderSimplePlusIcon, PencilSimpleIcon, BooksIcon,
 } from '@phosphor-icons/react';
+import { listen } from '@tauri-apps/api/event';
 import { IconRenderer } from './IconRenderer';
 import { useNotebookStore } from '../store/notebookStore';
 import { NoteListItem, NoteSearchBar } from './NoteListItem';
 import { GroupManageDialog } from './GroupManageDialog';
+import { DeleteGroupDialog } from './DeleteGroupDialog';
 import type { NoteGroupDto } from '../../../proto/notebook';
 
 interface NoteListProps {
@@ -22,25 +24,65 @@ interface NoteListProps {
 import type { NoteDto } from '../../../proto/notebook';
 
 export function NoteList({ onSelectNote, onNewNote }: NoteListProps) {
-  const { t } = useTranslation('notebook');
+  const { t, i18n } = useTranslation('notebook');
   const { t: tCommon } = useTranslation('common');
 
   const {
     notes, groups, activeGroupId, searchQuery, selectedNote,
-    loadNotes, loadGroups, deleteNote, togglePin, searchNotes,
+    loadNotes, loadGroups, deleteNote, deleteGroup, togglePin, searchNotes,
     setSearchQuery, setActiveGroupId, activeCategory, setActiveCategory, categories, loadCategoriesByGroup, loadAllCategories,
+    tags, activeTag, setActiveTag, loadTagsByGroup,
   } = useNotebookStore();
 
   const [groupManageOpen, setGroupManageOpen] = useState(false);
   const [groupMenuAnchor, setGroupMenuAnchor] = useState<null | HTMLElement>(null);
   const [menuGroupId, setMenuGroupId] = useState<string | null>(null);
+  const [groupDeleteOpen, setGroupDeleteOpen] = useState(false);
+  const [groupToDelete, setGroupToDelete] = useState<NoteGroupDto | null>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 分类标签：预定义分类走翻译；用户自建分类名不在语言包内时回退显示原始名，避免暴露 raw key 串。
+  const categoryLabel = (note: NoteDto): string => {
+    if (note.groupId) {
+      return groups.find((g) => g.id === note.groupId)?.name || t('group.uncategorized');
+    }
+    if (note.category) {
+      return i18n.exists(`notebook.categories.${note.category}`)
+        ? t(`notebook.categories.${note.category}`)
+        : note.category;
+    }
+    return t('notebook.categories.uncategorized');
+  };
 
   useEffect(() => {
     loadGroups();
     loadNotes();
     loadAllCategories();
   }, [loadGroups, loadNotes, loadAllCategories]);
+
+  // 订阅后端写操作后广播的 notes-changed 事件：AI 在进程内直接创建/修改/删除/重归类笔记后，
+  // 列表与分组计数能即时刷新，而不必手动刷新窗口（P1-5 前端消费端）。
+  // 始终以当前视图的过滤条件（分组/分类/搜索）为准重拉，避免状态错乱或把所有笔记混进来。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<unknown>('notes-changed', () => {
+      const st = useNotebookStore.getState();
+      const q = st.searchQuery || undefined;
+      st.loadGroups()
+        .then(() => {
+          const cur = useNotebookStore.getState();
+          // 兜底：若当前选中的分组已被（AI）删除，重置为"全部"，并拉全部笔记
+          if (cur.activeGroupId && !cur.groups.some((g) => g.id === cur.activeGroupId)) {
+            cur.setActiveGroupId('');
+            cur.loadNotes(undefined, undefined, q).catch(() => {});
+          } else {
+            cur.loadNotes(cur.activeGroupId || undefined, cur.activeCategory || undefined, q).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }).then((fn) => { unlisten = fn; });
+    return () => { if (unlisten) unlisten(); };
+  }, []);
 
   const handleSearch = useCallback((value: string) => {
     setSearchQuery(value);
@@ -58,19 +100,26 @@ export function NoteList({ onSelectNote, onNewNote }: NoteListProps) {
     const newGroupId = activeGroupId === groupId ? '' : groupId;
     setActiveGroupId(newGroupId);
     setActiveCategory('');
+    setActiveTag('');
     if (newGroupId) {
       loadCategoriesByGroup(newGroupId);
+      loadTagsByGroup(newGroupId);
     } else {
       loadAllCategories();
     }
     loadNotes(newGroupId || undefined, undefined, searchQuery || undefined);
-  }, [activeGroupId, searchQuery, loadNotes, setActiveGroupId, setActiveCategory, loadCategoriesByGroup, loadAllCategories]);
+  }, [activeGroupId, searchQuery, loadNotes, setActiveGroupId, setActiveCategory, setActiveTag, loadCategoriesByGroup, loadAllCategories, loadTagsByGroup]);
 
   const handleCategoryClick = useCallback((categoryName: string) => {
     const newCategory = activeCategory === categoryName ? '' : categoryName;
     setActiveCategory(newCategory);
     loadNotes(activeGroupId || undefined, newCategory || undefined, searchQuery || undefined);
   }, [activeCategory, activeGroupId, searchQuery, loadNotes, setActiveCategory]);
+
+  const handleTagClick = useCallback((tagName: string) => {
+    const newTag = activeTag === tagName ? '' : tagName;
+    setActiveTag(newTag);
+  }, [activeTag, setActiveTag]);
 
   const handleGroupMenuOpen = (e: React.MouseEvent<HTMLElement>, groupId: string) => {
     e.stopPropagation();
@@ -91,8 +140,12 @@ export function NoteList({ onSelectNote, onNewNote }: NoteListProps) {
     togglePin(noteId);
   }, [togglePin]);
 
-  const pinnedNotes = notes.filter((n) => n.isPinned);
-  const unpinnedNotes = notes.filter((n) => !n.isPinned);
+  // 防御性过滤：当前处于某分组视图时，绝不混入其他分组的笔记，避免状态错乱导致列表归属错误（F4�?
+  const visibleNotes = notes
+    .filter((n) => !activeGroupId || n.groupId === activeGroupId)
+    .filter((n) => !activeTag || (n.tags || []).includes(activeTag));
+  const pinnedNotes = visibleNotes.filter((n) => n.isPinned);
+  const unpinnedNotes = visibleNotes.filter((n) => !n.isPinned);
   const allCount = notes.length;
 
   const renderGroupItem = (group: NoteGroupDto) => {
@@ -224,6 +277,30 @@ export function NoteList({ onSelectNote, onNewNote }: NoteListProps) {
             </List>
           </>
         )}
+
+        {activeGroupId && tags.length > 0 && (
+          <>
+            <Box sx={{ px: 1, pt: 1, pb: 0.5 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5, fontSize: 10 }}>
+                {t('tag.title')}
+              </Typography>
+            </Box>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, px: 0.5, pb: 1 }}>
+              {tags.map((tag) => (
+                <Chip
+                  key={tag.id}
+                  label={tag.name}
+                  size="small"
+                  clickable
+                  onClick={() => handleTagClick(tag.name)}
+                  color={activeTag === tag.name ? 'primary' : 'default'}
+                  variant={activeTag === tag.name ? 'filled' : 'outlined'}
+                  sx={{ borderRadius: 1.5, fontSize: 11, '& .MuiChip-label': { px: 0.75 } }}
+                />
+              ))}
+            </Box>
+          </>
+        )}
       </Box>
 
       <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -244,7 +321,7 @@ export function NoteList({ onSelectNote, onNewNote }: NoteListProps) {
                     onClick={onSelectNote}
                     onTogglePin={handleTogglePin}
                     onDelete={handleDeleteNote}
-                    groupHint={note.groupId ? (groups.find((g) => g.id === note.groupId)?.name || t('group.uncategorized')) : t(`notebook.categories.${note.category}`)}
+                    groupHint={categoryLabel(note)}
                   />
                 ))}
                 <Divider sx={{ my: 0.5 }} />
@@ -258,7 +335,7 @@ export function NoteList({ onSelectNote, onNewNote }: NoteListProps) {
                 onClick={onSelectNote}
                 onTogglePin={handleTogglePin}
                 onDelete={handleDeleteNote}
-                groupHint={note.groupId ? (groups.find((g) => g.id === note.groupId)?.name || t('group.uncategorized')) : t(`notebook.categories.${note.category}`)}
+                groupHint={categoryLabel(note)}
               />
             ))}
             {notes.length === 0 && (
@@ -283,11 +360,29 @@ export function NoteList({ onSelectNote, onNewNote }: NoteListProps) {
           <PencilSimpleIcon size={14} color="#6C63FF" style={{ marginRight: 8 }} />
           {t('group.edit')}
         </MenuItem>
-        <MenuItem onClick={() => { if (menuGroupId) useNotebookStore.getState().deleteGroup(menuGroupId); handleGroupMenuClose(); }}>
-          <TrashIcon size={14} color="#FF5252" style={{ marginRight: 8 }} />
-          {t('group.delete')}
-        </MenuItem>
+        {menuGroupId !== 'uncategorized' && (
+          <MenuItem onClick={() => {
+            const g = groups.find((x) => x.id === menuGroupId);
+            if (g) { setGroupToDelete(g); setGroupDeleteOpen(true); }
+            handleGroupMenuClose();
+          }}>
+            <TrashIcon size={14} color="#FF5252" style={{ marginRight: 8 }} />
+            {t('group.delete')}
+          </MenuItem>
+        )}
       </Menu>
+
+      <DeleteGroupDialog
+        open={groupDeleteOpen}
+        group={groupToDelete}
+        onClose={() => { setGroupDeleteOpen(false); setGroupToDelete(null); }}
+        onConfirm={async (targetGroupId, deleteNotes) => {
+          if (!groupToDelete) return;
+          setGroupDeleteOpen(false);
+          await deleteGroup(groupToDelete.id, targetGroupId, deleteNotes);
+          setGroupToDelete(null);
+        }}
+      />
 
       <GroupManageDialog open={groupManageOpen} onClose={() => setGroupManageOpen(false)} />
     </Box>

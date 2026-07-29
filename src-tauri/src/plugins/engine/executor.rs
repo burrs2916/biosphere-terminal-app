@@ -1,10 +1,30 @@
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use super::parser::{ScriptType, parse_script};
 use super::http_executor::execute_http;
 use super::shell_executor::execute_shell;
 use super::script_file_executor::execute_script_file;
+use super::safety::is_private_ip;
+
+/// A single shared HTTP client for all plugin HTTP calls. Building a
+/// `reqwest::Client` per call (the previous behaviour) wastes a connection
+/// pool and TLS configuration on every request.
+static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+pub fn http_client() -> Result<reqwest::Client, String> {
+    if let Some(client) = HTTP_CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let _ = HTTP_CLIENT.set(client.clone());
+    Ok(client)
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,10 +83,17 @@ async fn execute_passthrough(script: &str, params: &Value, ctx: &ExecutionContex
         if let Some(url) = extract_url_from_fetch_script(trimmed) {
             let (resolved_url, _) = super::template::render_template(&url, params);
 
-            let client = match reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-            {
+            if is_private_ip(&resolved_url) {
+                return ExecutionResult {
+                    success: false,
+                    output: format!("HTTP request to private/internal IP address is blocked for security: {}. Only public internet URLs are allowed.", resolved_url),
+                    script_type: "passthrough".to_string(),
+                    duration_ms: start.elapsed().as_millis() as i64,
+                    metadata: json!({ "tool": ctx.tool_name, "blocked": true, "url": resolved_url }),
+                };
+            }
+
+            let client = match http_client() {
                 Ok(c) => c,
                 Err(e) => {
                     return ExecutionResult {

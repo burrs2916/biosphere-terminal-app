@@ -7,12 +7,12 @@ import {
   XIcon,
   NotebookIcon,
   RobotIcon,
-  LightningIcon,
   BroomIcon,
   ClipboardIcon,
   ClipboardTextIcon,
   MagnifyingGlassIcon,
   MonitorIcon,
+  PlugsConnectedIcon,
 } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
@@ -22,7 +22,6 @@ interface TerminalToolbarProps {
   onCloseTab?: () => void;
   onOpenNotes?: () => void;
   onOpenAiCopilot?: () => void;
-  onOpenWorkshop?: () => void;
   onOpenRemoteDesktop?: () => void;
   onClearBuffer?: () => void;
   onCopy?: () => void;
@@ -30,6 +29,7 @@ interface TerminalToolbarProps {
   onFind?: () => void;
   findOpen?: boolean;
   isSshSession?: boolean;
+  onOpenConnections?: () => void;
 }
 
 export function TerminalToolbar({
@@ -37,7 +37,6 @@ export function TerminalToolbar({
   onCloseTab,
   onOpenNotes,
   onOpenAiCopilot,
-  onOpenWorkshop,
   onOpenRemoteDesktop,
   onClearBuffer,
   onCopy,
@@ -45,6 +44,7 @@ export function TerminalToolbar({
   onFind,
   findOpen,
   isSshSession,
+  onOpenConnections,
 }: TerminalToolbarProps) {
   const { t } = useTranslation('terminal');
   const theme = useTheme();
@@ -131,11 +131,6 @@ export function TerminalToolbar({
             <RobotIcon size={16} color={isDark ? '#81C784' : '#2E7D32'} />
           </IconButton>
         </Tooltip>
-        <Tooltip title={t('open_workshop')}>
-          <IconButton size="small" onClick={onOpenWorkshop}>
-            <LightningIcon size={16} color={isDark ? '#CE93D8' : '#6A1B9A'} />
-          </IconButton>
-        </Tooltip>
         {isSshSession && (
           <Tooltip title={t('open_remote_desktop')}>
             <IconButton size="small" onClick={onOpenRemoteDesktop}>
@@ -143,6 +138,11 @@ export function TerminalToolbar({
             </IconButton>
           </Tooltip>
         )}
+        <Tooltip title={t('open_connections')}>
+          <IconButton size="small" onClick={onOpenConnections}>
+            <PlugsConnectedIcon size={16} color={isDark ? '#8B949E' : '#6B7280'} />
+          </IconButton>
+        </Tooltip>
       </Box>
     </Box>
   );

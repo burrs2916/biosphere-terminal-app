@@ -1,3 +1,19 @@
+use regex::Regex;
+use std::sync::LazyLock;
+
+static PLACEHOLDER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{\{(\w+)\}\}").unwrap());
+
+/// Detect `{{name}}` placeholders that were not substituted. `output_path` /
+/// `workspace_dir` are injected by the engine and therefore never count as
+/// unresolved from the caller's perspective.
+pub fn detect_unresolved_placeholders(content: &str) -> Vec<String> {
+    PLACEHOLDER_RE
+        .captures_iter(content)
+        .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
+        .filter(|name| name != "output_path" && name != "workspace_dir")
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub enum ScriptType {
     Http(HttpScript),

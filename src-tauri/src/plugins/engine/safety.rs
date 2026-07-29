@@ -18,18 +18,6 @@ pub fn is_dangerous_command(command: &str) -> Option<&'static str> {
     None
 }
 
-#[allow(dead_code)]
-pub fn is_path_traversal(path: &str) -> bool {
-    let normalized = std::path::Path::new(path);
-    for component in normalized.components() {
-        match component {
-            std::path::Component::ParentDir => return true,
-            _ => continue,
-        }
-    }
-    false
-}
-
 pub fn is_private_ip(url: &str) -> bool {
     let host = extract_host(url);
     match host.as_str() {

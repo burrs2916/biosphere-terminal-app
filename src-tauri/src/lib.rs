@@ -609,7 +609,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let notes_dir = effective_data_dir.join("notes");
             let _ = std::fs::create_dir_all(&notes_dir);
 
-            let notebook_service = Arc::new(NotebookService::new(notes_dir, db_arc.clone()));
+            // 初始化连接密码加密密钥（与数据库同目录，零额外安装，at-rest 加密）。
+            // 失败仅告警并降级为明文存储，不阻断 app 启动。
+            if let Err(e) = crate::infra::security::crypto::init(&effective_data_dir) {
+                tracing::error!("[app] 连接密码加密初始化失败（将降级为明文存储）: {}", e);
+            }
+
+            let notebook_service = Arc::new(NotebookService::new(notes_dir, db_arc.clone(), app_handle.clone()));
             let agent_service = Arc::new(AgentService::new(db_arc.clone(), notebook_service.clone(), terminal_service.clone()));
             let plugin_service = Arc::new(PluginService::new(effective_data_dir.clone(), db_arc.clone()));
             let linker_service = Arc::new(LinkerService::new(
@@ -755,37 +761,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::connection::save_connection,
             interface::commands::connection::delete_connection,
             interface::commands::connection::test_connection,
-            interface::commands::plugin::list_plugins,
-            interface::commands::plugin::get_plugin,
-            interface::commands::plugin::save_plugin,
-            interface::commands::plugin::delete_plugin,
-            interface::commands::plugin::toggle_plugin,
-            interface::commands::plugin::list_plugin_tools,
-            interface::commands::plugin::list_plugin_groups,
-            interface::commands::plugin::create_plugin_group,
-            interface::commands::plugin::update_plugin_group,
-            interface::commands::plugin::delete_plugin_group,
-            interface::commands::plugin::list_plugin_categories,
-            interface::commands::plugin::create_plugin_category,
-            interface::commands::plugin::update_plugin_category,
-            interface::commands::plugin::delete_plugin_category,
-            interface::commands::plugin::run_plugin_tool,
-            interface::commands::plugin::get_plugin_tool_ui_schema,
-            interface::commands::plugin::get_plugin_usage_metrics,
-            interface::commands::plugin::get_plugin_refine_suggestions,
-            interface::commands::plugin::get_plugin_structured_refine,
-            interface::commands::plugin::list_plugin_usage_logs,
-            interface::commands::plugin::clear_plugin_usage_logs,
-            interface::commands::plugin::clear_usage_logs_before,
-            interface::commands::plugin::clear_failed_logs_before,
-            interface::commands::plugin::purge_all_usage_logs,
-            interface::commands::plugin::count_plugin_usage_logs,
-            interface::commands::plugin::count_all_usage_logs,
-            interface::commands::plugin::usage_logs_size_estimate,
-            interface::commands::plugin::export_plugin_usage_logs,
-            interface::commands::plugin::export_all_usage_logs,
             interface::commands::notebook::list_notes,
             interface::commands::notebook::get_note,
+            interface::commands::notebook::get_note_links,
             interface::commands::notebook::create_note,
             interface::commands::notebook::update_note,
             interface::commands::notebook::delete_note,
@@ -804,6 +782,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::notebook::create_note_category,
             interface::commands::notebook::update_note_category,
             interface::commands::notebook::delete_note_category,
+            interface::commands::notebook::list_note_tags_by_group,
+            interface::commands::notebook::create_note_tag,
+            interface::commands::notebook::update_note_tag,
+            interface::commands::notebook::delete_note_tag,
             interface::commands::agent::list_providers,
             interface::commands::agent::save_provider,
             interface::commands::agent::delete_provider,
@@ -830,10 +812,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::agent::run_agent,
             interface::commands::agent::stop_agent,
             interface::commands::agent::write_frontend_log,
-            interface::commands::agent::generate_plugin_scenarios,
             interface::commands::agent::respond_permission,
-            interface::commands::agent::save_plugin_scenarios,
-            interface::commands::agent::delete_plugin_scenario,
             interface::commands::agent::update_agent_allowed_tools,
             interface::commands::environment::get_environment,
             interface::commands::icon::list_icon_groups,

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type ReactNode } from 'react';
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNotify } from '../../../core/notification';
 import {
@@ -15,6 +15,8 @@ import { IconRenderer } from './IconRenderer';
 import { listNotes, listNoteGroups, listNoteCategoriesByGroup, getNote } from '../../../core/services/notebook.service';
 import type { NoteDto, NoteGroupDto, NoteCategoryDto } from '../../../proto/notebook';
 import { useTheme } from '@mui/material/styles';
+import { useFeatureGate, LockedScreen } from '../../licensing';
+import { listen } from '@tauri-apps/api/event';
 
 function CodeBlock({ className, children }: { className?: string; children?: ReactNode }) {
   const { t } = useTranslation('notebook');
@@ -196,6 +198,11 @@ function getMarkdownStyles(isDark: boolean) {
 export function NotesReferencePage() {
   const { t } = useTranslation('notebook');
   const notify = useNotify().notify;
+  // 与 AiCopilotPage / RemoteDesktopPage 保持一致：note_reference 是 Pro 功能，
+  // 必须在消费点（页面级）做授权校验，而非仅依赖 TerminalPage 的入口 guard。
+  // 否则免费/过期用户只要能打开该独立窗口即可直接看到全部参考内容，
+  // 「付费解锁」形同虚设，且付费后也无法体现「从锁到解锁」的一致性状态切换。
+  const featureGate = useFeatureGate('note_reference');
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
   const primaryColor = isDark ? '#6C63FF' : '#5B54E0';
@@ -210,11 +217,38 @@ export function NotesReferencePage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedNote, setSelectedNote] = useState<NoteDto | null>(null);
   const [noteContent, setNoteContent] = useState('');
+  // 持有最新选中笔记 id，供 notes-changed 监听器（仅注册一次）读取，避免闭包捕获到过期的空 selectedNote。
+  const selectedNoteRef = useRef<NoteDto | null>(null);
+  selectedNoteRef.current = selectedNote;
   const [loadingContent, setLoadingContent] = useState(false);
 
   useEffect(() => {
     listNoteGroups().then(setGroups).catch((e) => { console.error(e); notify(String(e)); });
     listNotes().then(setNotes).catch((e) => { console.error(e); notify(String(e)); });
+  }, []);
+
+  // 订阅后端写操作后广播的 notes-changed：AI 在进程内直接增删改/重归类笔记后，
+  // 参考页能即时刷新（此前未订阅，AI 改动后参考页停留在旧数据）。
+  // R25 增强：若当前正在预览的笔记被改动（AI 辅助整理 / 其他窗口编辑），一并重拉其
+  // 正文/标题/分类，避免只读预览页停留在旧内容——否则 AI 整理成果在参考页不可见。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<unknown>('notes-changed', () => {
+      listNoteGroups().catch((e) => console.error(e));
+      listNotes().catch((e) => console.error(e));
+      const selId = selectedNoteRef.current?.id;
+      if (selId) {
+        getNote(selId)
+          .then((detail) => {
+            if (detail) {
+              setSelectedNote(detail.note);
+              setNoteContent(detail.content || '');
+            }
+          })
+          .catch(() => {});
+      }
+    }).then((fn) => { unlisten = fn; });
+    return () => { if (unlisten) unlisten(); };
   }, []);
 
   const loadGroupData = useCallback(async (groupId: string) => {
@@ -264,12 +298,23 @@ export function NotesReferencePage() {
     }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      result = result.filter((n) => n.title.toLowerCase().includes(q));
+      // R17：本地检索从「仅标题」扩展到 标题 / 分类 / 标签 三个维度，
+      // 与 CategoryNotesPage 的后端 searchNotes 对齐，笔记参考页搜索更易命中。
+      result = result.filter(
+        (n) =>
+          n.title.toLowerCase().includes(q) ||
+          (n.category && n.category.toLowerCase().includes(q)) ||
+          (n.tags && n.tags.some((tg) => tg.toLowerCase().includes(q))),
+      );
     }
     return result;
   })();
 
   const activeGroup = groups.find((g) => g.id === activeGroupId);
+
+  if (!featureGate.canUse) {
+    return <LockedScreen feature="note_reference" />;
+  }
 
   return (
     <Box sx={{ height: '100vh', display: 'flex', bgcolor: 'background.default' }}>
@@ -523,7 +568,7 @@ export function NotesReferencePage() {
           <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 1.5 }}>
             <NoteIcon size={40} color={mutedColor} style={{ opacity: 0.3 }} />
             <Typography variant="body2" color="text.secondary">
-              {t('notebook.select_note_hint') || 'Select a note to preview'}
+              {t('notebook.select_note_to_link') || 'Select a note to preview'}
             </Typography>
           </Box>
         )}

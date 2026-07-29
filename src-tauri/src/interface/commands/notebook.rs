@@ -2,7 +2,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::app::notebook_service::NotebookService;
+use crate::app::notebook_service::{NotebookService, NoteLinks};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,39 +89,36 @@ pub struct UpdateGroupInput {
     pub sort_order: i64,
 }
 
-fn extract_summary(file_path: &str) -> String {
-    let path = std::path::Path::new(file_path);
-    if let Ok(content) = std::fs::read_to_string(path) {
-        let body = if content.starts_with("---") {
-            if let Some(end) = content[3..].find("---") {
-                content[3 + end + 3..].trim()
-            } else {
-                content.trim()
-            }
+/// 基于已入库的正文（content 冗余列）生成摘要，避免列表期逐条读磁盘（P3-3）。
+/// content 已是 front matter 之后的正文，这里再做一次兜底剥离以防个别脏数据。
+fn summarize(content: &str) -> String {
+    let body = if content.starts_with("---") {
+        if let Some(end) = content[3..].find("---") {
+            content[3 + end + 3..].trim()
         } else {
             content.trim()
-        };
-        let cleaned = body
-            .lines()
-            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let truncated: String = cleaned.chars().take(120).collect();
-        if cleaned.chars().count() > 120 {
-            format!("{}...", truncated)
-        } else {
-            truncated
         }
     } else {
-        String::new()
+        content.trim()
+    };
+    let cleaned = body
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let truncated: String = cleaned.chars().take(120).collect();
+    if cleaned.chars().count() > 120 {
+        format!("{}...", truncated)
+    } else {
+        truncated
     }
 }
 
 fn to_note_dto(n: &crate::infra::storage::note_repo::NoteRow) -> NoteDto {
-    let summary = extract_summary(&n.file_path);
+    let summary = summarize(&n.content);
     NoteDto {
         id: n.id.clone(),
         title: n.title.clone(),
@@ -162,6 +159,14 @@ pub fn get_note(
         note: to_note_dto(&note),
         content,
     }))
+}
+
+#[tauri::command]
+pub fn get_note_links(
+    service: State<'_, Arc<NotebookService>>,
+    id: String,
+) -> Result<NoteLinks, String> {
+    service.get_note_links(&id)
 }
 
 #[tauri::command]
@@ -248,6 +253,7 @@ pub fn get_linked_commands(
         "noteId": l.note_id,
         "context": l.context,
         "createdAt": l.created_at,
+        "commandExists": l.command_exists,
     })).collect())
 }
 
@@ -408,12 +414,87 @@ pub fn delete_note_category(
     service.delete_category(&id)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteTagDto {
+    pub id: String,
+    pub name: String,
+    pub group_id: String,
+    pub sort_order: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTagInput {
+    pub name: String,
+    pub group_id: String,
+    pub sort_order: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTagInput {
+    pub id: String,
+    pub name: String,
+    pub sort_order: i64,
+}
+
+fn to_tag_dto(t: &crate::infra::storage::note_repo::NoteTagRow) -> NoteTagDto {
+    NoteTagDto {
+        id: t.id.clone(),
+        name: t.name.clone(),
+        group_id: t.group_id.clone(),
+        sort_order: t.sort_order,
+        created_at: t.created_at,
+        updated_at: t.updated_at,
+    }
+}
+
+#[tauri::command]
+pub fn list_note_tags_by_group(
+    service: State<'_, Arc<NotebookService>>,
+    group_id: String,
+) -> Result<Vec<NoteTagDto>, String> {
+    let tags = service.list_tags_by_group(&group_id)?;
+    Ok(tags.iter().map(to_tag_dto).collect())
+}
+
+#[tauri::command]
+pub fn create_note_tag(
+    service: State<'_, Arc<NotebookService>>,
+    input: CreateTagInput,
+) -> Result<NoteTagDto, String> {
+    let tag = service.create_tag(&input.name, &input.group_id, input.sort_order)?;
+    Ok(to_tag_dto(&tag))
+}
+
+#[tauri::command]
+pub fn update_note_tag(
+    service: State<'_, Arc<NotebookService>>,
+    input: UpdateTagInput,
+) -> Result<NoteTagDto, String> {
+    let tag = service.update_tag(&input.id, &input.name, input.sort_order)?;
+    Ok(to_tag_dto(&tag))
+}
+
+#[tauri::command]
+pub fn delete_note_tag(
+    service: State<'_, Arc<NotebookService>>,
+    id: String,
+) -> Result<(), String> {
+    service.delete_tag(&id)
+}
+
 #[tauri::command]
 pub fn delete_note_group(
     service: State<'_, Arc<NotebookService>>,
     id: String,
+    target_group_id: Option<String>,
+    delete_notes: bool,
 ) -> Result<(), String> {
-    service.delete_group(&id)
+    service.delete_group(&id, target_group_id, delete_notes)
 }
 
 #[tauri::command]

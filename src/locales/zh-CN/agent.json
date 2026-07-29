@@ -18,21 +18,41 @@
     "new_agent": "新建智能体",
     "save": "保存",
     "name_label": "名称",
+    "name_placeholder": "如：我的 Coding 助手",
     "description_label": "描述",
     "model_label": "模型",
     "select_model": "选择模型",
     "tools_label": "可用工具",
+    "enable_tool_hint": "请在此启用 {tool} 工具，然后点击「保存」",
     "temperature_label": "温度",
     "max_iterations_label": "最大迭代次数",
     "system_prompt_label": "系统提示词",
     "system_prompt_placeholder": "输入系统提示词，定义智能体的行为和角色...",
+    "description_placeholder": "简单描述这个智能体的用途，便于以后识别",
     "select_or_create": "选择或创建一个智能体",
+    "empty_hint_title": "选择一个智能体",
+    "empty_hint_desc": "从左侧列表选择一个智能体进行查看或编辑，或点击右上角的「新建智能体」创建一个。",
+    "guide_title": "开始创建你的 AI 智能体",
+    "guide_subtitle": "智能体是可复用的 AI 助手。绑定模型与工具后，即可让它对话或驱动终端。",
+    "guide_step1_title": "基础信息",
+    "guide_step1_desc": "命名并选择运行模型",
+    "guide_step2_title": "工具权限",
+    "guide_step2_desc": "勾选允许使用的工具",
+    "guide_step3_title": "系统提示词",
+    "guide_step3_desc": "定义智能体的行为风格",
     "trigger_type_label": "触发方式",
     "trigger_type_manual": "手动触发",
     "trigger_type_auto_failure": "失败时自动",
     "trigger_type_auto_save": "保存时自动",
     "trigger_type_auto_both": "自动（两者）",
     "auto_confirm_label": "自动确认安全命令",
+    "search_placeholder": "搜索智能体名称或描述",
+    "no_search_result": "没有匹配的智能体",
+    "permission_mode": "权限模式",
+    "permission_confirm": "确认 — 高风险操作前询问",
+    "permission_auto": "自动 — 无需确认直接执行",
+    "fallback_model": "兜底模型",
+    "none": "无",
     "delete_confirm_title": "确认删除",
     "delete_confirm_message": "确定要删除这个智能体吗？所有相关对话也将被删除。",
     "cancel": "取消",
@@ -47,9 +67,12 @@
     "tool_arguments": "参数",
     "tool_output": "输出",
     "basic_info": "基本信息",
+    "basic_info_desc": "命名智能体并选择驱动它的模型",
     "model_config": "模型配置",
     "advanced_config": "高级配置",
     "save_success": "保存成功",
+    "save_error": "保存失败，请重试",
+    "delete_success": "删除成功",
     "name_required": "请输入智能体名称",
     "model_required": "请选择模型",
     "plugin_tools_label": "插件工具",
@@ -58,11 +81,12 @@
     "workspace_dir_helper": "AI 输出文件的保存目录，留空则默认为 系统文稿/BiosphereTerminal/agents/{id}",
     "select_workspace_dir": "选择工作区目录",
     "allowed_tools_label": "已授权工具",
-    "allowed_tools_desc": "这些工具已获得始终允许，无需每次确认。点击 × 可撤销授权。",
+    "allowed_tools_desc": "点击工具可设为始终允许（无需每次确认），再次点击取消。",
     "ungrouped": "未分组",
     "attachment": "附件",
     "result_showing_first": "显示前 {{count}} 条，共 {{total}} 条",
-    "select_file": "选择文件"
+    "select_file": "选择文件",
+    "delete_confirm_message_with_info": "确定要删除智能体「{{name}}」吗？这将同时删除 {{count}} 个对话及其全部消息。"
   },
   "chat": {
     "label": "对话",
@@ -74,7 +98,11 @@
     "executing": "执行中...",
     "no_conversations": "暂无对话",
     "start_conversation": "开始一段新对话",
-    "ai_response_placeholder": "AI 引擎连接后将提供回复。"
+    "ai_response_placeholder": "AI 引擎连接后将提供回复。",
+    "cancel": "取消",
+    "delete": "删除",
+    "delete_confirm_title": "删除对话",
+    "delete_confirm_message": "确定要删除此对话吗？所有消息将永久丢失。"
   },
   "config": {
     "label": "配置",
@@ -93,8 +121,10 @@
     "name": "名称",
     "name_placeholder": "如：OpenAI、Anthropic、DeepSeek",
     "api_key": "API 密钥",
+    "toggle_password_visibility": "显示/隐藏密钥",
     "base_url": "API 地址",
-    "logo_emoji": "图标 (Emoji)"
+    "logo_emoji": "图标 (Emoji)",
+    "delete_affected_agents": "这将影响 {{count}} 个智能体：{{names}}"
   },
   "endpoint": {
     "add": "新建接入点",
@@ -109,7 +139,8 @@
     "no_endpoints": "暂无接入点，点击「新建接入点」创建",
     "test_connection": "测试连接",
     "connection_success": "连接成功",
-    "connection_failed": "连接失败"
+    "connection_failed": "连接失败",
+    "delete_affected_models": "这还将删除此端点下的 {{count}} 个模型。"
   },
   "api": {
     "type_label": "API 类型",
@@ -167,7 +198,8 @@
     "tool_result": "工具结果"
   },
   "assistant": {
-    "start_chat": "开始对话"
+    "start_chat": "开始对话",
+    "enable_tool": "前往启用工具"
   },
   "note_assistant": {
     "label": "笔记助手",
@@ -251,7 +283,8 @@
     "log_summary_fail_error": "    错误: {{error}}",
     "log_summary_avg_duration": "- 成功平均耗时: {{avgDuration}}ms",
     "log_summary_success_item": "  * [{{toolName}}] 输出: {{output}}",
-    "log_summary_footer": "请根据以上使用日志数据，重点修复失败问题并优化性能。"
+    "log_summary_footer": "请根据以上使用日志数据，重点修复失败问题并优化性能。",
+    "attach_file": "附加文件"
   },
   "copilot": {
     "label": "终端助手",
@@ -268,6 +301,10 @@
     "step3": "3. 向 AI 提问，如「如何查看端口占用」「解释这个命令」",
     "no_agent_bound": "未绑定终端助手",
     "no_agent_bound_desc": "请先前往 AI 助手 → 终端助手 Tab 绑定一个智能体。该智能体需要启用终端工具。",
+    "agent_missing": "绑定的终端助手已不存在",
+    "agent_missing_desc": "之前绑定的智能体可能已被删除或改名。请前往 AI 助手 → 终端助手 Tab 重新选择一个智能体。",
+    "sessions_title": "对话历史",
+    "no_sessions": "暂无对话，点击右上角 + 新建",
     "empty_hint": "向 AI 助手提问，如「如何查看端口占用」「解释这个命令」",
     "input_placeholder": "向 AI 助手提问...",
     "thinking": "思考中...",

@@ -118,5 +118,3 @@ pub use crate::plugins::domain::ui_schema::TableColumn;
 pub use crate::plugins::domain::usage_log::UsageLogEntry;
 #[allow(unused_imports)]
 pub use crate::plugins::domain::usage_log::ExecutionMetrics;
-#[allow(unused_imports)]
-pub use crate::plugins::domain::usage_log::RefineSuggestion;

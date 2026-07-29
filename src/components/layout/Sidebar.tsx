@@ -6,6 +6,8 @@ import ListItemText from '@mui/material/ListItemText';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import Chip from '@mui/material/Chip';
+import Badge from '@mui/material/Badge';
+import { useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   TerminalIcon,
@@ -13,12 +15,12 @@ import {
   NotebookIcon,
   RobotIcon,
   PlugsConnectedIcon,
-  PuzzlePieceIcon,
   GearSixIcon,
 } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 import { useLicenseStore } from '../../features/licensing/licenseStore';
 import { useUpgradeDialogStore } from '../../features/licensing/upgradeDialogStore';
+import { useConnectionCountStore } from '../../features/connection/connectionCountStore';
 import type { ProFeature } from '../../proto/licensing';
 
 interface SidebarProps {
@@ -40,7 +42,6 @@ const menuConfig: MenuItem[] = [
   { path: '/notebook', labelKey: 'menu.notebook', icon: NotebookIcon, color: '#81C784' },
   { path: '/agent', labelKey: 'menu.agent', icon: RobotIcon, color: '#CE93D8', proFeature: 'ai_copilot' },
   { path: '/connections', labelKey: 'menu.connections', icon: PlugsConnectedIcon, color: '#4DD0E1' },
-  { path: '/plugins', labelKey: 'menu.plugins', icon: PuzzlePieceIcon, color: '#AED581' },
   { path: '/settings', labelKey: 'menu.settings', icon: GearSixIcon, color: '#90A4AE' },
 ];
 
@@ -50,6 +51,13 @@ export function Sidebar({ open }: SidebarProps) {
   const { t } = useTranslation();
   const canUseFn = useLicenseStore((s) => s.canUse);
   const openUpgrade = useUpgradeDialogStore((s) => s.openDialog);
+  const connectionCount = useConnectionCountStore((s) => s.count);
+
+  // 挂载时兜底刷新一次：模块级 refresh 可能在启动早期（DB 未就绪）失败，
+  // 且 count 只在 ConnectionList.load 时更新；这里保证应用启动后徽标即正确。
+  useEffect(() => {
+    void useConnectionCountStore.getState().refresh();
+  }, []);
 
   return (
     <Drawer
@@ -103,12 +111,19 @@ export function Sidebar({ open }: SidebarProps) {
               }}
             >
               <ListItemIcon sx={{ minWidth: 0 }}>
-                <item.icon
-                  size={22}
-                  weight={isActive ? 'fill' : 'regular'}
-                  color={isActive ? item.color : undefined}
-                  style={{ transition: 'all 0.2s' }}
-                />
+                <Badge
+                  badgeContent={item.path === '/connections' ? connectionCount : 0}
+                  color="primary"
+                  max={99}
+                  showZero={false}
+                >
+                  <item.icon
+                    size={22}
+                    weight={isActive ? 'fill' : 'regular'}
+                    color={isActive ? item.color : undefined}
+                    style={{ transition: 'all 0.2s' }}
+                  />
+                </Badge>
               </ListItemIcon>
               <ListItemText
                 primary={t(item.labelKey)}

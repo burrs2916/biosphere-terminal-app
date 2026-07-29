@@ -1,11 +1,10 @@
 import { useState, useCallback } from 'react';
 import { Box, Tabs, Tab, Divider } from '@mui/material';
-import { ChatCircleDotsIcon, GearSixIcon, RobotIcon, NotebookIcon, PackageIcon, TerminalIcon } from '@phosphor-icons/react';
+import { ChatCircleDotsIcon, GearSixIcon, RobotIcon, NotebookIcon, TerminalIcon } from '@phosphor-icons/react';
 import { AgentChat } from './AgentChat';
 import { ModelConfigPage } from './ModelConfigPage';
 import { AgentManager } from './AgentManager';
 import { NoteAssistantTab } from './NoteAssistantTab';
-import { PluginAssistantTab } from './PluginAssistantTab';
 import { TerminalCopilotTab } from './TerminalCopilotTab';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
@@ -17,11 +16,17 @@ export function AgentPanel() {
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
   const setActiveAgent = useAgentStore((s) => s.setActiveAgent);
+  const requestAgentEditor = useAgentStore((s) => s.requestAgentEditor);
 
   const handleStartChat = useCallback((agentId: string) => {
     setActiveAgent(agentId);
     setTab(0);
   }, [setActiveAgent]);
+
+  const handleManageAgent = useCallback((agentId: string, toolId?: string) => {
+    requestAgentEditor(agentId, toolId ?? null);
+    setTab(1);
+  }, [requestAgentEditor]);
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -51,11 +56,6 @@ export function AgentPanel() {
           label={t('note_assistant.label')}
         />
         <Tab
-          icon={<PackageIcon size={16} color={isDark ? '#4FC3F7' : '#0288D1'} />}
-          iconPosition="start"
-          label={t('plugin_assistant.label')}
-        />
-        <Tab
           icon={<TerminalIcon size={16} color={isDark ? '#81C784' : '#2E7D32'} />}
           iconPosition="start"
           label={t('copilot.label')}
@@ -70,10 +70,9 @@ export function AgentPanel() {
       <Box sx={{ flex: 1, overflow: 'auto', minWidth: 0, minHeight: 0 }}>
         {tab === 0 && <AgentChat />}
         {tab === 1 && <AgentManager />}
-        {tab === 2 && <NoteAssistantTab onStartChat={handleStartChat} />}
-        {tab === 3 && <PluginAssistantTab onStartChat={handleStartChat} />}
-        {tab === 4 && <TerminalCopilotTab onStartChat={handleStartChat} />}
-        {tab === 5 && <ModelConfigPage />}
+        {tab === 2 && <NoteAssistantTab onStartChat={handleStartChat} onManageAgent={handleManageAgent} />}
+        {tab === 3 && <TerminalCopilotTab onStartChat={handleStartChat} onManageAgent={handleManageAgent} />}
+        {tab === 4 && <ModelConfigPage />}
       </Box>
     </Box>
   );

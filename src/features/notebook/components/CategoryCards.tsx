@@ -96,7 +96,12 @@ export function CategoryCards() {
     return notes.filter((n) => n.category === catName && n.groupId === activeGroupId).length;
   };
 
-  const uncategorizedCount = notes.filter((n) => n.groupId === activeGroupId && !n.category).length;
+  // 「未分类」仅统计 category 为空串的笔记；字面量 'uncategorized' 是一个独立存在的真实分类
+  // （每个分组默认种子都会创建一行），由上方同名卡片单独计数。若这里再把 'uncategorized' 计入，
+  // 显式归属到该分类的笔记会同时出现在两张卡片里造成重复计数（R21 修复）。
+  const uncategorizedCount = notes.filter(
+    (n) => n.groupId === activeGroupId && !n.category,
+  ).length;
 
   if (!activeGroupId) {
     return (

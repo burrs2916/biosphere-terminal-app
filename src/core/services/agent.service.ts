@@ -113,40 +113,6 @@ export async function respondPermission(conversationId: string, approved: boolea
   return invoke('respond_permission', { conversationId, approved, alwaysAllow });
 }
 
-export interface GeneratedScenario {
-  name: string;
-  description: string;
-  examplePrompt: string;
-  category: string;
-  toolName?: string;
-}
-
-export interface PluginScenariosResult {
-  pluginId: string;
-  pluginName: string;
-  scenarios: GeneratedScenario[];
-}
-
-export async function generatePluginScenarios(pluginId: string, agentId: string, category?: string, replace?: boolean): Promise<PluginScenariosResult> {
-  return invoke('generate_plugin_scenarios', { pluginId, agentId, category: category ?? null, replace: replace ?? null });
-}
-
-export interface PluginScenario {
-  name: string;
-  description: string;
-  examplePrompt: string;
-  category?: string;
-  toolName?: string;
-}
-
-export async function savePluginScenarios(pluginId: string, scenarios: PluginScenario[]): Promise<void> {
-  return invoke('save_plugin_scenarios', { pluginId, scenarios });
-}
-
-export async function deletePluginScenario(pluginId: string, scenarioName: string): Promise<void> {
-  return invoke('delete_plugin_scenario', { pluginId, scenarioName });
-}
-
 export async function updateAgentAllowedTools(agentId: string, alwaysAllowedTools: string[]): Promise<void> {
   return invoke('update_agent_allowed_tools', { agentId, alwaysAllowedTools });
 }

@@ -4,8 +4,44 @@ use std::sync::Arc;
 
 use crate::app::notebook_service::NotebookService;
 use crate::infra::storage::database::Database;
-use crate::infra::storage::note_repo::NoteRepo;
+use crate::infra::storage::note_repo::{NoteRepo, NoteGroupRepo, NoteRow};
 use super::engine::{AgentTool, ToolOutput};
+
+/// 读取笔记正文：优先从 .md 文件读取；文件缺失或读取失败时回退到 DB 的 `content` 冗余列
+/// （与 `NotebookService::get_note` 的兜底策略一致，P0-3）。
+/// 切勿在文件缺失时回退成空串——否则 retag/move/update 会把笔记正文静默清空（数据丢失）。
+fn read_note_content_or_fallback(existing: &NoteRow) -> String {
+    let file_path = std::path::PathBuf::from(&existing.file_path);
+    if file_path.exists() {
+        crate::infra::filesystem::note_fs::NoteFileSystem::new(
+            file_path.parent().unwrap_or(std::path::Path::new("."))
+        )
+        .read_note(&file_path)
+        .map(|(_, body)| body)
+        .unwrap_or_else(|_| existing.content.clone())
+    } else {
+        existing.content.clone()
+    }
+}
+
+/// 防御性清理：若 AI 返回的 `content` 误带了 YAML front matter（形如 `---\n...\n---`），
+/// 剥掉它、只保留其后正文，避免把 front matter 当笔记正文嵌套写入、污染笔记内容
+/// （AI 辅助整理路径下的真实数据损坏风险：工具描述虽要求只返回 body，模型偶尔会连 front matter 一起返回）。
+/// 仅当块看起来像 YAML 映射（含 `key:`）时才剥离，降低误删正文里 markdown 分隔线的概率。
+fn strip_leading_front_matter(content: &str) -> String {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---\n") {
+        return content.to_string();
+    }
+    if let Some(close) = trimmed.find("\n---") {
+        let fm_block = &trimmed[4..close]; // 跳过开头的 "---\n"
+        if fm_block.contains(':') {
+            let after = &trimmed[close + 4..];
+            return after.trim_start_matches('\n').to_string();
+        }
+    }
+    content.to_string()
+}
 
 pub struct NotebookTool {
     db: Arc<Database>,
@@ -162,16 +198,7 @@ impl NotebookTool {
 
         match note {
             Some(n) => {
-                let file_path = std::path::PathBuf::from(&n.file_path);
-                let content = if file_path.exists() {
-                    crate::infra::filesystem::note_fs::NoteFileSystem::new(
-                        file_path.parent().unwrap_or(std::path::Path::new("."))
-                    ).read_note(&file_path)
-                        .map(|(_, body)| body)
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
+                let content = read_note_content_or_fallback(&n);
 
                 let linked_commands = self.get_notebook()
                     .ok()
@@ -244,13 +271,27 @@ impl NotebookTool {
         let title = params["title"].as_str()
             .ok_or_else(|| "Missing 'title' parameter for create".to_string())?;
         let content = params["content"].as_str().unwrap_or("");
-        let group_id = params["group_id"].as_str().unwrap_or("snippet");
-        let category = params["category"].as_str().unwrap_or("note");
+        // 归一化分组：空值或缺省用兜底组 "uncategorized"（必定存在）；
+        // 显式指定了一个不存在的分组时，也回退到兜底组，避免 notes.group_id 外键失败导致创建失败。
+        let group_id = match params["group_id"].as_str() {
+            Some(g) if !g.is_empty() => {
+                if NoteGroupRepo::get_by_id(&self.db, g)
+                    .map(|opt| opt.is_some())
+                    .unwrap_or(false)
+                {
+                    g.to_string()
+                } else {
+                    "uncategorized".to_string()
+                }
+            }
+            _ => "uncategorized".to_string(),
+        };
+        let category = params["category"].as_str().unwrap_or("");
         let tags: Vec<String> = params["tags"].as_array()
             .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
 
-        let note = notebook.create_note(title, content, group_id, category, tags)?;
+        let note = notebook.create_note(title, content, &group_id, category, tags)?;
 
         Ok(ToolOutput {
             success: true,
@@ -275,22 +316,14 @@ impl NotebookTool {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "Note not found".to_string())?;
 
-        let existing_content = {
-            let file_path = std::path::PathBuf::from(&existing.file_path);
-            if file_path.exists() {
-                crate::infra::filesystem::note_fs::NoteFileSystem::new(
-                    file_path.parent().unwrap_or(std::path::Path::new("."))
-                ).read_note(&file_path)
-                    .map(|(_, body)| body)
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
-        };
+        // 文件缺失时回退到 DB 冗余列，避免把正文静默清空（P0-3/数据丢失）
+        let existing_content = read_note_content_or_fallback(&existing);
 
         let title = params["title"].as_str().unwrap_or(&existing.title);
         let content_raw = params["content"].as_str().unwrap_or("");
-        let content = if content_raw.is_empty() { existing_content.as_str() } else { content_raw };
+        // 防御：剥离模型可能误带的 front matter，避免污染笔记正文（见 strip_leading_front_matter）
+        let cleaned = strip_leading_front_matter(content_raw);
+        let content = if cleaned.is_empty() { existing_content.as_str() } else { cleaned.as_str() };
         let group_id = params["group_id"].as_str().unwrap_or(&existing.group_id);
         let category = params["category"].as_str().unwrap_or(&existing.category);
         let tags: Vec<String> = if params["tags"].is_array() {
@@ -345,16 +378,11 @@ impl NotebookTool {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "Note not found".to_string())?;
 
-        let file_path = std::path::PathBuf::from(&existing.file_path);
-        let content = if file_path.exists() {
-            crate::infra::filesystem::note_fs::NoteFileSystem::new(
-                file_path.parent().unwrap_or(std::path::Path::new("."))
-            ).read_note(&file_path)
-                .map(|(_, body)| body)
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        // 文件缺失时回退到 DB 冗余列，避免把正文静默清空（P0-3/数据丢失）。
+        // 注意：此处正文来自 read_note，front matter 已被解析阶段剥离，绝不会包含 front matter；
+        // 因此【不能】再跑 strip_leading_front_matter——否则当正文本身以 "---...---" 块开头
+        // （如分割线 + 含 `:` 的引用块）时，会把这些合法正文误判为 front matter 并静默删除（数据丢失）。
+        let content = read_note_content_or_fallback(&existing);
 
         let title = params["title"].as_str().unwrap_or(&existing.title);
         let category = params["category"].as_str().unwrap_or(&existing.category);
@@ -391,16 +419,10 @@ impl NotebookTool {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "Note not found".to_string())?;
 
-        let file_path = std::path::PathBuf::from(&existing.file_path);
-        let content = if file_path.exists() {
-            crate::infra::filesystem::note_fs::NoteFileSystem::new(
-                file_path.parent().unwrap_or(std::path::Path::new("."))
-            ).read_note(&file_path)
-                .map(|(_, body)| body)
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        // 文件缺失时回退到 DB 冗余列，避免把正文静默清空（P0-3/数据丢失）。
+        // 同 action_retag：read_note 已剥离 front matter，无需再跑 strip_leading_front_matter
+        // （否则正文以 "---...---" 块开头时会被误删）。
+        let content = read_note_content_or_fallback(&existing);
 
         let category = params["category"].as_str().unwrap_or(&existing.category);
 
@@ -424,9 +446,15 @@ impl NotebookTool {
             .ok_or_else(|| "Missing 'note_id' parameter for link_command".to_string())?;
         let command_id = params["command_id"].as_str()
             .ok_or_else(|| "Missing 'command_id' parameter for link_command".to_string())?;
-        let command_text = params["command_text"].as_str().unwrap_or(command_id);
+        // context 优先用显式 command_text；缺失时从命令历史反查真实命令文本，
+        // 仅在两者都无时才兜底为 command_id（避免 context 退化成 UUID，P2-6）。
+        let command_text = params["command_text"].as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| crate::infra::storage::command_repo::CommandRepo::get_command_text(&self.db, command_id).ok().flatten())
+            .unwrap_or_else(|| command_id.to_string());
 
-        notebook.link_command(note_id, command_id, command_text)?;
+        notebook.link_command(note_id, command_id, &command_text)?;
 
         Ok(ToolOutput {
             success: true,

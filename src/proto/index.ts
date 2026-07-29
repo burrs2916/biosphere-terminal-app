@@ -3,7 +3,6 @@ export * from './command';
 export * from './session';
 export * from './profile';
 export * from './connection';
-export * from './plugin';
 export * from './notebook';
 export * from './agent';
 export * from './environment';

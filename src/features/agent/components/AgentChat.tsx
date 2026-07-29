@@ -10,7 +10,6 @@ import {
   ChatCircleDotsIcon, Sparkle, ShieldWarning,
 } from '@phosphor-icons/react';
 import { useAgentStore } from '../store/agentStore';
-import { usePluginStore } from '../store/pluginStore';
 import type { MessageDto } from '../../../proto/agent';
 import { useTranslation } from 'react-i18next';
 import { useNotify } from '../../../core/notification';
@@ -49,7 +48,6 @@ export function AgentChat() {
     updateConversationTitle, loadConversations, loadAgents, loadModels, deleteMessagesAfter,
   } = useAgentStore();
   const notify = useNotify().notify;
-  const { loadPluginTools } = usePluginStore();
   const { t } = useTranslation('agent');
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
@@ -134,7 +132,6 @@ export function AgentChat() {
         setStreamingContent('');
         setLoading(false);
         streamingMsgIdRef.current = null;
-        loadPluginTools();
       }
     });
 
@@ -180,9 +177,6 @@ export function AgentChat() {
             }
             return prev;
           });
-          if (tc.tool_name === 'plugin_manager' && tc.success) {
-            loadPluginTools();
-          }
         }
       }
     });
@@ -200,7 +194,7 @@ export function AgentChat() {
       unlistenToolCall.then((fn) => fn());
       unlistenPermission.then((fn) => fn());
     };
-  }, [activeConversationId, updateMessage, loadPluginTools]);
+  }, [activeConversationId, updateMessage]);
 
   const handlePermissionResponse = useCallback(async (approved: boolean, alwaysAllow: boolean) => {
     if (permissionRequest) {
@@ -216,7 +210,7 @@ export function AgentChat() {
 
     let messageContent = input.trim();
     if (attachments.length > 0) {
-      const attachmentText = attachments.map((f) => `[${t('attachment')}: ${f.path}]`).join('\n');
+      const attachmentText = attachments.map((f) => `[${t('agent.attachment')}: ${f.path}]`).join('\n');
       messageContent = `${attachmentText}\n\n${messageContent}`;
     }
 

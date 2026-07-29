@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import Dialog from '@mui/material/Dialog';
@@ -27,7 +28,8 @@ import { copyText, pasteText } from '../core/services/clipboard.service';
 import { parseCommand } from '../core/services/command.service';
 import { generateId } from '../core/utils';
 import type { PtyConfig } from '../proto';
-import { openNotesReferenceWindow, openAiCopilotWindow, openPluginWorkshopWindow, openRemoteDesktopWindow } from '../core/services/window.service';
+import { openNotesReferenceWindow, openAiCopilotWindow, openRemoteDesktopWindow } from '../core/services/window.service';
+import { useConnectIntent } from '../features/terminal/connectIntent';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '../engine';
 import { useNotify } from '../core/notification';
@@ -44,6 +46,8 @@ interface Tab {
   ssh?: { host: string; port: number; username: string; authMethod: string; privateKeyPath?: string; password?: string };
   disconnected?: boolean;
   profileId?: string;
+  /** 来自既有 SSH 连接的 id，用于在连接管理页标记"使用中" */
+  connectionId?: string;
 }
 
 export function TerminalPage() {
@@ -61,6 +65,7 @@ export function TerminalPage() {
   const [contextMenu, setContextMenu] = useState<{ mouseX: number; mouseY: number; hasSelection: boolean } | null>(null);
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const tabsRef = useRef<Tab[]>([]);
+  const navigate = useNavigate();
   const terminalRefs = useRef<Map<string, TerminalEmulatorHandle>>(new Map());
   tabsRef.current = tabs;
 
@@ -148,6 +153,10 @@ export function TerminalPage() {
 
     spawnTerminal(id, config).catch((e) => { console.error(e); notify(String(e)); });
 
+    if (result.connectionId && result.connectionType === 'ssh') {
+      useConnectIntent.getState().addActiveConnection(result.connectionId);
+    }
+
     setTabs((prev) => [
       ...prev.map((t) => ({ ...t, isActive: false })),
       {
@@ -155,6 +164,7 @@ export function TerminalPage() {
         title,
         isActive: true,
         connectionType: result.connectionType,
+        connectionId: result.connectionId,
         ssh: result.ssh ? {
           host: result.ssh.host,
           port: result.ssh.port,
@@ -168,12 +178,32 @@ export function TerminalPage() {
     setPickerOpen(false);
   }, [tabs.length, shell, activeCwd, estimateTerminalSize]);
 
+  // 消费来自"连接管理"页的连接意图：真正拉起一个 SSH/本地终端会话（复用 handleConnect）
+  const handleConnectRef = useRef(handleConnect);
+  handleConnectRef.current = handleConnect;
+  useEffect(() => {
+    const consumeAndConnect = () => {
+      const pending = useConnectIntent.getState().consume();
+      if (pending) handleConnectRef.current(pending);
+    };
+    consumeAndConnect();
+    const unsub = useConnectIntent.subscribe((state) => {
+      if (state.pending) consumeAndConnect();
+    });
+    return unsub;
+  }, []);
+
   const doCloseTab = useCallback(
     (id: string) => {
       killTerminal(id).catch((e) => { console.error(e); notify(String(e)); });
       terminalRefs.current.delete(id);
       setTabs((prev) => {
+        const closing = prev.find((t) => t.id === id);
         const filtered = prev.filter((t) => t.id !== id);
+        // 若该 tab 关联某个连接，且关闭后没有其他同连接 tab，则从活跃集移除
+        if (closing?.connectionId && !filtered.some((t) => t.connectionId === closing.connectionId)) {
+          useConnectIntent.getState().removeActiveConnection(closing.connectionId);
+        }
         if (prev.find((t) => t.id === id)?.isActive && filtered.length > 0) {
           filtered[filtered.length - 1].isActive = true;
         }
@@ -275,12 +305,6 @@ export function TerminalPage() {
   const handleOpenAiCopilot = useCallback(() => {
     guardProFeature('ai_copilot', () => {
       openAiCopilotWindow().catch((e) => { console.error(e); notify(String(e)); });
-    });
-  }, [guardProFeature, notify]);
-
-  const handleOpenWorkshop = useCallback(() => {
-    guardProFeature('plugin_workshop', () => {
-      openPluginWorkshopWindow().catch((e) => { console.error(e); notify(String(e)); });
     });
   }, [guardProFeature, notify]);
 
@@ -633,7 +657,6 @@ export function TerminalPage() {
         onCloseTab={() => activeTab && handleCloseTab(activeTab.id)}
         onOpenNotes={handleOpenNotes}
         onOpenAiCopilot={handleOpenAiCopilot}
-        onOpenWorkshop={handleOpenWorkshop}
         onOpenRemoteDesktop={handleOpenRemoteDesktop}
         onClearBuffer={handleClearBuffer}
         onCopy={handleCopy}
@@ -641,6 +664,7 @@ export function TerminalPage() {
         onFind={handleFind}
         findOpen={findOpen}
         isSshSession={!!activeTab?.ssh}
+        onOpenConnections={() => navigate('/connections')}
       />
       <TabBar tabs={tabs} onSelect={handleSelectTab} onClose={handleCloseTab} />
 

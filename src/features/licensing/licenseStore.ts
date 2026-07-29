@@ -8,7 +8,6 @@ import { checkProStatus, purchaseProLifetime, restoreProLicense, resetLicense } 
 /// 商业模式：试用期 14 天内全部开放，试用结束后需 $9.99 一次性买断解锁。
 export const PRO_FEATURES: ProFeature[] = [
   'remote_desktop',
-  'plugin_workshop',
   'ai_copilot',
   'note_ai_optimize',
   'note_reference',
@@ -17,7 +16,6 @@ export const PRO_FEATURES: ProFeature[] = [
 /// Human-readable labels for each Pro feature, used in the upgrade dialog.
 export const PRO_FEATURE_LABELS: Record<ProFeature, string> = {
   remote_desktop: 'Remote desktop (VNC)',
-  plugin_workshop: 'Plugin workshop',
   ai_copilot: 'AI Copilot & Agent chat',
   note_ai_optimize: 'AI-powered note optimization',
   note_reference: 'AI note references & command linking',

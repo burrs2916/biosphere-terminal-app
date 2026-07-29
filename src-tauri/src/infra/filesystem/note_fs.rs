@@ -63,7 +63,16 @@ impl NoteFileSystem {
         }
 
         let content = Self::build_markdown(front_matter, body);
-        fs::write(file_path, &content)?;
+        // 原子写：先写同目录临时文件再 rename，避免写过程中崩溃/被中断导致 .md 文件
+        // 半截或 0 字节（损坏后只能靠 DB content 冗余列兜底，文件本身要等下次保存才修复）。
+        // 临时文件与正式文件同目录，rename 在同卷内是原子的。
+        let tmp_path = file_path.with_extension("md.tmp");
+        fs::write(&tmp_path, &content)?;
+        if let Err(e) = fs::rename(&tmp_path, file_path) {
+            // rename 失败（极少见）：清理临时文件，避免残留；并把原错误向上抛
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -92,45 +101,11 @@ impl NoteFileSystem {
         Ok(files)
     }
 
-    pub fn search_notes(&self, query: &str) -> io::Result<Vec<(PathBuf, NoteFrontMatter)>> {
-        let mut results = Vec::new();
-        self.search_dir(&self.root_dir, query, &mut results)?;
-        results.sort_by(|a, b| b.1.updated_at.cmp(&a.1.updated_at));
-        Ok(results)
-    }
-
-    fn search_dir(
-        &self,
-        dir: &Path,
-        query: &str,
-        results: &mut Vec<(PathBuf, NoteFrontMatter)>,
-    ) -> io::Result<()> {
-        if !dir.exists() {
-            return Ok(());
-        }
-
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.is_dir() {
-                self.search_dir(&path, query, results)?;
-            } else if path.extension().map_or(false, |ext| ext == "md") {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    let query_lower = query.to_lowercase();
-                    if content.to_lowercase().contains(&query_lower) {
-                        if let Ok((fm, _)) = Self::parse_front_matter(&content) {
-                            results.push((path, fm));
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn parse_front_matter(content: &str) -> io::Result<(NoteFrontMatter, String)> {
-        let content = content.trim();
+        // 仅去掉「开头」空白，保留正文末尾的空白（用户有意保留的尾部空行/缩进）。
+        // 此前用 content.trim() 会在每次读回时静默抹平正文尾部空白，与 build_markdown
+        // 的「保留正文原貌」目标相悖，属于 R14 正文保真修复的残留泄漏点。
+        let content = content.trim_start();
 
         if !content.starts_with("---") {
             return Err(io::Error::new(
@@ -145,7 +120,7 @@ impl NoteFileSystem {
             let yaml = rest[..newline_pos].trim();
             let body_start = newline_pos + 4;
             let body = if body_start < rest.len() {
-                rest[body_start..].trim().to_string()
+                Self::strip_one_leading_newline(&rest[body_start..]).to_string()
             } else {
                 String::new()
             };
@@ -154,7 +129,7 @@ impl NoteFileSystem {
             let yaml = rest[..pos].trim();
             let body_start = pos + 3;
             let body = if body_start < rest.len() {
-                rest[body_start..].trim().to_string()
+                Self::strip_one_leading_newline(&rest[body_start..]).to_string()
             } else {
                 String::new()
             };
@@ -179,8 +154,24 @@ impl NoteFileSystem {
         Ok((front_matter, body))
     }
 
+    /// 去掉 build_markdown 写入时加在 front matter 与正文之间的单个分隔空行，
+    /// 其余前导/尾部空白原样保留。与 build_markdown 对应，保证 round-trip 幂等且不丢内容。
+    fn strip_one_leading_newline(s: &str) -> &str {
+        if s.starts_with('\n') {
+            &s[1..]
+        } else {
+            s
+        }
+    }
+
     fn build_markdown(front_matter: &NoteFrontMatter, body: &str) -> String {
         let yaml = serde_yaml::to_string(front_matter).unwrap_or_default();
-        format!("---\n{}\n---\n\n{}", yaml.trim(), body.trim())
+        // 保留正文原貌：不对 body 做 .trim()。
+        // 关键：front matter 与正文之间只用「单个换行」分隔（不是空行 `\n\n`）。
+        // 因为 parse_front_matter 的 strip_one_leading_newline 只剥「一个」前导换行——
+        // 若这里用空行分隔，每轮保存 parse 只剥一个、剩下一个，正文前导空行会逐次累积
+        // （R14 正文保真修复引入的回归：每次保存笔记正文悄悄多一个空行，文件逐渐膨胀、
+        // 编辑器重开后顶部出现多余空行）。单换行分隔下 round-trip 幂等，不丢也不增内容。
+        format!("---\n{}\n---\n{}", yaml.trim(), body)
     }
 }

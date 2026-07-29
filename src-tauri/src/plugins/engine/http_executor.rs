@@ -5,7 +5,7 @@ use std::time::Instant;
 use super::parser::HttpScript;
 use super::template::render_template;
 use super::safety::is_private_ip;
-use super::executor::{ExecutionResult, ExecutionContext};
+use super::executor::{ExecutionResult, ExecutionContext, http_client};
 
 pub async fn execute_http(
     http_script: &HttpScript,
@@ -35,10 +35,7 @@ pub async fn execute_http(
         }
     }
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-    {
+    let client = match http_client() {
         Ok(c) => c,
         Err(e) => {
             return ExecutionResult {

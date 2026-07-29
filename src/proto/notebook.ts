@@ -17,6 +17,18 @@ export interface NoteDetailDto {
   content: string;
 }
 
+export interface NoteLinkItem {
+  id: string;
+  title: string;
+  groupId: string;
+  snippet: string;
+}
+
+export interface NoteLinks {
+  backlinks: NoteLinkItem[];
+  outgoing: NoteLinkItem[];
+}
+
 export interface CreateNoteInput {
   title: string;
   content: string;
@@ -46,6 +58,8 @@ export interface CommandNoteLinkDto {
   noteId: string;
   context: string;
   createdAt: number;
+  /** 原命令是否仍存在（命令历史被删后为 false，笔记侧据此显示"已删除"过期提示，R6-4） */
+  commandExists: boolean;
 }
 
 export interface NoteGroupDto {
@@ -91,6 +105,27 @@ export interface CreateCategoryInput {
 }
 
 export interface UpdateCategoryInput {
+  id: string;
+  name: string;
+  sortOrder: number;
+}
+
+export interface NoteTagDto {
+  id: string;
+  name: string;
+  groupId: string;
+  sortOrder: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CreateTagInput {
+  name: string;
+  groupId: string;
+  sortOrder: number;
+}
+
+export interface UpdateTagInput {
   id: string;
   name: string;
   sortOrder: number;

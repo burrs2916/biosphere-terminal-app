@@ -17,8 +17,6 @@ interface LockedScreenProps {
 const FEATURE_DESCRIPTIONS: Record<ProFeature, string> = {
   remote_desktop:
     'One-click VNC remote desktop access. Connect to your Linux/Windows servers without third-party tools.',
-  plugin_workshop:
-    'Build, test, and publish your own plugins. Extend Biosphere Terminal with custom UI and AI capabilities.',
   ai_copilot:
     'Multi-agent AI conversations with streaming tool calls. Bring your own model API key.',
   note_ai_optimize:

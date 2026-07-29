@@ -5,6 +5,18 @@ use crate::infra::storage::database::Database;
 pub struct CommandRepo;
 
 impl CommandRepo {
+    /// 按 id 取命令文本（用于关联笔记时反查可读的 context，避免退化成 UUID）。
+    pub fn get_command_text(db: &Database, id: &str) -> Result<Option<String>> {
+        let conn = db.conn();
+        let mut stmt = conn.prepare("SELECT command FROM command_history WHERE id = ?1")?;
+        let mut rows = stmt.query_map(rusqlite::params![id], |row| row.get::<_, String>(0))?;
+        match rows.next() {
+            Some(Ok(cmd)) => Ok(Some(cmd)),
+            Some(Err(e)) => Err(e.into()),
+            None => Ok(None),
+        }
+    }
+
     pub fn list(db: &Database, limit: usize) -> Result<Vec<CommandHistoryEntry>> {
         let entries: Vec<CommandHistoryEntry> = {
             let conn = db.conn();
@@ -180,15 +192,16 @@ impl CommandRepo {
     }
 
     pub fn delete_history(db: &Database, id: &str) -> Result<()> {
+        // 注意：不再级联删除 command_note_links。保留孤儿链接，让关联笔记侧能显示
+        // "关联命令已删除"的过期提示（R6-4），而不是直接静默丢链。
         let conn = db.conn();
-        conn.execute("DELETE FROM command_note_links WHERE command_id = ?1", rusqlite::params![id])?;
         conn.execute("DELETE FROM command_history WHERE id = ?1", rusqlite::params![id])?;
         Ok(())
     }
 
     pub fn clear_history(db: &Database) -> Result<()> {
+        // 同上：清空历史时不级联删链接，保留笔记侧的过期引用提示（R6-4）。
         let conn = db.conn();
-        conn.execute("DELETE FROM command_note_links", [])?;
         conn.execute("DELETE FROM command_history", [])?;
         Ok(())
     }
@@ -198,15 +211,13 @@ impl CommandRepo {
             return Ok(());
         }
         let conn = db.conn();
+        // 仅删历史条目本身；关联的 command_note_links 保留为孤儿，由笔记侧提示过期（R6-4）。
         let placeholders: Vec<String> = ids.iter().enumerate()
             .map(|(i, _)| format!("?{}", i + 1))
             .collect();
-        let sql = format!("DELETE FROM command_note_links WHERE command_id IN ({})", placeholders.join(", "));
         let params: Vec<&dyn rusqlite::types::ToSql> = ids.iter()
             .map(|c| c as &dyn rusqlite::types::ToSql)
             .collect();
-        conn.execute(&sql, params.as_slice())?;
-
         let sql2 = format!("DELETE FROM command_history WHERE id IN ({})", placeholders.join(", "));
         conn.execute(&sql2, params.as_slice())?;
         Ok(())

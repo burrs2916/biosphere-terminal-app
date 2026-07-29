@@ -1,12 +1,14 @@
 import { useEffect, useRef } from 'react';
 import {
-  Box, Typography, IconButton, CircularProgress, Button,
+  Box, Typography, IconButton, CircularProgress, Button, Chip, Tooltip,
 } from '@mui/material';
-import { XIcon, Sparkle, CheckCircleIcon, WarningIcon } from '@phosphor-icons/react';
+import { XIcon, Sparkle, CheckCircleIcon, WarningIcon, ArrowClockwiseIcon } from '@phosphor-icons/react';
 import { useTheme } from '@mui/material/styles';
 import { useTranslation } from 'react-i18next';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+
+export type AiApplyAction = 'replace' | 'insert' | 'append';
 
 interface AiOptimizeDialogProps {
   open: boolean;
@@ -15,9 +17,34 @@ interface AiOptimizeDialogProps {
   chunks: string[];
   status: 'running' | 'done' | 'error';
   errorMessage?: string;
+  mode: string | null;
+  /** Parsed Tiptap JSON result for content modes (null until parsed / for tag mode). */
+  resultJson: unknown | null;
+  /** Suggested tags for tag mode. */
+  suggestedTags: string[];
+  canUndo: boolean;
+  onApply: (action: AiApplyAction) => void;
+  onUndo: () => void;
+  onAddTag: (tag: string) => void;
+  onAddAllTags: () => void;
 }
 
-export function AiOptimizeDialog({ open, onClose, onCancel, chunks, status, errorMessage }: AiOptimizeDialogProps) {
+export function AiOptimizeDialog({
+  open,
+  onClose,
+  onCancel,
+  chunks,
+  status,
+  errorMessage,
+  mode,
+  resultJson,
+  suggestedTags,
+  canUndo,
+  onApply,
+  onUndo,
+  onAddTag,
+  onAddAllTags,
+}: AiOptimizeDialogProps) {
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
   const { t } = useTranslation('notebook');
@@ -25,19 +52,15 @@ export function AiOptimizeDialog({ open, onClose, onCancel, chunks, status, erro
   const primaryColor = isDark ? '#6C63FF' : '#5B54E0';
 
   const fullText = chunks.join('');
+  const isTagMode = mode === 'tag';
+  const hasContentResult = !isTagMode && resultJson != null;
+  const hasTagResult = isTagMode && suggestedTags.length > 0;
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [fullText]);
-
-  useEffect(() => {
-    if (status === 'done') {
-      const timer = setTimeout(onClose, 1500);
-      return () => clearTimeout(timer);
-    }
-  }, [status, onClose]);
+  }, [fullText, suggestedTags]);
 
   if (!open) return null;
 
@@ -71,8 +94,8 @@ export function AiOptimizeDialog({ open, onClose, onCancel, chunks, status, erro
         position: 'fixed',
         bottom: 24,
         right: 24,
-        width: 420,
-        maxHeight: 360,
+        width: 440,
+        maxHeight: 420,
         borderRadius: 3,
         border: '1px solid',
         borderColor: isDark ? 'rgba(48,54,61,0.8)' : 'rgba(0,0,0,0.1)',
@@ -122,10 +145,17 @@ export function AiOptimizeDialog({ open, onClose, onCancel, chunks, status, erro
           }}
         >
           {status === 'running' && t('editor.ai_optimizing')}
-          {status === 'done' && t('editor.ai_optimize_done')}
+          {status === 'done' && (isTagMode ? t('editor.ai_tags_suggested') : t('editor.ai_optimize_done'))}
           {status === 'error' && t('editor.ai_optimize_error')}
         </Typography>
-        {status === 'running' && (
+        {status === 'done' && hasContentResult && (
+          <Chip
+            size="small"
+            label={t('editor.ai_preview')}
+            sx={{ height: 20, fontSize: 10, bgcolor: `${primaryColor}22`, color: primaryColor }}
+          />
+        )}
+        {status === 'running' ? (
           <Button
             size="small"
             onClick={onCancel}
@@ -143,8 +173,7 @@ export function AiOptimizeDialog({ open, onClose, onCancel, chunks, status, erro
           >
             {t('editor.ai_cancel')}
           </Button>
-        )}
-        {status !== 'running' && (
+        ) : (
           <IconButton size="small" onClick={onClose} sx={{ p: 0.25 }}>
             <XIcon size={14} />
           </IconButton>
@@ -159,13 +188,38 @@ export function AiOptimizeDialog({ open, onClose, onCancel, chunks, status, erro
           px: 2,
           py: 1.5,
           minHeight: 80,
-          maxHeight: 260,
+          maxHeight: 280,
         }}
       >
         {status === 'error' ? (
           <Typography sx={{ fontSize: 12, color: '#FF5252', lineHeight: 1.6 }}>
             {errorMessage}
           </Typography>
+        ) : isTagMode ? (
+          hasTagResult ? (
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+              {suggestedTags.map((tag, idx) => (
+                <Chip
+                  key={`${tag}-${idx}`}
+                  label={tag}
+                  size="small"
+                  sx={{
+                    bgcolor: `${primaryColor}1A`,
+                    color: isDark ? '#C9D1D9' : '#374151',
+                    border: `1px solid ${primaryColor}40`,
+                    '& .MuiChip-label': { fontSize: 12 },
+                  }}
+                  onClick={() => onAddTag(tag)}
+                  deleteIcon={<CheckCircleIcon size={12} />}
+                  onDelete={() => onAddTag(tag)}
+                />
+              ))}
+            </Box>
+          ) : (
+            <Typography sx={{ fontSize: 12, color: isDark ? '#8B949E' : '#6B7280' }}>
+              {fullText || t('editor.ai_thinking')}
+            </Typography>
+          )
         ) : fullText ? (
           <Box sx={markdownStyles}>
             <Markdown remarkPlugins={[remarkGfm]}>{fullText}</Markdown>
@@ -179,6 +233,76 @@ export function AiOptimizeDialog({ open, onClose, onCancel, chunks, status, erro
           </Box>
         )}
       </Box>
+
+      {/* Footer: apply actions */}
+      {status === 'done' && !isTagMode && (
+        <Box
+          sx={{
+            px: 2,
+            py: 1,
+            borderTop: '1px solid',
+            borderColor: isDark ? 'rgba(48,54,61,0.6)' : 'rgba(0,0,0,0.06)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.5,
+            flexWrap: 'wrap',
+          }}
+        >
+          {hasContentResult ? (
+            <>
+              <Tooltip title={t('editor.ai_apply.replace')}>
+                <Button size="small" variant="contained" onClick={() => onApply('replace')}
+                  sx={{ textTransform: 'none', fontSize: 11, borderRadius: 1.5, bgcolor: primaryColor }}>
+                  {t('editor.ai_apply.replace')}
+                </Button>
+              </Tooltip>
+              <Tooltip title={t('editor.ai_apply.insert')}>
+                <Button size="small" onClick={() => onApply('insert')}
+                  sx={{ textTransform: 'none', fontSize: 11, borderRadius: 1.5, color: primaryColor, border: `1px solid ${primaryColor}40` }}>
+                  {t('editor.ai_apply.insert')}
+                </Button>
+              </Tooltip>
+              <Tooltip title={t('editor.ai_apply.append')}>
+                <Button size="small" onClick={() => onApply('append')}
+                  sx={{ textTransform: 'none', fontSize: 11, borderRadius: 1.5, color: primaryColor, border: `1px solid ${primaryColor}40` }}>
+                  {t('editor.ai_apply.append')}
+                </Button>
+              </Tooltip>
+              {canUndo && (
+                <Tooltip title={t('editor.ai_apply.undo')}>
+                  <IconButton size="small" onClick={onUndo} sx={{ color: primaryColor }}>
+                    <ArrowClockwiseIcon size={15} />
+                  </IconButton>
+                </Tooltip>
+              )}
+            </>
+          ) : (
+            <Typography variant="caption" sx={{ fontSize: 11, color: isDark ? '#8B949E' : '#9E9E9E' }}>
+              {t('editor.ai_no_result')}
+            </Typography>
+          )}
+        </Box>
+      )}
+
+      {status === 'done' && isTagMode && hasTagResult && (
+        <Box
+          sx={{
+            px: 2,
+            py: 1,
+            borderTop: '1px solid',
+            borderColor: isDark ? 'rgba(48,54,61,0.6)' : 'rgba(0,0,0,0.06)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'flex-end',
+            gap: 0.5,
+          }}
+        >
+          <Button size="small" variant="contained" onClick={onAddAllTags}
+            sx={{ textTransform: 'none', fontSize: 11, borderRadius: 1.5, bgcolor: primaryColor }}>
+            {t('editor.ai_apply.add_tags')}
+          </Button>
+        </Box>
+      )}
 
       {status === 'running' && (
         <Box

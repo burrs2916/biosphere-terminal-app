@@ -94,42 +94,6 @@ export async function openRemoteDesktopWindow(sshParams?: {
   return webview;
 }
 
-export async function openPluginScriptViewerWindow(pluginId: string, pluginName: string): Promise<WebviewWindow | null> {
-  const key = `plugin-script-${pluginId}`;
-
-  const existing = await WebviewWindow.getByLabel(key);
-  if (existing) {
-    await existing.setFocus();
-    return existing;
-  }
-
-  const webview = new WebviewWindow(key, {
-    url: `/#/plugin-script-viewer?pluginId=${encodeURIComponent(pluginId)}`,
-    title: `${pluginName} — Script Viewer`,
-    width: 800,
-    height: 600,
-    minWidth: 600,
-    minHeight: 400,
-    center: true,
-    resizable: true,
-    decorations: true,
-    focus: true,
-  });
-
-  openWindows.set(key, webview);
-
-  webview.once('tauri://destroyed', () => {
-    openWindows.delete(key);
-  });
-
-  webview.once('tauri://error', (e) => {
-    console.error('[window] failed to create plugin script viewer window:', e);
-    openWindows.delete(key);
-  });
-
-  return webview;
-}
-
 export async function openNoteEditorWindow(noteId: string, title?: string): Promise<WebviewWindow | null> {
   const key = `note-editor-${noteId}`;
 
@@ -268,42 +232,6 @@ export async function openAiCopilotWindow(): Promise<WebviewWindow | null> {
 
   webview.once('tauri://error', (e) => {
     console.error('[window] failed to create ai copilot window:', e);
-    openWindows.delete(key);
-  });
-
-  return webview;
-}
-
-export async function openPluginWorkshopWindow(): Promise<WebviewWindow | null> {
-  const key = 'plugin-workshop';
-
-  const existing = await WebviewWindow.getByLabel(key);
-  if (existing) {
-    await existing.setFocus();
-    return existing;
-  }
-
-  const webview = new WebviewWindow(key, {
-    url: '/#/plugin-workshop',
-    title: 'Plugin Workshop',
-    width: 900,
-    height: 700,
-    minWidth: 700,
-    minHeight: 500,
-    center: true,
-    resizable: true,
-    decorations: true,
-    focus: true,
-  });
-
-  openWindows.set(key, webview);
-
-  webview.once('tauri://destroyed', () => {
-    openWindows.delete(key);
-  });
-
-  webview.once('tauri://error', (e) => {
-    console.error('[window] failed to create plugin workshop window:', e);
     openWindows.delete(key);
   });
 

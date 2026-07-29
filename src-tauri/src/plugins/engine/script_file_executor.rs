@@ -2,17 +2,10 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use super::parser::ScriptFileDef;
+use super::parser::{ScriptFileDef, detect_unresolved_placeholders};
 use super::template::render_template_with_workspace;
+use super::safety::is_dangerous_command;
 use super::executor::{ExecutionResult, ExecutionContext};
-
-fn detect_unresolved_placeholders(content: &str) -> Vec<String> {
-    let re = regex::Regex::new(r"\{\{(\w+)\}\}").unwrap();
-    re.captures_iter(content)
-        .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
-        .filter(|name| name != "output_path" && name != "workspace_dir")
-        .collect()
-}
 
 fn contains_non_utf8(data: &[u8]) -> bool {
     std::str::from_utf8(data).is_err()
@@ -40,6 +33,16 @@ pub async fn execute_script_file(
 ) -> ExecutionResult {
     let start = Instant::now();
     let (rendered_content, _) = render_template_with_workspace(&script_file.script_content, params, workspace_dir);
+
+    if let Some(dangerous) = is_dangerous_command(&rendered_content) {
+        return ExecutionResult {
+            success: false,
+            output: format!("Script rejected for safety: contains potentially dangerous pattern '{}'. If this is a legitimate script, please modify the plugin script.", dangerous),
+            script_type: "script_file".to_string(),
+            duration_ms: start.elapsed().as_millis() as i64,
+            metadata: json!({ "plugin": true, "tool": ctx.tool_name, "script_type": "script_file", "rejected": true }),
+        };
+    }
 
     let unresolved = detect_unresolved_placeholders(&rendered_content);
     if !unresolved.is_empty() {

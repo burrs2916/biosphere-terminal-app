@@ -15,7 +15,10 @@ export function CommandPage() {
 
   const handleExecute = useCallback(
     (command: string) => {
-      if (!activeSessionId) return;
+      if (!activeSessionId) {
+        notify(t('no_active_terminal'));
+        return;
+      }
       const bytes = new TextEncoder().encode(command + '\n');
       writeToTerminal(activeSessionId, Array.from(bytes)).catch((e) => { console.error(e); notify(String(e)); });
       // 记录命令历史
@@ -23,7 +26,7 @@ export function CommandPage() {
         parseCommand(command, activeSessionId, cwd ?? undefined).catch((e) => notify(String(e)));
       }).catch((e) => notify(String(e)));
     },
-    [activeSessionId],
+    [activeSessionId, notify, t],
   );
 
   return (

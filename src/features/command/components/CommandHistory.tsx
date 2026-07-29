@@ -133,6 +133,15 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
     return () => { if (unlisten) unlisten(); };
   }, [loadHistory]);
 
+  // 监听笔记↔命令关联变更（AI 链接/解除，或命令历史侧链接），实时刷新"关联笔记"面板（P1-5 消费端）
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen('note-links-changed', () => {
+      loadHistory();
+    }).then((fn) => { unlisten = fn; });
+    return () => { if (unlisten) unlisten(); };
+  }, [loadHistory]);
+
   const entries = useMemo(() => searchResults ?? allEntries, [searchResults, allEntries]);
 
   const handleSearchChange = useCallback((value: string) => {
@@ -183,15 +192,21 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
       groupMap.get(key)!.push(entry);
     });
 
-    let groups = Array.from(groupMap.entries()).map(([key, ents]): CommandGroup => ({
-      key,
-      label: key,
-      entries: ents.sort((a, b) => b.executed_at - a.executed_at),
-      count: ents.length,
-      lastExecutedAt: Math.max(...ents.map((e) => e.executed_at)),
-      isLinked: ents.some((e) => e.linked),
-      linkedNotes: ents.find((e) => e.linked_notes && e.linked_notes.length > 0)?.linked_notes || [],
-    }));
+    let groups = Array.from(groupMap.entries()).map(([key, ents]): CommandGroup => {
+      // 聚合该分组下所有命令条目的关联笔记（按 noteId 去重），打通命令→笔记双向链接
+      const linkedMap = new Map<string, LinkedNoteInfo>();
+      ents.forEach((e) => (e.linked_notes || []).forEach((n) => linkedMap.set(n.noteId, n)));
+      const linkedNotes = Array.from(linkedMap.values());
+      return {
+        key,
+        label: key,
+        entries: ents.sort((a, b) => b.executed_at - a.executed_at),
+        count: ents.length,
+        lastExecutedAt: Math.max(...ents.map((e) => e.executed_at)),
+        isLinked: linkedNotes.length > 0,
+        linkedNotes,
+      };
+    });
 
     if (viewMode === 'frequent') {
       groups = groups.sort((a, b) => b.count - a.count);
@@ -385,6 +400,19 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
       loadHistory();
     } catch (err) {
       console.error('Failed to unlink note:', err);
+    }
+  };
+
+  // 头部解链按钮：解链该命令分组关联的全部笔记（不止第一条）。
+  // 此前只解 group.linkedNotes[0]，若一条命令关联了多篇笔记，头部按钮会遗漏其余关联。
+  const handleUnlinkAll = async (e: React.MouseEvent, linkedNotes: LinkedNoteInfo[]) => {
+    e.stopPropagation();
+    if (linkedNotes.length === 0) return;
+    try {
+      await Promise.all(linkedNotes.map((n) => unlinkCommandNote(n.linkId)));
+      loadHistory();
+    } catch (err) {
+      console.error('Failed to unlink notes:', err);
     }
   };
 
@@ -673,6 +701,13 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
                           {group.isLinked && group.linkedNotes[0] && (
                             <Typography variant="caption" sx={{ color: '#81C784', display: 'flex', alignItems: 'center', gap: 0.25 }}>
                               {group.linkedNotes[0].title}
+                              {group.linkedNotes.length > 1 && (
+                                <Chip
+                                  label={`+${group.linkedNotes.length - 1}`}
+                                  size="small"
+                                  sx={{ height: 14, fontSize: '0.55rem', ml: 0.25, bgcolor: 'rgba(129,199,132,0.18)', color: '#81C784' }}
+                                />
+                              )}
                             </Typography>
                           )}
                         </Box>
@@ -686,7 +721,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
                           </IconButton>
                         </Tooltip>
                         <Tooltip title={t('history.unlink_note') || 'Unlink'} arrow>
-                          <IconButton size="small" onClick={(e) => handleUnlinkNote(e, group.linkedNotes[0].linkId)}>
+                          <IconButton size="small" onClick={(e) => handleUnlinkAll(e, group.linkedNotes)}>
                             <LinkBreakIcon size={14} color="#FFA726" />
                           </IconButton>
                         </Tooltip>
@@ -765,6 +800,40 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
                           </Tooltip>
                         </ListItemButton>
                       ))}
+
+                      {group.linkedNotes.length > 0 && (
+                        <Box sx={{ pl: 3, pr: 1, pb: 1, pt: 0.25 }}>
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5, fontWeight: 600 }}
+                          >
+                            <NotebookIcon size={12} color="#81C784" weight="fill" />
+                            {t('history.linked_notes_count', { count: group.linkedNotes.length })}
+                          </Typography>
+                          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                            {group.linkedNotes.map((note) => (
+                              <Chip
+                                key={note.noteId}
+                                icon={<NotebookIcon size={12} color="#81C784" />}
+                                label={note.title}
+                                size="small"
+                                clickable
+                                onClick={(e) => handleEditLinkedNote(e, note.noteId, note.title)}
+                                onDelete={(e) => handleUnlinkNote(e, note.linkId)}
+                                deleteIcon={<LinkBreakIcon size={12} />}
+                                sx={{
+                                  borderRadius: 1.5,
+                                  fontSize: 11,
+                                  cursor: 'pointer',
+                                  bgcolor: 'rgba(129,199,132,0.1)',
+                                  '&:hover': { bgcolor: 'rgba(129,199,132,0.18)' },
+                                }}
+                              />
+                            ))}
+                          </Box>
+                        </Box>
+                      )}
                     </List>
                   </Collapse>
                 </Box>

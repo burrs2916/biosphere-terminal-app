@@ -99,37 +99,6 @@ impl PluginService {
         self.usage_log_repo.clear_by_plugin(plugin_id)
     }
 
-    pub fn clear_usage_logs_before(&self, before_ms: i64) -> Result<usize, String> {
-        self.usage_log_repo.clear_before(before_ms)
-    }
-
-    pub fn clear_failed_logs_before(&self, before_ms: i64) -> Result<usize, String> {
-        self.usage_log_repo.clear_failed_before(before_ms)
-    }
-
-    pub fn purge_all_usage_logs(&self) -> Result<usize, String> {
-        self.usage_log_repo.purge_all()
-    }
-
-    pub fn count_usage_logs(&self, plugin_id: &str) -> Result<i64, String> {
-        self.usage_log_repo.count_by_plugin(plugin_id)
-    }
-
-    pub fn count_all_usage_logs(&self) -> Result<i64, String> {
-        self.usage_log_repo.count_all()
-    }
-
-    pub fn usage_logs_size_estimate(&self) -> Result<i64, String> {
-        self.usage_log_repo.total_size_estimate()
-    }
-
-    pub fn export_usage_logs(&self, plugin_id: &str) -> Result<Vec<UsageLogEntry>, String> {
-        self.usage_log_repo.export_by_plugin(plugin_id)
-    }
-
-    pub fn export_all_usage_logs(&self) -> Result<Vec<UsageLogEntry>, String> {
-        self.usage_log_repo.export_all()
-    }
 
     fn ensure_default_groups(&self) -> Result<(), String> {
         let existing = PluginGroupRepo::list(&self.db)?;

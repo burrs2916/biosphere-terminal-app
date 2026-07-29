@@ -18,21 +18,41 @@
     "new_agent": "New Agent",
     "save": "Save",
     "name_label": "Name",
+    "name_placeholder": "e.g. My Coding Assistant",
     "description_label": "Description",
     "model_label": "Model",
     "select_model": "Select model",
     "tools_label": "Available Tools",
+    "enable_tool_hint": "Please enable the {tool} tool here, then click Save",
     "temperature_label": "Temperature",
     "max_iterations_label": "Max Iterations",
     "system_prompt_label": "System Prompt",
     "system_prompt_placeholder": "Enter system prompt to define the agent's behavior and role...",
+    "description_placeholder": "Briefly describe what this agent does for easier identification",
     "select_or_create": "Select or create an agent",
+    "empty_hint_title": "Select an agent",
+    "empty_hint_desc": "Pick an agent from the list on the left to view or edit it, or click \"New Agent\" at the top right to create one.",
+    "guide_title": "Start creating your AI agent",
+    "guide_subtitle": "An agent is a reusable AI assistant. Bind a model and tools, then let it chat or drive the terminal.",
+    "guide_step1_title": "Basic Info",
+    "guide_step1_desc": "Name it and pick a model",
+    "guide_step2_title": "Tool Access",
+    "guide_step2_desc": "Select the tools it may use",
+    "guide_step3_title": "System Prompt",
+    "guide_step3_desc": "Define its behavior & style",
     "trigger_type_label": "Trigger Type",
     "trigger_type_manual": "Manual",
     "trigger_type_auto_failure": "Auto on Failure",
     "trigger_type_auto_save": "Auto on Save",
     "trigger_type_auto_both": "Auto (Both)",
     "auto_confirm_label": "Auto Confirm Safe Commands",
+    "search_placeholder": "Search agent name or description",
+    "no_search_result": "No matching agents",
+    "permission_mode": "Permission Mode",
+    "permission_confirm": "Confirm — Ask before high-risk actions",
+    "permission_auto": "Auto — Execute all actions without confirmation",
+    "fallback_model": "Fallback Model",
+    "none": "None",
     "delete_confirm_title": "Confirm Delete",
     "delete_confirm_message": "Are you sure you want to delete this agent? All related conversations will also be deleted.",
     "cancel": "Cancel",
@@ -47,9 +67,12 @@
     "tool_arguments": "Arguments",
     "tool_output": "Output",
     "basic_info": "Basic Info",
+    "basic_info_desc": "Name your agent and pick the model that powers it",
     "model_config": "Model Config",
     "advanced_config": "Advanced Config",
     "save_success": "Saved successfully",
+    "save_error": "Failed to save, please retry",
+    "delete_success": "Deleted successfully",
     "name_required": "Name is required",
     "model_required": "Please select a model",
     "plugin_tools_label": "Plugin Tools",
@@ -58,11 +81,12 @@
     "workspace_dir_helper": "Directory for AI output files. Defaults to Documents/BiosphereTerminal/agents/{id}",
     "select_workspace_dir": "Select Workspace Directory",
     "allowed_tools_label": "Always Allowed Tools",
-    "allowed_tools_desc": "These tools are always allowed without confirmation. Click × to revoke.",
+    "allowed_tools_desc": "Click a tool to mark it always allowed (no per-action confirmation); click again to undo.",
     "ungrouped": "Ungrouped",
     "attachment": "Attachment",
     "result_showing_first": "Showing first {{count}} of {{total}} items",
-    "select_file": "Select File"
+    "select_file": "Select File",
+    "delete_confirm_message_with_info": "Are you sure you want to delete agent \"{{name}}\"? This will also delete {{count}} conversation(s) and all associated messages."
   },
   "chat": {
     "label": "Chat",
@@ -74,7 +98,11 @@
     "executing": "Executing...",
     "no_conversations": "No conversations",
     "start_conversation": "Start a new conversation",
-    "ai_response_placeholder": "AI response will be available when the agent engine is connected."
+    "ai_response_placeholder": "AI response will be available when the agent engine is connected.",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "delete_confirm_title": "Delete Conversation",
+    "delete_confirm_message": "Are you sure you want to delete this conversation? All messages will be permanently lost."
   },
   "config": {
     "label": "Configuration",
@@ -93,8 +121,10 @@
     "name": "Name",
     "name_placeholder": "e.g. OpenAI, Anthropic, DeepSeek",
     "api_key": "API Key",
+    "toggle_password_visibility": "Show/hide key",
     "base_url": "Base URL",
-    "logo_emoji": "Logo (Emoji)"
+    "logo_emoji": "Logo (Emoji)",
+    "delete_affected_agents": "This will affect {{count}} agent(s): {{names}}"
   },
   "endpoint": {
     "add": "New Endpoint",
@@ -109,7 +139,8 @@
     "no_endpoints": "No endpoints yet. Click New Endpoint to create one.",
     "test_connection": "Test Connection",
     "connection_success": "Connection successful",
-    "connection_failed": "Connection failed"
+    "connection_failed": "Connection failed",
+    "delete_affected_models": "This will also delete {{count}} model(s) under this endpoint."
   },
   "api": {
     "type_label": "API Type",
@@ -167,7 +198,8 @@
     "tool_result": "Tool Result"
   },
   "assistant": {
-    "start_chat": "Start Chat"
+    "start_chat": "Start Chat",
+    "enable_tool": "Enable Tool"
   },
   "note_assistant": {
     "label": "Note Assistant",
@@ -251,7 +283,8 @@
     "log_summary_fail_error": "    Error: {{error}}",
     "log_summary_avg_duration": "- Average success duration: {{avgDuration}}ms",
     "log_summary_success_item": "  * [{{toolName}}] Output: {{output}}",
-    "log_summary_footer": "Based on the usage log data above, focus on fixing failures and optimizing performance."
+    "log_summary_footer": "Based on the usage log data above, focus on fixing failures and optimizing performance.",
+    "attach_file": "Attach File"
   },
   "copilot": {
     "label": "Copilot",
@@ -268,6 +301,10 @@
     "step3": "3. Ask AI questions like \"how to check port usage\" or \"explain this command\"",
     "no_agent_bound": "No Terminal Copilot Bound",
     "no_agent_bound_desc": "Go to AI Assistant → Terminal Copilot tab to bind an agent first. The agent needs a terminal tool enabled.",
+    "agent_missing": "The bound Terminal Copilot no longer exists",
+    "agent_missing_desc": "The previously bound agent may have been deleted or renamed. Go to AI Assistant → Terminal Copilot tab and select an agent again.",
+    "sessions_title": "Conversation History",
+    "no_sessions": "No conversations yet. Click + at the top right to create one",
     "empty_hint": "Ask the AI copilot a question, like \"how to check port usage\" or \"explain this command\"",
     "input_placeholder": "Ask the AI copilot...",
     "thinking": "Thinking...",

@@ -4,6 +4,7 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions,
   IconButton, Chip, Tooltip, Card, Collapse, Divider,
   Alert, Snackbar, CircularProgress, MenuItem, Select, FormControl, InputLabel, Menu,
+  InputAdornment,
 } from '@mui/material';
 import {
   PlusIcon,
@@ -17,6 +18,8 @@ import {
   PlayIcon,
   CaretDownIcon,
   CaretUpIcon,
+  EyeIcon,
+  EyeSlashIcon,
 } from '@phosphor-icons/react';
 import { useAgentStore, genId } from '../store/agentStore';
 import type { ProviderDto, EndpointDto, ModelDto } from '../../../proto/agent';
@@ -92,6 +95,7 @@ function ProviderDialog({
   const { t } = useTranslation('agent');
   const [name, setName] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [showApiKey, setShowApiKey] = useState(false);
   const [enabled, setEnabled] = useState(true);
 
   useEffect(() => {
@@ -126,7 +130,7 @@ function ProviderDialog({
       <DialogTitle>{initial ? t('provider.edit') : t('provider.add')}</DialogTitle>
       <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: '16px !important' }}>
         <TextField label={t('provider.name')} value={name} onChange={(e) => setName(e.target.value)} fullWidth size="small" placeholder={t('provider.name_placeholder')} />
-        <TextField label={t('provider.api_key')} value={apiKey} onChange={(e) => setApiKey(e.target.value)} fullWidth size="small" type="password" placeholder="sk-..." />
+        <TextField label={t('provider.api_key')} value={apiKey} onChange={(e) => setApiKey(e.target.value)} fullWidth size="small" type={showApiKey ? 'text' : 'password'} placeholder="sk-..." slotProps={{ input: { endAdornment: (<InputAdornment position="end"><IconButton aria-label={t('provider.toggle_password_visibility')} onClick={() => setShowApiKey((v) => !v)} edge="end" size="small">{showApiKey ? <EyeSlashIcon size={18} /> : <EyeIcon size={18} />}</IconButton></InputAdornment>) } }} />
         <FormControlLabel control={<Switch checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />} label={t('agent.enabled')} />
       </DialogContent>
       <DialogActions>
