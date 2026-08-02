@@ -25,6 +25,7 @@ import { useAgentStore, genId } from '../store/agentStore';
 import type { ProviderDto, EndpointDto, ModelDto } from '../../../proto/agent';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
+import { localizeBackendError } from '../../../core/backendError';
 
 const API_TYPE_KEYS: { value: string; labelKey: string }[] = [
   { value: 'openai-completions', labelKey: 'api.type_openai_completions' },
@@ -457,10 +458,10 @@ export function ModelConfigPage() {
     } catch (e) {
       setTestResults((prev) => {
         const next = new Map(prev);
-        next.set(endpointId, { success: false, message: String(e) });
+        next.set(endpointId, { success: false, message: localizeBackendError(e) });
         return next;
       });
-      setSnackbar({ open: true, message: String(e), severity: 'error' });
+      setSnackbar({ open: true, message: localizeBackendError(e), severity: 'error' });
     } finally {
       setTestingId(null);
     }
@@ -479,10 +480,10 @@ export function ModelConfigPage() {
     } catch (e) {
       setModelTestResults((prev) => {
         const next = new Map(prev);
-        next.set(modelId, { success: false, message: String(e) });
+        next.set(modelId, { success: false, message: localizeBackendError(e) });
         return next;
       });
-      setSnackbar({ open: true, message: String(e), severity: 'error' });
+      setSnackbar({ open: true, message: localizeBackendError(e), severity: 'error' });
     } finally {
       setTestingModelId(null);
     }

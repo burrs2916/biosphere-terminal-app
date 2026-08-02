@@ -30,6 +30,7 @@ import { generateId } from '../core/utils';
 import type { PtyConfig } from '../proto';
 import { openNotesReferenceWindow, openAiCopilotWindow, openRemoteDesktopWindow } from '../core/services/window.service';
 import { useConnectIntent } from '../features/terminal/connectIntent';
+import { localizeBackendError } from '../core/backendError';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '../engine';
 import { useNotify } from '../core/notification';
@@ -82,11 +83,11 @@ export function TerminalPage() {
     const interval = setInterval(() => {
       getTerminalCwd(activeTab.id).then((cwd) => {
         if (cwd) setActiveCwd(cwd);
-      }).catch((e) => notify(String(e)));
+      }).catch((e) => notify(localizeBackendError(e)));
     }, 5000);
     getTerminalCwd(activeTab.id).then((cwd) => {
       if (cwd) setActiveCwd(cwd);
-    }).catch((e) => notify(String(e)));
+    }).catch((e) => notify(localizeBackendError(e)));
     return () => clearInterval(interval);
   }, [tabs]);
 
@@ -151,7 +152,7 @@ export function TerminalPage() {
         ? `${result.ssh.username}@${result.ssh.host}`
         : `Terminal ${count}`;
 
-    spawnTerminal(id, config).catch((e) => { console.error(e); notify(String(e)); });
+    spawnTerminal(id, config).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
 
     if (result.connectionId && result.connectionType === 'ssh') {
       useConnectIntent.getState().addActiveConnection(result.connectionId);
@@ -195,7 +196,7 @@ export function TerminalPage() {
 
   const doCloseTab = useCallback(
     (id: string) => {
-      killTerminal(id).catch((e) => { console.error(e); notify(String(e)); });
+      killTerminal(id).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
       terminalRefs.current.delete(id);
       setTabs((prev) => {
         const closing = prev.find((t) => t.id === id);
@@ -255,7 +256,7 @@ export function TerminalPage() {
   const handleReconnect = useCallback(
     (tab: Tab) => {
       if (!tab.ssh) return;
-      killTerminal(tab.id).catch((e) => notify(String(e)));
+      killTerminal(tab.id).catch((e) => notify(localizeBackendError(e)));
       terminalRefs.current.delete(tab.id);
       const newId = generateId();
       const size = estimateTerminalSize();
@@ -273,7 +274,7 @@ export function TerminalPage() {
           password: tab.ssh.password,
         },
       };
-      spawnTerminal(newId, config).catch((e) => { console.error(e); notify(String(e)); });
+      spawnTerminal(newId, config).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
       setTabs((prev) =>
         prev.map((t) => (t.id === tab.id ? { ...t, id: newId, disconnected: false } : t)),
       );
@@ -286,10 +287,10 @@ export function TerminalPage() {
       const activeTab = tabs.find((t) => t.isActive);
       if (activeTab) {
         const bytes = new TextEncoder().encode(command + '\n');
-        writeToTerminal(activeTab.id, Array.from(bytes)).catch((e) => { console.error(e); notify(String(e)); });
+        writeToTerminal(activeTab.id, Array.from(bytes)).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
         getTerminalCwd(activeTab.id).then((cwd) => {
-          parseCommand(command, activeTab.id, cwd ?? undefined).catch((e) => notify(String(e)));
-        }).catch((e) => notify(String(e)));
+          parseCommand(command, activeTab.id, cwd ?? undefined).catch((e) => notify(localizeBackendError(e)));
+        }).catch((e) => notify(localizeBackendError(e)));
       }
       setPaletteOpen(false);
     },
@@ -298,13 +299,13 @@ export function TerminalPage() {
 
   const handleOpenNotes = useCallback(() => {
     guardProFeature('note_reference', () => {
-      openNotesReferenceWindow().catch((e) => { console.error(e); notify(String(e)); });
+      openNotesReferenceWindow().catch((e) => { console.error(e); notify(localizeBackendError(e)); });
     });
   }, [guardProFeature, notify]);
 
   const handleOpenAiCopilot = useCallback(() => {
     guardProFeature('ai_copilot', () => {
-      openAiCopilotWindow().catch((e) => { console.error(e); notify(String(e)); });
+      openAiCopilotWindow().catch((e) => { console.error(e); notify(localizeBackendError(e)); });
     });
   }, [guardProFeature, notify]);
 
@@ -319,7 +320,7 @@ export function TerminalPage() {
         privateKeyPath: activeTab.ssh.privateKeyPath,
         password: activeTab.ssh.password,
       } : undefined;
-      openRemoteDesktopWindow(sshParams).catch((e) => { console.error(e); notify(String(e)); });
+      openRemoteDesktopWindow(sshParams).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
     });
   }, [guardProFeature, notify]);
 
@@ -338,7 +339,7 @@ export function TerminalPage() {
     if (!terminal) return;
     const selection = terminal.getSelection();
     if (selection) {
-      copyText(selection).catch((e) => notify(String(e)));
+      copyText(selection).catch((e) => notify(localizeBackendError(e)));
     }
   }, [getActiveTerminal]);
 
@@ -355,12 +356,12 @@ export function TerminalPage() {
           const firstLine = text.split('\n').map((l) => l.trim()).find(Boolean);
           if (firstLine) {
             getTerminalCwd(activeTab.id).then((cwd) => {
-              parseCommand(firstLine, activeTab.id, cwd ?? undefined).catch((e) => notify(String(e)));
-            }).catch((e) => notify(String(e)));
+              parseCommand(firstLine, activeTab.id, cwd ?? undefined).catch((e) => notify(localizeBackendError(e)));
+            }).catch((e) => notify(localizeBackendError(e)));
           }
         }
       }
-    }).catch((e) => notify(String(e)));
+    }).catch((e) => notify(localizeBackendError(e)));
   }, [getActiveTerminal]);
 
   const handleFind = useCallback(() => {
@@ -468,15 +469,15 @@ export function TerminalPage() {
         const lines = command.split('\n').filter((l: string) => l.trim());
         for (const line of lines) {
           const bytes = new TextEncoder().encode(line + '\n');
-          writeToTerminal(activeTab.id, Array.from(bytes)).catch((e) => { console.error(e); notify(String(e)); });
+          writeToTerminal(activeTab.id, Array.from(bytes)).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
           getTerminalCwd(activeTab.id).then((cwd) => {
-            parseCommand(line, activeTab.id, cwd ?? undefined).catch((e) => notify(String(e)));
-          }).catch((e) => notify(String(e)));
+            parseCommand(line, activeTab.id, cwd ?? undefined).catch((e) => notify(localizeBackendError(e)));
+          }).catch((e) => notify(localizeBackendError(e)));
         }
       }
     }).then((fn) => {
       unlisten = fn;
-    }).catch((e) => { console.error(e); notify(String(e)); });
+    }).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
 
     return () => {
       if (unlisten) unlisten();

@@ -32,6 +32,7 @@ import { VncViewer } from '../features/terminal/components/VncViewer';
 import { createRemoteDesktop, closeRemoteDesktop, setupRemoteDesktop, type RemoteDesktopSession } from '../core/services/remote-desktop.service';
 import type { SshConnectionInfo } from '../proto/connection';
 import { spawnTerminal, killTerminal, writeToTerminal } from '../core/services/terminal.service';
+import { localizeBackendError } from '../core/backendError';
 import { useNotify } from '../core/notification';
 import { TerminalEmulator } from '../features/terminal';
 import type { TerminalEmulatorHandle } from '../features/terminal';
@@ -326,7 +327,7 @@ export function RemoteDesktopPage() {
         setStep('viewer');
       }
     } catch (err: any) {
-      notify(err?.toString() || t('connection_failed'));
+      notify(localizeBackendError(err) || t('connection_failed'));
       setStep('config');
     }
   }, [host, port, username, authMethod, privateKeyPath, password, vncPort, mode, notify, t, getSshConfig, checkVncStatus, updateStep, enterManualPassword]);
@@ -562,7 +563,7 @@ export function RemoteDesktopPage() {
       }
     } catch (e) {
       console.error('[RemoteDesktop] handleConnectVnc error:', e);
-      updateStep('ready', { status: 'failed', description: 'Connection failed' });
+      updateStep('ready', { status: 'failed', description: t('connection_failed') });
     }
   }, [checkVncStatus, updateStep]);
 

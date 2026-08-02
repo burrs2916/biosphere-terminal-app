@@ -49,6 +49,7 @@ import { useNotify } from '../../../core/notification';
 import { getNote, unlinkCommandNote } from '../../../core/services/notebook.service';
 import { diffLines, diffStats } from '../utils/textDiff';
 import { registerNotebookFlush } from '../utils/notebookFlush';
+import { localizeBackendError } from '../../../core/backendError';
 
 const lowlight = createLowlight(common);
 
@@ -196,7 +197,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
       const bytes = new TextEncoder().encode(command + '\n');
       writeToTerminal(activeSessionId, Array.from(bytes))
         .then(() => notify(t('ref.sent'), 'success'))
-        .catch((e) => notify(String(e), 'error'));
+        .catch((e) => notify(localizeBackendError(e), 'error'));
     },
     [activeSessionId, notify, t],
   );
@@ -209,7 +210,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
         await unlinkCommandNote(linkId);
         notify(t('notebook.linked_command_unlinked'), 'success');
       } catch (e) {
-        notify(String(e), 'error');
+        notify(localizeBackendError(e), 'error');
       }
     },
     [notify, t],
@@ -709,7 +710,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
       }
     } catch (e) {
       setAiStatus('error');
-      setAiError(String(e));
+      setAiError(localizeBackendError(e));
       setAiDialogOpen(true);
       return;
     }
@@ -805,7 +806,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
     } catch (e) {
       setAiOptimizing(false);
       setAiStatus('error');
-      setAiError(String(e));
+      setAiError(localizeBackendError(e));
       aiConvIdRef.current = null;
     }
   }, [editor, initialContent, title, category, t]);

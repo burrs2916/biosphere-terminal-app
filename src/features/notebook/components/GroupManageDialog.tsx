@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import { localizeBackendError } from '../../../core/backendError';
 import Dialog from '@mui/material/Dialog';
 import DialogTitle from '@mui/material/DialogTitle';
 import DialogContent from '@mui/material/DialogContent';
@@ -110,7 +111,7 @@ export function GroupManageDialog({ open, onClose, editGroupId }: GroupManageDia
         setErrorMsg(err || t('group.create') + ' failed');
       }
     } catch (e) {
-      setErrorMsg(String(e));
+      setErrorMsg(localizeBackendError(e));
     } finally {
       setSubmitting(false);
     }
@@ -137,7 +138,7 @@ export function GroupManageDialog({ open, onClose, editGroupId }: GroupManageDia
         setErrorMsg(err || t('group.edit') + ' failed');
       }
     } catch (e) {
-      setErrorMsg(String(e));
+      setErrorMsg(localizeBackendError(e));
     } finally {
       setSubmitting(false);
     }
@@ -159,7 +160,7 @@ export function GroupManageDialog({ open, onClose, editGroupId }: GroupManageDia
       setGroupToDelete(null);
       await loadGroups();
     } catch (e) {
-      setErrorMsg(String(e));
+      setErrorMsg(localizeBackendError(e));
       setGroupToDelete(null);
     }
   };
@@ -199,7 +200,7 @@ export function GroupManageDialog({ open, onClose, editGroupId }: GroupManageDia
       setAddingCatForGroup(null);
       await loadCategoriesByGroup(groupId);
     } catch (e) {
-      setErrorMsg(String(e));
+      setErrorMsg(localizeBackendError(e));
     }
   };
 
@@ -210,7 +211,7 @@ export function GroupManageDialog({ open, onClose, editGroupId }: GroupManageDia
       await loadCategoriesByGroup(cat.groupId);
       setSuccessMsg(t('category.delete_success') || 'Category deleted');
     } catch (e) {
-      setErrorMsg(String(e));
+      setErrorMsg(localizeBackendError(e));
     }
   };
 
@@ -252,7 +253,7 @@ export function GroupManageDialog({ open, onClose, editGroupId }: GroupManageDia
       setSuccessMsg(t('category.update_success') || 'Category updated');
       await loadCategoriesByGroup(cat.groupId);
     } catch (e) {
-      setErrorMsg(String(e));
+      setErrorMsg(localizeBackendError(e));
     }
   };
 
@@ -265,7 +266,7 @@ export function GroupManageDialog({ open, onClose, editGroupId }: GroupManageDia
       setAddingTagForGroup(null);
       await loadTagsByGroup(groupId);
     } catch (e) {
-      setErrorMsg(String(e));
+      setErrorMsg(localizeBackendError(e));
     }
   };
 
@@ -279,7 +280,7 @@ export function GroupManageDialog({ open, onClose, editGroupId }: GroupManageDia
       setSuccessMsg(t('tag.update_success') || 'Tag updated');
       await loadTagsByGroup(tg.groupId);
     } catch (e) {
-      setErrorMsg(String(e));
+      setErrorMsg(localizeBackendError(e));
     }
   };
 
@@ -290,7 +291,7 @@ export function GroupManageDialog({ open, onClose, editGroupId }: GroupManageDia
       await loadTagsByGroup(tg.groupId);
       setSuccessMsg(t('tag.delete_success') || 'Tag deleted');
     } catch (e) {
-      setErrorMsg(String(e));
+      setErrorMsg(localizeBackendError(e));
     }
   };
 

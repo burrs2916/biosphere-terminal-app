@@ -17,6 +17,7 @@ import type { NoteDto, NoteGroupDto, NoteCategoryDto } from '../../../proto/note
 import { useTheme } from '@mui/material/styles';
 import { useFeatureGate, LockedScreen } from '../../licensing';
 import { listen } from '@tauri-apps/api/event';
+import { localizeBackendError } from '../../../core/backendError';
 
 function CodeBlock({ className, children }: { className?: string; children?: ReactNode }) {
   const { t } = useTranslation('notebook');
@@ -223,8 +224,8 @@ export function NotesReferencePage() {
   const [loadingContent, setLoadingContent] = useState(false);
 
   useEffect(() => {
-    listNoteGroups().then(setGroups).catch((e) => { console.error(e); notify(String(e)); });
-    listNotes().then(setNotes).catch((e) => { console.error(e); notify(String(e)); });
+    listNoteGroups().then(setGroups).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+    listNotes().then(setNotes).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
   }, []);
 
   // 订阅后端写操作后广播的 notes-changed：AI 在进程内直接增删改/重归类笔记后，

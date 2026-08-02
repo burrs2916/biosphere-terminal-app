@@ -3,6 +3,7 @@ import Box from '@mui/material/Box';
 import * as iconService from '../../core/services/icon.service';
 import { useNotify } from '../../core/notification';
 import { isCustomIconValue, isMaterialIconValue, getMaterialIconName } from './iconUtils';
+import { localizeBackendError } from '../../core/backendError';
 
 interface IconRendererProps {
   value: string;
@@ -70,7 +71,7 @@ export function IconRenderer({ value, size = 20, iconUrls: externalUrls, sx = {}
             setResolvedUrls(urls);
           }
         })
-        .catch((e) => notify(String(e)));
+        .catch((e) => notify(localizeBackendError(e)));
     }
   }, [value, externalUrls]);
 

@@ -15,6 +15,7 @@ import { useNotify } from '../core/notification';
 import { ChatMessagesArea, ChatInputArea, type FileAttachment } from '../components/chat/ChatComponents';
 import type { ToolCallDisplay } from '../components/chat/ChatComponents';
 import { useFeatureGate, LockedScreen } from '../features/licensing';
+import { localizeBackendError } from '../core/backendError';
 
 const STORAGE_KEY = 'biosphere_terminal_copilot_agent_id';
 
@@ -184,7 +185,7 @@ export function AiCopilotPage() {
           if (firstUserMsg) {
             const autoTitle = firstUserMsg.content.replace(/\[(?:附件|Attachment):.*?\]\s*/g, '').trim().slice(0, 40);
             if (autoTitle) {
-              updateConversationTitle(conversationId, autoTitle).catch((e) => notify(String(e)));
+              updateConversationTitle(conversationId, autoTitle).catch((e) => notify(localizeBackendError(e)));
               setConvList((prev) => prev.map((c) => c.id === conversationId ? { ...c, title: autoTitle } : c));
             }
           }
@@ -267,7 +268,7 @@ export function AiCopilotPage() {
     try {
       await runAgent(boundAgentId, messageText.trim(), conversationId);
     } catch (e) {
-      setMessages((prev) => prev.map((m) => m.id === assistantMsgId ? { ...m, content: `❌ ${String(e)}` } : m));
+      setMessages((prev) => prev.map((m) => m.id === assistantMsgId ? { ...m, content: `❌ ${localizeBackendError(e)}` } : m));
       setStreamingContent('');
       setLoading(false);
       streamingMsgIdRef.current = null;

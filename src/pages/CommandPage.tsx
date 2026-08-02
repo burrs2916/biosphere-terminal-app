@@ -7,6 +7,7 @@ import { writeToTerminal, getTerminalCwd } from '../core/services/terminal.servi
 import { parseCommand } from '../core/services/command.service';
 import { useTerminalStore } from '../engine';
 import { useNotify } from '../core/notification';
+import { localizeBackendError } from '../core/backendError';
 
 export function CommandPage() {
   const { t } = useTranslation('terminal');
@@ -20,11 +21,11 @@ export function CommandPage() {
         return;
       }
       const bytes = new TextEncoder().encode(command + '\n');
-      writeToTerminal(activeSessionId, Array.from(bytes)).catch((e) => { console.error(e); notify(String(e)); });
+      writeToTerminal(activeSessionId, Array.from(bytes)).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
       // 记录命令历史
       getTerminalCwd(activeSessionId).then((cwd) => {
-        parseCommand(command, activeSessionId, cwd ?? undefined).catch((e) => notify(String(e)));
-      }).catch((e) => notify(String(e)));
+        parseCommand(command, activeSessionId, cwd ?? undefined).catch((e) => notify(localizeBackendError(e)));
+      }).catch((e) => notify(localizeBackendError(e)));
     },
     [activeSessionId, notify, t],
   );

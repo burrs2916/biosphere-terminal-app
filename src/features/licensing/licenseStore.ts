@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { LicenseStatus, ProFeature } from '../../proto/licensing';
 import { checkProStatus, purchaseProLifetime, restoreProLicense, resetLicense } from '../../core/services/licensing.service';
+import { localizeBackendError } from '../../core/backendError';
 
 /// All Pro features gated by the license system. Keep in sync with
 /// `ProFeature` in `proto/licensing.ts`.
@@ -78,7 +79,7 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
         // 写入 error 字段——UpgradeDialog 读取同一个 error 来显示购买/
         // 恢复操作的失败信息，后台 refresh 失败会让用户误以为购买失败。
         // 保留原有 status，仅记录 loading=false。
-        const message = err instanceof Error ? err.message : String(err);
+        const message = err instanceof Error ? err.message : localizeBackendError(err);
         console.warn('[license] refresh failed:', message);
         set({ loading: false });
       } finally {
@@ -99,7 +100,7 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
       const status = await purchaseProLifetime();
       set({ status, loading: false });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : localizeBackendError(err);
       set({ loading: false, error: message });
       throw err;
     } finally {
@@ -113,7 +114,7 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
       const status = await restoreProLicense();
       set({ status, loading: false });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : localizeBackendError(err);
       set({ loading: false, error: message });
       throw err;
     }
@@ -125,7 +126,7 @@ export const useLicenseStore = create<LicenseState>((set, get) => ({
       const status = await resetLicense();
       set({ status, loading: false });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : localizeBackendError(err);
       set({ loading: false, error: message });
       throw err;
     }

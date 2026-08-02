@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { NoteDto, NoteDetailDto, CreateNoteInput, UpdateNoteInput, CommandNoteLinkDto, NoteGroupDto, CreateGroupInput, UpdateGroupInput, NoteCategoryDto, CreateCategoryInput, UpdateCategoryInput, NoteTagDto, CreateTagInput, UpdateTagInput } from '../../../proto/notebook';
 import * as notebookService from '../../../core/services/notebook.service';
+import { localizeBackendError } from '../../../core/backendError';
 import { emit } from '@tauri-apps/api/event';
 
 /**
@@ -93,7 +94,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const notes = await notebookService.listNotes(groupId, category, search);
       set({ notes, loading: false });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: localizeBackendError(e), loading: false });
     }
   },
 
@@ -103,7 +104,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const detail = await notebookService.getNote(id);
       set({ selectedNote: detail, loading: false });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: localizeBackendError(e), loading: false });
     }
   },
 
@@ -123,7 +124,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       }
       return note;
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: localizeBackendError(e), loading: false });
       return null;
     }
   },
@@ -147,7 +148,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       }
       return note;
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: localizeBackendError(e), loading: false });
       return null;
     }
   },
@@ -163,7 +164,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       await st.loadGroups().catch(() => {});
       await st.loadNotes(st.activeGroupId || undefined, st.activeCategory || undefined, st.searchQuery || undefined).catch(() => {});
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: localizeBackendError(e), loading: false });
     }
   },
 
@@ -173,7 +174,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const notes = get().notes.map((n) => (n.id === note.id ? note : n));
       set({ notes });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -183,7 +184,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const notes = await notebookService.searchNotes(query);
       set({ notes, loading: false });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: localizeBackendError(e), loading: false });
     }
   },
 
@@ -192,7 +193,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const categories = await notebookService.listNoteCategoriesByGroup(groupId);
       set({ categories: categories || [] });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -210,7 +211,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       }));
       set({ categories });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -226,7 +227,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       set({ categories });
       return cat;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
       return null;
     }
   },
@@ -238,7 +239,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       set({ categories });
       return cat;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
       return null;
     }
   },
@@ -263,7 +264,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
         set({ categories, notes });
       }
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -272,7 +273,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const tags = await notebookService.listNoteTagsByGroup(groupId);
       set({ tags: tags || [] });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -288,7 +289,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       set({ tags });
       return tag;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
       return null;
     }
   },
@@ -300,7 +301,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       set({ tags });
       return tag;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
       return null;
     }
   },
@@ -319,7 +320,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const newActive = get().activeTag === removedTag?.name ? '' : get().activeTag;
       set({ tags, notes, activeTag: newActive });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -329,7 +330,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
     try {
       await notebookService.linkCommandToNote({ noteId, commandId, context });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -338,7 +339,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const linkedCommands = await notebookService.getLinkedCommands(noteId);
       set({ linkedCommands: linkedCommands || [] });
     } catch (e) {
-      set({ error: String(e), linkedCommands: [] });
+      set({ error: localizeBackendError(e), linkedCommands: [] });
     }
   },
 
@@ -347,7 +348,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const linkedNotes = await notebookService.getLinkedNotes(commandId);
       set({ linkedNotes: linkedNotes || [] });
     } catch (e) {
-      set({ error: String(e), linkedNotes: [] });
+      set({ error: localizeBackendError(e), linkedNotes: [] });
     }
   },
 
@@ -361,7 +362,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       const groups = await notebookService.listNoteGroups();
       set({ groups: groups || [] });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -372,7 +373,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       set({ groups });
       return group;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
       return null;
     }
   },
@@ -384,7 +385,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       set({ groups });
       return group;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
       return null;
     }
   },
@@ -409,7 +410,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
         set({ selectedNote: null });
       }
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 }));

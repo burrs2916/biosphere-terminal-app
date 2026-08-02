@@ -55,7 +55,7 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
     if (!ready) return;
     if (!wsUrl || (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://'))) {
       setConnectionState('error');
-      setErrorMessage('Invalid WebSocket URL');
+      setErrorMessage(t('vnc_invalid_ws_url'));
       return;
     }
 
@@ -67,7 +67,7 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
     try {
       if (!containerRef.current) {
         setConnectionState('error');
-        setErrorMessage('Container not ready');
+        setErrorMessage(t('vnc_container_not_ready'));
         return;
       }
 
@@ -134,9 +134,9 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
           authFailedRef.current = true;
           const reason = e.detail?.reason || '';
           if (reason) {
-            setErrorMessage(`Authentication failed: ${reason}`);
+            setErrorMessage(`${t('vnc_auth_failed')}: ${reason}`);
           } else {
-            setErrorMessage('VNC authentication failed. Please check your password.');
+            setErrorMessage(t('vnc_auth_failed_password_hint'));
           }
           setConnectionState('error');
         }

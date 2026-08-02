@@ -38,6 +38,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { listConnections, saveConnection, testConnection } from '../../../core/services/connection.service';
 import { useNotify } from '../../../core/notification';
+import { localizeBackendError } from '../../../core/backendError';
 import type { ConnectionConfig, SshConnectionInfo } from '../../../proto';
 import { generateId } from '../../../core/utils';
 
@@ -82,7 +83,7 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
 
   useEffect(() => {
     if (open) {
-      listConnections().then(setConnections).catch((e) => notify(String(e)));
+      listConnections().then(setConnections).catch((e) => notify(localizeBackendError(e)));
       setMode('main');
       setTestState('idle');
       setTestMsg('');
@@ -133,10 +134,10 @@ export function ConnectionPicker({ open, onConnect, onClose }: ConnectionPickerP
     try {
       const msg = await testConnection(ssh);
       setTestState('success');
-      setTestMsg(msg);
+      setTestMsg(localizeBackendError(msg));
     } catch (e) {
       setTestState('error');
-      setTestMsg(String(e));
+      setTestMsg(localizeBackendError(e));
     }
   };
 

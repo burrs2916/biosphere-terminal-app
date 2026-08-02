@@ -44,6 +44,7 @@ import {
 } from '@phosphor-icons/react';
 import { listConnections, saveConnection, deleteConnection, testConnection } from '../../../core/services/connection.service';
 import { useNotify } from '../../../core/notification';
+import { localizeBackendError } from '../../../core/backendError';
 import type { ConnectionConfig, SshConnectionInfo } from '../../../proto';
 import { generateId } from '../../../core/utils';
 import { useTranslation } from 'react-i18next';
@@ -118,7 +119,7 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
   const load = () => {
     listConnections()
       .then((list) => { setConnections(list); setCount(list.length); })
-      .catch((e) => notify(String(e)));
+      .catch((e) => notify(localizeBackendError(e)));
   };
 
   useEffect(() => { load(); }, []);
@@ -200,7 +201,7 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
       notify(t('connection.cloned', { name: cloned.name }));
       load();
     } catch (err) {
-      notify(String(err));
+      notify(localizeBackendError(err));
     }
   };
 
@@ -249,7 +250,7 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
       setEditing(null);
       load();
     } catch (err) {
-      setSaveError(String(err));
+      setSaveError(localizeBackendError(err));
     } finally {
       setSaving(false);
     }
@@ -284,7 +285,7 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
       load();
       notify(t('connection.delete_selected') + ` (${ids.length})`);
     } catch (err) {
-      notify(String(err));
+      notify(localizeBackendError(err));
     }
   };
 
@@ -307,10 +308,10 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
     try {
       const msg = await testConnection(sshInfo);
       console.log('[TEST-CONN][frontend] list-item test SUCCESS conn=', conn.id, '->', msg);
-      setTestResults((prev) => ({ ...prev, [conn.id]: { state: 'success', msg } }));
+      setTestResults((prev) => ({ ...prev, [conn.id]: { state: 'success', msg: localizeBackendError(msg) } }));
     } catch (err) {
       console.warn('[TEST-CONN][frontend] list-item test ERROR conn=', conn.id, '->', err);
-      setTestResults((prev) => ({ ...prev, [conn.id]: { state: 'error', msg: String(err) } }));
+      setTestResults((prev) => ({ ...prev, [conn.id]: { state: 'error', msg: localizeBackendError(err) } }));
     }
   };
 
@@ -764,11 +765,11 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
                     const msg = await testConnection(ssh);
                     console.log('[TEST-CONN][frontend] dialog handler SUCCESS ->', msg);
                     setTestState('success');
-                    setTestMsg(msg);
+                    setTestMsg(localizeBackendError(msg));
                   } catch (e) {
                     console.warn('[TEST-CONN][frontend] dialog handler ERROR ->', e);
                     setTestState('error');
-                    setTestMsg(String(e));
+                    setTestMsg(localizeBackendError(e));
                   }
                 }}
                 disabled={!ssh.host || testState === 'testing'}

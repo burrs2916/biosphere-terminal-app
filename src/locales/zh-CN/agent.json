@@ -102,7 +102,8 @@
     "cancel": "取消",
     "delete": "删除",
     "delete_confirm_title": "删除对话",
-    "delete_confirm_message": "确定要删除此对话吗？所有消息将永久丢失。"
+    "delete_confirm_message": "确定要删除此对话吗？所有消息将永久丢失。",
+    "message_save_failed": "消息保存失败"
   },
   "config": {
     "label": "配置",

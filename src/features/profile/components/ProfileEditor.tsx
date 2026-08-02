@@ -33,6 +33,7 @@ import type { TerminalProfile, AppearanceConfig } from '../../../proto';
 import { generateId } from '../../../core/utils';
 import { DEFAULT_APPEARANCE } from '../../../engine';
 import { useTranslation } from 'react-i18next';
+import { localizeBackendError } from '../../../core/backendError';
 
 export function ProfileEditor() {
   const { t } = useTranslation('terminal');
@@ -45,7 +46,7 @@ export function ProfileEditor() {
   const notify = useNotify().notify;
 
   const load = () => {
-    listProfiles().then(setProfiles).catch((e) => notify(String(e)));
+    listProfiles().then(setProfiles).catch((e) => notify(localizeBackendError(e)));
   };
 
   useEffect(() => { load(); }, []);

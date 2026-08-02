@@ -96,7 +96,8 @@
     "icon": "Icon",
     "color": "Color",
     "default_name": "New Group",
-    "uncategorized": "Uncategorized"
+    "uncategorized": "Uncategorized",
+    "target_not_found": "The target group does not exist."
   },
   "category": {
     "title": "Category",

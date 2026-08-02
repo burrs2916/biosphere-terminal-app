@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { TerminalSession, PtyConfig } from '../proto';
 import * as terminalService from '../core/services/terminal.service';
 import * as sessionService from '../core/services/session.service';
+import { localizeBackendError } from '../core/backendError';
 
 interface TerminalState {
   sessions: Map<string, TerminalSession>;
@@ -25,7 +26,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     try {
       await terminalService.spawnTerminal(sessionId, config);
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -39,7 +40,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
         activeSessionId: get().activeSessionId === sessionId ? null : get().activeSessionId,
       });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -57,7 +58,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       }
       set({ sessions, loading: false });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: localizeBackendError(e), loading: false });
     }
   },
 }));

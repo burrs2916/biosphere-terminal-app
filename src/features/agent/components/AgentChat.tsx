@@ -18,6 +18,7 @@ import { runAgent, saveMessage, stopAgent, respondPermission } from '../../../co
 import { useTheme } from '@mui/material/styles';
 import { ChatMessagesArea, ChatInputArea, type FileAttachment } from '../../../components/chat/ChatComponents';
 import type { ToolCallDisplay } from '../../../components/chat/ChatComponents';
+import { localizeBackendError } from '../../../core/backendError';
 
 interface StreamChunk { conversationId: string; chunk: string }
 interface StreamDone { conversationId: string; response: string }
@@ -123,7 +124,7 @@ export function AgentChat() {
               if (firstUserMsg) {
                 const autoTitle = firstUserMsg.content.replace(/\[(?:附件|Attachment):.*?\]\s*/g, '').trim().slice(0, 40);
                 if (autoTitle) {
-                  updateConversationTitle(activeConversationId, autoTitle).catch((e) => notify(String(e)));
+                  updateConversationTitle(activeConversationId, autoTitle).catch((e) => notify(localizeBackendError(e)));
                 }
               }
             }
@@ -231,7 +232,7 @@ export function AgentChat() {
     setToolCalls([]);
     toolCallCounterRef.current = 0;
 
-    try { await saveMessage(userMsg); } catch (err) { console.error('AgentChat: failed to save message', err); notify('Failed to save message'); }
+    try { await saveMessage(userMsg); } catch (err) { console.error('AgentChat: failed to save message', err); notify(t('chat.message_save_failed')); }
 
     const assistantMsgId = crypto.randomUUID();
     streamingMsgIdRef.current = assistantMsgId;
@@ -251,7 +252,7 @@ export function AgentChat() {
     try {
       await runAgent(activeAgentId, input.trim(), activeConversationId);
     } catch (e) {
-      updateMessage(assistantMsgId, `❌ ${String(e)}`);
+      updateMessage(assistantMsgId, `❌ ${localizeBackendError(e)}`);
       setStreamingContent('');
       setLoading(false);
       streamingMsgIdRef.current = null;
@@ -312,7 +313,7 @@ export function AgentChat() {
     try {
       await runAgent(activeAgentId, prevUserMsg.content.replace(/\[(?:附件|Attachment):.*?\]\s*/g, '').trim(), activeConversationId);
     } catch (e) {
-      updateMessage(newAssistantMsgId, `❌ ${String(e)}`);
+      updateMessage(newAssistantMsgId, `❌ ${localizeBackendError(e)}`);
       setStreamingContent('');
       setLoading(false);
       streamingMsgIdRef.current = null;

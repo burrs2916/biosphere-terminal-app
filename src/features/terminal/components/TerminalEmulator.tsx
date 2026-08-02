@@ -13,6 +13,7 @@ import { parseCommand } from '../../../core/services/command.service';
 import { getDefaultProfile } from '../../../core/services/profile.service';
 import { useSettingsStore, getThemeAppearance } from '../../../engine';
 import { useNotify } from '../../../core/notification';
+import { localizeBackendError } from '../../../core/backendError';
 import { useTranslation } from 'react-i18next';
 import type { AppearanceConfig } from '../../../proto';
 import '@xterm/xterm/css/xterm.css';
@@ -99,8 +100,8 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       const firstLine = text.split('\n').map((l) => l.trim()).find(Boolean);
       if (firstLine) {
         getTerminalCwd(sid).then((cwd) => {
-          parseCommand(firstLine, sid, cwd ?? undefined).catch((e) => notify(String(e)));
-        }).catch((e) => notify(String(e)));
+          parseCommand(firstLine, sid, cwd ?? undefined).catch((e) => notify(localizeBackendError(e)));
+        }).catch((e) => notify(localizeBackendError(e)));
       }
     };
 
@@ -116,8 +117,8 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
                 console.error('TerminalEmulator: JSON.parse profile config from listProfiles', err);
               }
             }
-          }).catch((e) => notify(String(e)));
-        }).catch((e) => notify(String(e)));
+          }).catch((e) => notify(localizeBackendError(e)));
+        }).catch((e) => notify(localizeBackendError(e)));
       } else {
           getDefaultProfile().then((profile) => {
           if (profile) {
@@ -127,7 +128,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
               console.error('TerminalEmulator: JSON.parse default profile config', err);
             }
           }
-        }).catch((e) => notify(String(e)));
+        }).catch((e) => notify(localizeBackendError(e)));
       }
     }, [profileId]);
 
@@ -324,7 +325,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         if (mod && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
           const selection = terminal.getSelection();
           if (selection) {
-            copyText(selection).catch((e) => notify(String(e)));
+            copyText(selection).catch((e) => notify(localizeBackendError(e)));
           }
           return false;
         }
@@ -334,7 +335,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
               terminal.paste(text);
               recordPastedCommand(text, sessionId);
             }
-          }).catch((e) => notify(String(e)));
+          }).catch((e) => notify(localizeBackendError(e)));
           return false;
         }
         return true;
@@ -364,7 +365,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         if (rect.width === 0 || rect.height === 0) return;
         try {
           fit.fit();
-          resizeTerminal(sessionId, term.rows, term.cols).catch((e) => notify(String(e)));
+          resizeTerminal(sessionId, term.rows, term.cols).catch((e) => notify(localizeBackendError(e)));
         } catch (err) {
           console.warn('TerminalEmulator: initial fit() failed', err);
         }
@@ -382,7 +383,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         selectionChangeOffRef.current = terminal.onSelectionChange(() => {
           const selection = terminal.getSelection();
           if (selection) {
-            copyText(selection).catch((e) => notify(String(e)));
+            copyText(selection).catch((e) => notify(localizeBackendError(e)));
           }
         });
       }
@@ -396,7 +397,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
                 terminal.paste(text);
                 recordPastedCommand(text, sessionId);
               }
-            }).catch((e) => notify(String(e)));
+            }).catch((e) => notify(localizeBackendError(e)));
           }
         };
         containerRef.current.addEventListener('mousedown', handler);
@@ -415,11 +416,11 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         }
       }).then((unlisten) => {
         dragDropUnlistenRef.current = unlisten;
-      }).catch((e) => notify(String(e)));
+      }).catch((e) => notify(localizeBackendError(e)));
 
       terminal.onData((data) => {
         const bytes = textEncoderRef.current.encode(data);
-        writeToTerminal(sessionId, Array.from(bytes)).catch((e) => notify(String(e)));
+        writeToTerminal(sessionId, Array.from(bytes)).catch((e) => notify(localizeBackendError(e)));
 
         if (data === '\r') {
           // 从终端 buffer 读取实际行内容，比 lineBufferRef 更可靠
@@ -434,8 +435,8 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
           if (cmd) {
             lastCommandRef.current = cmd;
             getTerminalCwd(sessionId).then((cwd) => {
-              parseCommand(cmd, sessionId, cwd ?? undefined).catch((e) => notify(String(e)));
-            }).catch((e) => notify(String(e)));
+              parseCommand(cmd, sessionId, cwd ?? undefined).catch((e) => notify(localizeBackendError(e)));
+            }).catch((e) => notify(localizeBackendError(e)));
           }
           lineBufferRef.current = '';
         } else if (data === '\x7f') {
@@ -468,7 +469,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       });
 
       resizeOffRef.current = terminal.onResize(({ cols, rows }) => {
-        resizeTerminal(sessionId, rows, cols).catch((e) => notify(String(e)));
+        resizeTerminal(sessionId, rows, cols).catch((e) => notify(localizeBackendError(e)));
       });
 
       terminal.onTitleChange((title) => {
@@ -499,7 +500,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
               command: lastCommandRef.current,
               exitCode: event.payload.exit_code,
               sessionId,
-            }).catch((e) => notify(String(e)));
+            }).catch((e) => notify(localizeBackendError(e)));
           }
           terminal.write(`\r\n\x1b[90m${t('output.process_exited')}\x1b[0m\r\n`);
           onExit?.(sessionId);
@@ -575,7 +576,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         selectionChangeOffRef.current = terminalRef.current.onSelectionChange(() => {
           const selection = terminalRef.current?.getSelection();
           if (selection) {
-            copyText(selection).catch((e) => notify(String(e)));
+            copyText(selection).catch((e) => notify(localizeBackendError(e)));
           }
         });
       }
@@ -596,7 +597,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
                 terminalRef.current?.paste(text);
                 recordPastedCommand(text, sessionId);
               }
-            }).catch((e) => notify(String(e)));
+            }).catch((e) => notify(localizeBackendError(e)));
           }
         };
         containerRef.current.addEventListener('mousedown', handler);
@@ -625,7 +626,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
                 fit.fit();
                 const cols = term.cols;
                 const rows = term.rows;
-                resizeTerminal(sessionId, rows, cols).catch((e) => notify(String(e)));
+                resizeTerminal(sessionId, rows, cols).catch((e) => notify(localizeBackendError(e)));
                 // Ensure terminal regains focus when becoming visible
                 term.focus();
               } catch (err) {

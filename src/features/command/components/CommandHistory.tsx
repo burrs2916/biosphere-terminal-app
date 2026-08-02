@@ -58,6 +58,7 @@ import { listen } from '@tauri-apps/api/event';
 import { IconRenderer } from '../../notebook/components/IconRenderer';
 import type { CommandHistoryEntry, LinkedNoteInfo } from '../../../proto/command';
 import type { NoteGroupDto, NoteDto } from '../../../proto/notebook';
+import { localizeBackendError } from '../../../core/backendError';
 
 type ActiveFilter = 'all' | 'unsaved' | 'saved' | 'success' | 'failed';
 type TimeFilter = 'all' | 'today' | 'week' | 'month';
@@ -261,7 +262,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
       setSelectMode(false);
       loadHistory();
     } catch (err) {
-      setSnackbar({ open: true, message: String(err), severity: 'error' });
+      setSnackbar({ open: true, message: localizeBackendError(err), severity: 'error' });
     }
   };
 
@@ -305,7 +306,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
       setExpandedCommands((prev) => new Set(prev).add(group.key));
       loadHistory();
     } catch (err) {
-      setSnackbar({ open: true, message: String(err), severity: 'error' });
+      setSnackbar({ open: true, message: localizeBackendError(err), severity: 'error' });
     }
   };
 
@@ -321,7 +322,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
     setSaveMode('new');
     setSelectedExistingNoteId('');
     setMatchedNotes([]);
-    listNoteGroups().then(setGroups).catch((e) => notify(String(e)));
+    listNoteGroups().then(setGroups).catch((e) => notify(localizeBackendError(e)));
     setSaveDialogOpen(true);
 
     try {
@@ -337,7 +338,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
     setNewNoteGroupId(gid);
     setNewNoteCategory('command');
     if (gid) {
-      listNoteCategoriesByGroup(gid).then(setCategories).catch((e) => notify(String(e)));
+      listNoteCategoriesByGroup(gid).then(setCategories).catch((e) => notify(localizeBackendError(e)));
     } else {
       setCategories([]);
     }
@@ -384,7 +385,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
       loadHistory();
     } catch (err) {
       console.error('Save to note failed:', err);
-      setSnackbar({ open: true, message: String(err), severity: 'error' });
+      setSnackbar({ open: true, message: localizeBackendError(err), severity: 'error' });
     }
   };
 

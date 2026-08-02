@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { ProviderDto, EndpointDto, ModelDto, AgentDto, ConversationDto, MessageDto } from '../../../proto/agent';
 import * as agentService from '../../../core/services/agent.service';
+import { localizeBackendError } from '../../../core/backendError';
 
 function genId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -68,7 +69,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const providers = await agentService.listProviders();
       set({ providers, loading: false, error: null });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: localizeBackendError(e), loading: false });
     }
   },
 
@@ -77,7 +78,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       await agentService.saveProvider(provider);
       await get().loadProviders();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -88,7 +89,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       await get().loadEndpoints();
       await get().loadModels();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -97,7 +98,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const endpoints = await agentService.listEndpoints();
       set({ endpoints, error: null });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -106,7 +107,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const endpoints = await agentService.listEndpointsByProvider(providerId);
       set({ endpoints, error: null });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -115,7 +116,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       await agentService.saveEndpoint(endpoint);
       await get().loadEndpoints();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -125,7 +126,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       await get().loadEndpoints();
       await get().loadModels();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -134,7 +135,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const models = await agentService.listModels();
       set({ models, error: null });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -143,7 +144,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const models = await agentService.listModelsByEndpoint(endpointId);
       set({ models, error: null });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -152,7 +153,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       await agentService.saveModel(model);
       await get().loadModels();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -161,7 +162,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       await agentService.deleteModel(id);
       await get().loadModels();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -187,7 +188,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const agents = await agentService.listAgents();
       set({ agents, loading: false, error: null });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: localizeBackendError(e), loading: false });
     }
   },
 
@@ -196,7 +197,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       await agentService.saveAgent(agent);
       await get().loadAgents();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -205,7 +206,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       await agentService.deleteAgent(id);
       await get().loadAgents();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -214,7 +215,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const conversations = await agentService.listConversations(agentId);
       set({ conversations, error: null });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -225,7 +226,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       set({ conversations, activeConversationId: conv.id });
       return conv;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
       return null;
     }
   },
@@ -237,7 +238,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const activeConversationId = get().activeConversationId === id ? null : get().activeConversationId;
       set({ conversations, activeConversationId, messages: [] });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -247,7 +248,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const conversations = get().conversations.map((c) => c.id === id ? { ...c, title } : c);
       set({ conversations });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 
@@ -256,7 +257,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const messages = await agentService.listMessages(conversationId);
       set({ messages, error: null });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: localizeBackendError(e) });
     }
   },
 

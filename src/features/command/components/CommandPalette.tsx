@@ -26,6 +26,7 @@ import {
 } from '../../../core/services/command.service';
 import { useNotify } from '../../../core/notification';
 import type { CommandHistoryEntry, ParsedCommandResult } from '../../../proto';
+import { localizeBackendError } from '../../../core/backendError';
 
 interface CommandPaletteProps {
   open: boolean;
@@ -59,7 +60,7 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
       return;
     }
     const timer = setTimeout(() => {
-      searchCommandHistory(query).then(setHistory).catch((e) => notify(String(e)));
+      searchCommandHistory(query).then(setHistory).catch((e) => notify(localizeBackendError(e)));
       parseCommandOnly(query).then(setParsed).catch(() => setParsed(null));
     }, 200);
     return () => clearTimeout(timer);
