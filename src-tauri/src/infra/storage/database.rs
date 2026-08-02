@@ -68,6 +68,15 @@ impl Database {
         let db = Database {
             conn: Mutex::new(conn),
         };
+        // Defensive: explicitly disable FK enforcement before initialize/migrate.
+        // A fresh rusqlite connection defaults to FK OFF, but this guard makes the
+        // invariant explicit and bulletproof — any future code path that flips FK
+        // ON earlier (or a stale binary that did so) cannot break migrate().
+        // FK is re-enabled at the end of open() so runtime DML is still enforced.
+        {
+            let conn = db.conn.lock().map_err(|e| Error::Internal(format!("DB lock poisoned: {}", e)))?;
+            conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        }
         db.initialize()?;
         db.migrate()?;
         // 迁移完成后才开启 FK 强制，避免迁移中的 DROP TABLE 等操作被 FK 拦截
