@@ -9,7 +9,6 @@ import {
 import { listen } from '@tauri-apps/api/event';
 import { useNotebookStore } from '../store/notebookStore';
 import { NoteEditor } from './NoteEditor';
-import { BacklinksPanel } from './BacklinksPanel';
 import { NoteListItem, NoteSearchBar } from './NoteListItem';
 import { IconRenderer } from './IconRenderer';
 import { getNote } from '../../../core/services/notebook.service';
@@ -134,13 +133,6 @@ export function CategoryNotesPage() {
     if (selectedNote?.id === noteId) setSelectedNote(null);
   }, [deleteNote, selectedNote]);
 
-  // 反链/出链点击跳转：拉取目标笔记并切换选中（R6-2）。
-  const handleNavigate = useCallback((id: string) => {
-    getNote(id).then((detail) => {
-      if (detail) setSelectedNote(detail.note);
-    }).catch(() => {});
-  }, []);
-
   const handleTogglePin = useCallback((noteId: string) => {
     togglePin(noteId);
   }, [togglePin]);
@@ -253,8 +245,6 @@ export function CategoryNotesPage() {
             defaultCategory={categoryName}
           />
         </Box>
-
-        <BacklinksPanel noteId={selectedNote?.id ?? null} groups={groups} onNavigate={handleNavigate} />
       </Box>
     </Box>
   );

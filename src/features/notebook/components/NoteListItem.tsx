@@ -91,6 +91,10 @@ export function NoteListItem({ note, selected, onClick, onTogglePin, onDelete, s
         </ListItemIcon>
         <ListItemText
           primary={note.title || t('notebook.note_title')}
+          // MUI v6 把 secondaryTypographyProps 迁移到 slotProps：
+          //   slotProps={{ secondary: { component: 'div' } }}
+          // 避免 <Box>(div) 嵌进 <p> 的 validateDOMNesting 警告（stack: NoteListItem:44）。
+          // Box 内部 Typography 都用 component="span"/"div"，整体形成合法 div > div + span 结构。
           secondary={
             <Box>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
@@ -126,6 +130,7 @@ export function NoteListItem({ note, selected, onClick, onTogglePin, onDelete, s
           }
           slotProps={{
             primary: { noWrap: true, sx: { fontSize: 12, fontWeight: note.isPinned ? 600 : 400 } },
+            secondary: { component: 'div' },
           }}
         />
         {showMenu && (

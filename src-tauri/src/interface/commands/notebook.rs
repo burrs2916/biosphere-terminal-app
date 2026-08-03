@@ -2,7 +2,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::app::notebook_service::{NotebookService, NoteLinks};
+use crate::app::notebook_service::{NotebookService, CategoryResetInfo};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,14 +162,6 @@ pub fn get_note(
 }
 
 #[tauri::command]
-pub fn get_note_links(
-    service: State<'_, Arc<NotebookService>>,
-    id: String,
-) -> Result<NoteLinks, String> {
-    service.get_note_links(&id)
-}
-
-#[tauri::command]
 pub fn create_note(
     service: State<'_, Arc<NotebookService>>,
     input: CreateNoteInput,
@@ -184,12 +176,24 @@ pub fn create_note(
     Ok(to_note_dto(&note))
 }
 
+/// `update_note` 的返回类型：把 note 本体 + 切组时 category 自动重置的标记打包。
+/// 之前 `update_note` 直接返 `NoteDto`，前端无法得知"切组时后端是否对 category 做了重置"。
+/// 新类型让 NoteEditor 在收到 `category_reset` 时 toast 提示用户。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateNoteResultDto {
+    pub note: NoteDto,
+    /// Some(...) 表示后端在切组时把旧 category 强制重置为目标组默认 uncategorized；
+    /// None 表示无重置（未切组 / 同组 / category 本就空 / 切组后仍存在）。
+    pub category_reset: Option<CategoryResetInfo>,
+}
+
 #[tauri::command]
 pub fn update_note(
     service: State<'_, Arc<NotebookService>>,
     input: UpdateNoteInput,
-) -> Result<NoteDto, String> {
-    let note = service.update_note(
+) -> Result<UpdateNoteResultDto, String> {
+    let (note, category_reset) = service.update_note_with_outcome(
         &input.id,
         &input.title,
         &input.content,
@@ -197,7 +201,10 @@ pub fn update_note(
         &input.category,
         input.tags,
     )?;
-    Ok(to_note_dto(&note))
+    Ok(UpdateNoteResultDto {
+        note: to_note_dto(&note),
+        category_reset,
+    })
 }
 
 #[tauri::command]

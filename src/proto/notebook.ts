@@ -17,18 +17,6 @@ export interface NoteDetailDto {
   content: string;
 }
 
-export interface NoteLinkItem {
-  id: string;
-  title: string;
-  groupId: string;
-  snippet: string;
-}
-
-export interface NoteLinks {
-  backlinks: NoteLinkItem[];
-  outgoing: NoteLinkItem[];
-}
-
 export interface CreateNoteInput {
   title: string;
   content: string;

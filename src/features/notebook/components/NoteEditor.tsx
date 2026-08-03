@@ -49,6 +49,7 @@ import { useNotify } from '../../../core/notification';
 import { getNote, unlinkCommandNote } from '../../../core/services/notebook.service';
 import { diffLines, diffStats } from '../utils/textDiff';
 import { registerNotebookFlush } from '../utils/notebookFlush';
+import { sanitizePastedText, applySanitizedPaste } from '../utils/contentSanitizer';
 import { localizeBackendError } from '../../../core/backendError';
 
 const lowlight = createLowlight(common);
@@ -151,6 +152,14 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
   const tagLibrary = (storeTags || []).filter(
     (tg) => tg.groupId === groupId && !tags.some((t) => t.toLowerCase() === tg.name.toLowerCase()),
   );
+  // R27：分类下拉按 sortOrder 升序，确保「默认分类」始终在前、用户新分类按创建顺序往后追加。
+  // 同时派生 isUnknownCategory：分组切换后旧分类不在新分组时不再默默清空，而是在 Select 中显示
+  // 「未识别：原分类名」灰条，并允许用户一键重置——避免数据丢失的体感（之前是 group 一切换分类就被静默吞）。
+  const sortedCategories = useMemo(
+    () => [...categories].sort((a, b) => a.sortOrder - b.sortOrder),
+    [categories],
+  );
+  const isUnknownCategory = !!category && !categories.some((c) => c.name === category);
   const [initialContent, setInitialContent] = useState('');
   const [aiOptimizing, setAiOptimizing] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
@@ -165,6 +174,8 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
   const [aiMenuAnchor, setAiMenuAnchor] = useState<null | HTMLElement>(null);
   const [aiResultJson, setAiResultJson] = useState<unknown | null>(null);
   const [aiSuggestedTags, setAiSuggestedTags] = useState<string[]>([]);
+  // D：未保存关闭二次确认弹窗开关。dirty=true 且用户点 X 时打开。
+  const [confirmCloseOpen, setConfirmCloseOpen] = useState(false);
   const aiUndoRef = useRef<unknown>(null);
   // 跟踪 AI 生成期间注册的 agent-chunk/done/error 事件订阅，便于在编辑器卸载
   // （切换笔记 / 关窗）时统一退订，避免流式生成中途切走导致 Tauri 事件订阅泄漏、
@@ -431,6 +442,26 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
       attributes: {
         class: 'note-editor-content',
       },
+      // R26：iTerm2 拖拽文件夹到终端时会粘贴进装饰元数据（`++==📁 ...==++` + `🕐 时间戳`），
+      // 这些噪声会让笔记正文变得难看。在 Tiptap 接管前先清洗：命中规则则用 insertContentAt
+      // 写入清理后文本并 notify 提示「已清理 N 行装饰」；未命中则回退到 Tiptap 默认 paste。
+      handlePaste: (_view, event) => {
+        const text = event.clipboardData?.getData('text/plain');
+        if (!text) return false;
+        const result = sanitizePastedText(text);
+        if (result.removedLines === 0) return false;
+        const ok = applySanitizedPaste(editor, result);
+        if (ok && result.removedLines > 0) {
+          notify(
+            t('editor.paste_cleaned', { count: result.removedLines })
+              || `已清理 ${result.removedLines} 行终端装饰（iTerm2 拖拽注释/时间戳）`,
+            'success',
+          );
+        }
+        // 阻止 Tiptap 默认 paste 行为，避免双插入
+        event.preventDefault();
+        return true;
+      },
     },
     onUpdate: ({ editor: ed }) => {
       setInitialContent(ed.getMarkdown());
@@ -469,15 +500,15 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
       // 窗口内被关闭时，卸载兜底会跳过保存、静默丢弃改动（与 handleAutoSave 的 `if (!currentNoteId) return`
       // 口径一致：新笔记未首次保存时 currentNoteId 为 undefined，本守卫仍可避免写入空笔记）。
       if (currentNoteId) {
-        // fire-and-forget：store 的 set 作用于全局 zustand，不会触发已卸载组件告警
-        updateNote({
+        // 卸载兜底：silent=true，组件即将销毁，不显示 categoryReset toast（看起来像幽灵消息）。
+        applyUpdate({
           id: currentNoteId,
           title: resolveTitle(ti),
           content,
           groupId: gid || '',
           category: cat,
           tags: tg,
-        }).catch(() => {});
+        }, { silent: true }).catch(() => {});
       }
     };
   }, [editor, updateNote, t]);
@@ -496,14 +527,15 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
       if (currentNoteId) {
         selfUpdateRef.current = true; // 排除自己的保存回声（R5-5）
         try {
-          await updateNote({
+          // 关窗 flush：silent=true，组件即将销毁，toast 不会显示
+          await applyUpdate({
             id: currentNoteId,
             title: resolveTitle(ti),
             content,
             groupId: gid || '',
             category: cat,
             tags: tg,
-          });
+          }, { silent: true });
           dirtyRef.current = false;
         } catch {
           /* 关窗兜底：保存失败不影响退出 */
@@ -512,6 +544,30 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
     });
     return unregister;
   }, [editor, updateNote, t]);
+
+  // 包装 store.updateNote：拿到后端 categoryReset 后立刻 notify 用户。
+  // 仅在「主流程保存」（handleAutoSave / handleSave）时启用，卸载兜底 / 关窗 flush
+  // 走 fire-and-forget 不显示（组件马上消失，toast 看起来像是"幽灵消息"）。
+  const applyUpdate = useCallback(
+    async (input: { id: string; title: string; content: string; groupId: string; category: string; tags: string[] }, opts?: { silent?: boolean }) => {
+      const result = await updateNote(input);
+      if (!opts?.silent && result?.categoryReset) {
+        const { from, to, targetGroup } = result.categoryReset;
+        // R28 复盘：note.category 在切组后被后端静默重置 → 前端必须把"为什么改了"告诉用户，
+        // 否则用户切到新组看到分类下拉里没有原来选的那项会感觉"被吞了"。
+        notify(
+          t('editor.category_reset_after_group_change', {
+            from,
+            to,
+            group: targetGroup,
+          }) || `分类「${from}」在「${targetGroup}」组不存在，已重置为「${to}」`,
+          'warning',
+        );
+      }
+      return result;
+    },
+    [updateNote, notify, t],
+  );
 
   useEffect(() => {
     if (editor && initialContent !== undefined) {
@@ -537,7 +593,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
     setSaveStatus('saving');
     try {
       selfUpdateRef.current = true; // 标记为自己的保存，回声 notes-changed 时排除（R5-5）
-      await updateNote({
+      await applyUpdate({
         id: currentNoteId,
         title: resolveTitle(edit.title),
         content,
@@ -588,7 +644,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
         }
       } else if (currentNoteId) {
         selfUpdateRef.current = true; // 标记为自己的保存，回声 notes-changed 时排除（R5-5）
-        const result = await updateNote({ id: currentNoteId, title: resolveTitle(title), content, groupId: groupId || '', category, tags });
+        const result = await applyUpdate({ id: currentNoteId, title: resolveTitle(title), content, groupId: groupId || '', category, tags });
         if (result) {
           onSaved?.(currentNoteId);
           dirtyRef.current = false;
@@ -627,14 +683,25 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
   };
 
   const handleCreateCategory = async () => {
-    if (!newCategoryName.trim() || !groupId) return;
-    const result = await createCategory({ name: newCategoryName.trim(), groupId, sortOrder: categories.length });
+    const name = newCategoryName.trim();
+    if (!name || !groupId) return;
+    // 客户端去重：避免对后端幂等语义产生依赖（后端会复用既有行），用户也能立刻知道为什么没新增
+    if (categories.some((c) => c.name.toLowerCase() === name.toLowerCase())) {
+      notify(t('category.duplicate') || `该分组下已存在同名分类「${name}」`, 'warning');
+      return;
+    }
+    const result = await createCategory({ name, groupId, sortOrder: categories.length });
     if (result) {
       setCategory(result.name);
       setNewCategoryName('');
       setShowNewCategoryInput(false);
       // 新建分类并选中的改动需落盘：否则只活在本地 state，外部 notes-changed 重载会静默回退（同 Fix 1）。
       scheduleMetaSave();
+      notify(t('category.create_success') || '分类已创建', 'success');
+    } else {
+      // R23 镜像：创建失败时读取 store.error 并 toast，便于用户定位问题（之前是 silent fail）
+      const err = useNotebookStore.getState().error;
+      notify(err || t('category.create_failed') || '分类创建失败', 'error');
     }
   };
 
@@ -647,11 +714,24 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
     }
   };
 
+  // 取消新建分类：保留为独立 handler，便于在按钮、Esc、关闭图标多入口复用
+  const cancelCreateCategory = () => {
+    setShowNewCategoryInput(false);
+    setNewCategoryName('');
+  };
+
   const handleAddTag = async () => {
     const name = tagInput.trim();
-    if (!name || tags.includes(name)) {
-      setTagInput('');
-      setShowTagInput(false);
+    if (!name) {
+      cancelCreateTag();
+      return;
+    }
+    // 客户端去重 + 反馈：之前是 silent 清空，用户感受不到「我刚按了键」。
+    // B：复盘——既然 store.createTag 走后端幂等（即同名同组不报错），用户更容易在 UI 层就被告知
+    // "已存在"，而不是输入后无反应。
+    if (tags.includes(name)) {
+      notify(t('editor.tag_duplicate', { name }) || `标签「${name}」已存在`, 'warning');
+      cancelCreateTag();
       return;
     }
     setTags([...tags, name]);
@@ -666,19 +746,29 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
       if (!exists) {
         try {
           await createTag({ name, groupId, sortOrder: (storeTags || []).length });
+          notify(t('editor.tag_create_success', { name }) || `标签「${name}」已创建`, 'success');
         } catch (e) {
-          console.error('NoteEditor: register tag failed', e);
+          // B：后端失败 → notify，用户不感知是"标签加上了但没注册到库"还是"全部失败"
+          // （store.addTag 已经在 setTags 时加到本地，所以正文/筛选仍可用，但库内没这条 → 下次新建时不会出现在 tagLibrary 提示里）。
+          notify(
+            (useNotebookStore.getState().error || localizeBackendError(e) || t('editor.tag_create_failed') || '标签注册失败'),
+            'error',
+          );
         }
       }
     }
+  };
+
+  const cancelCreateTag = () => {
+    setShowTagInput(false);
+    setTagInput('');
   };
 
   const handleTagKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       handleAddTag();
     } else if (e.key === 'Escape') {
-      setShowTagInput(false);
-      setTagInput('');
+      cancelCreateTag();
     }
   };
 
@@ -885,24 +975,54 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
         <Typography variant="h6" sx={{ flex: 1, fontSize: 16 }}>
           {isNew ? t('editor.create_title') : t('editor.edit_title')}
         </Typography>
-        {saveStatus === 'unsaved' && (
-          <Typography variant="caption" sx={{ color: 'warning.main', fontSize: 10 }}>
-            {t('editor.unsaved')}
-          </Typography>
-        )}
-        {saveStatus === 'saving' && (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <ArrowsClockwiseIcon size={10} className="spin" />
-            <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
-              {t('editor.saving')}
-            </Typography>
-          </Box>
-        )}
-        {saveStatus === 'saved' && !isNew && (
-          <Typography variant="caption" sx={{ color: 'success.main', fontSize: 10 }}>
-            {t('editor.saved')}
-          </Typography>
-        )}
+        {/*
+          A：常驻保存状态点。10px 灰文字太轻，用户根本注意不到。
+          改为「常驻显示三态点 + 文字」：圆点颜色即状态，旋转动画明示在保存中。
+          - unsaved：橙点（用户改动未落盘）
+          - saving：蓝点 + 旋转图标
+          - saved：绿点 + ✓（仅编辑已存在笔记时显示，新建时无意义）
+        */}
+        <Box
+          role="status"
+          aria-live="polite"
+          data-testid="note-editor-save-status"
+          sx={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 0.5,
+            px: 0.75,
+            py: 0.25,
+            borderRadius: 1,
+            bgcolor: 'action.hover',
+            minWidth: 76,
+            justifyContent: 'center',
+          }}
+        >
+          {saveStatus === 'unsaved' && (
+            <>
+              <Box sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: 'warning.main', boxShadow: '0 0 0 3px rgba(255,167,38,0.18)' }} />
+              <Typography variant="caption" sx={{ fontSize: 10, color: 'warning.main', fontWeight: 600 }}>
+                {t('editor.unsaved')}
+              </Typography>
+            </>
+          )}
+          {saveStatus === 'saving' && (
+            <>
+              <ArrowsClockwiseIcon size={11} className="spin" style={{ color: 'var(--mui-palette-info-main)' }} />
+              <Typography variant="caption" sx={{ fontSize: 10, color: 'info.main', fontWeight: 600 }}>
+                {t('editor.saving')}
+              </Typography>
+            </>
+          )}
+          {saveStatus === 'saved' && !isNew && (
+            <>
+              <CheckIcon size={11} style={{ color: 'var(--mui-palette-success-main)' }} />
+              <Typography variant="caption" sx={{ fontSize: 10, color: 'success.main', fontWeight: 600 }}>
+                {t('editor.saved')}
+              </Typography>
+            </>
+          )}
+        </Box>
         {aiRemoteUpdate && (
           <Box
             role="alert"
@@ -1157,7 +1277,25 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             </MenuItem>
           ))}
         </Menu>
-        <IconButton size="small" onClick={onClose}>
+        <IconButton
+          size="small"
+          onClick={() => {
+            // D：dirty 检查 → 二次确认弹窗
+            // - saveStatus === 'saving'：正在落盘，阻止关闭（避免 abort in-flight IPC）
+            // - saveStatus === 'unsaved' 或 dirtyRef.current：弹确认
+            // - 否则直接关
+            if (saveStatus === 'saving') {
+              notify(t('editor.close_blocked_saving') || '正在保存，请稍候…', 'warning');
+              return;
+            }
+            if (saveStatus === 'unsaved' || dirtyRef.current) {
+              setConfirmCloseOpen(true);
+              return;
+            }
+            onClose();
+          }}
+          aria-label={tCommon('action.close') || 'Close'}
+        >
           <XIcon size={18} />
         </IconButton>
       </Box>
@@ -1165,9 +1303,19 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
       <TextField
         fullWidth
         size="small"
-        label={t('editor.title_label')}
+        label={
+          // I：MUI 自带 required * 在深色主题对比度差且不能本地化，手动渲染红色 *
+          <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
+            <Box component="span" sx={{ color: 'error.main', fontWeight: 700 }}>*</Box>
+            <span>{t('editor.title_label')}</span>
+          </Box>
+        }
+        required
+        placeholder={t('editor.title_placeholder') || '给这条笔记起个名字'}
         value={title}
         onChange={(e) => { setTitle(e.target.value); scheduleMetaSave(); }}
+        // 禁用 MUI 原生 required *（避免双星号）：MUI v6 改用 slotProps.label
+        slotProps={{ inputLabel: { required: false } }}
         sx={{ mb: 1.5, '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
       />
 
@@ -1189,8 +1337,8 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
           )}
         </Box>
       ) : (
-      <Box sx={{ display: 'flex', gap: 1, mb: 1.5 }}>
-        <FormControl size="small" sx={{ flex: 1 }}>
+      <Box sx={{ display: 'flex', gap: 1, mb: 1.5, flexWrap: 'wrap', alignItems: 'center' }}>
+        <FormControl size="small" sx={{ flex: '1 1 140px', minWidth: 140 }}>
           <InputLabel>{t('editor.group_label')}</InputLabel>
           <Select
             value={groupId}
@@ -1198,8 +1346,15 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             onChange={(e) => {
               const newGroupId = e.target.value;
               setGroupId(newGroupId);
-              setCategory('');
+              // R27：不再默默 setCategory('') 清空旧分类。保留 category 不变，让新分区的分类加载完后
+              // 通过 isUnknownCategory 派生值自动呈现「未识别：原分类名」灰条 + 一键重置按钮，
+              // 避免分组切换直接吞掉用户辛苦选好的分类。新分类匹配上时自动恢复正常显示。
               setShowNewCategoryInput(false);
+              setNewCategoryName('');
+              // B：切组时也清空 tag 输入框 + 关闭 tag 输入框（tag 库随 useEffect 重新加载，
+              // 但输入框残留的旧组 tag 名会让用户提交时报"已存在"或脏数据）。
+              setShowTagInput(false);
+              setTagInput('');
               scheduleMetaSave();
               if (newGroupId) {
                 loadCategoriesByGroup(newGroupId);
@@ -1221,7 +1376,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             ))}
           </Select>
         </FormControl>
-        <FormControl size="small" sx={{ flex: 1 }} disabled={!groupId}>
+        <FormControl size="small" sx={{ flex: '1 1 140px', minWidth: 140 }} disabled={!groupId}>
           <InputLabel>{t('editor.category_label')}</InputLabel>
           <Select
             value={category}
@@ -1229,12 +1384,36 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             onChange={(e) => { setCategory(e.target.value); scheduleMetaSave(); }}
             sx={{ borderRadius: 2 }}
             renderValue={(selected) => (
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0, flex: 1 }}>
                 {selected ? (
-                  <>
-                    <TagIcon size={12} />
-                    <Typography variant="body2">{selected}</Typography>
-                  </>
+                  // R27：当前分类不属于新分组 → 显示「未识别」灰条 + 警告色 + 一键重置按钮，
+                  // 替代之前默默 setCategory('') 让数据丢失的体感
+                  isUnknownCategory ? (
+                    <>
+                      <WarningCircleIcon size={12} color="#FF8A80" />
+                      <Typography
+                        variant="body2"
+                        sx={{ color: 'warning.main', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}
+                        noWrap
+                      >
+                        {t('editor.category_unknown', { name: selected }) || `未识别：${selected}`}
+                      </Typography>
+                      <Tooltip title={tCommon('action.cancel') || ''}>
+                        <IconButton
+                          size="small"
+                          onClick={(e) => { e.stopPropagation(); setCategory(''); scheduleMetaSave(); }}
+                          sx={{ p: 0.25 }}
+                        >
+                          <XIcon size={12} color="#FF8A80" />
+                        </IconButton>
+                      </Tooltip>
+                    </>
+                  ) : (
+                    <>
+                      <TagIcon size={12} />
+                      <Typography variant="body2" noWrap>{selected}</Typography>
+                    </>
+                  )
                 ) : (
                   <Typography variant="body2" color="text.secondary">{t('category.uncategorized')}</Typography>
                 )}
@@ -1242,48 +1421,37 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             )}
           >
             <MenuItem value="">
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, color: 'text.secondary' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, color: 'text.secondary', flex: 1 }}>
                 <TagIcon size={14} /> {t('category.uncategorized')}
               </Box>
+              {!category && <CheckIcon size={14} color={primaryColor} />}
             </MenuItem>
-            <MenuItem value="" disabled sx={{ opacity: 0.3, minHeight: 24, '&:hover': { bgcolor: 'transparent' } }}>
-              ──────────
-            </MenuItem>
-            {categories.map((cat) => (
-              <MenuItem key={cat.id} value={cat.name} selected={category === cat.name}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            {sortedCategories.map((cat) => (
+              <MenuItem key={cat.id} value={cat.name}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1 }}>
                   <TagIcon size={14} color={cat.isDefault ? primaryColor : mutedColor} />
                   <Typography variant="body2">{cat.name}</Typography>
                   {cat.isDefault && (
                     <Chip label={t('category.default_badge')} size="small" sx={{ height: 16, fontSize: 10, ml: 'auto' }} />
                   )}
                 </Box>
+                {category === cat.name && <CheckIcon size={14} color={primaryColor} />}
               </MenuItem>
             ))}
-            {category && !categories.some((c) => c.name === category) ? (
-              <MenuItem value={category}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  <TagIcon size={14} color="#81C784" />
-                  <Typography variant="body2">{category}</Typography>
-                </Box>
-              </MenuItem>
-            ) : null}
-            {groupId ? (
-              <MenuItem value="" disabled sx={{ opacity: 0.3, minHeight: 24, '&:hover': { bgcolor: 'transparent' } }}>
-                ──────────
-              </MenuItem>
-            ) : null}
-            {groupId ? (
-              <MenuItem value="__add_category__" onClick={() => { setShowNewCategoryInput(true); setNewCategoryName(''); }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, color: primaryColor }}>
-                  <PlusIcon size={14} /> {t('category.add')}
+            {isUnknownCategory ? (
+              <MenuItem value={category} sx={{ opacity: 0.7 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1 }}>
+                  <WarningCircleIcon size={14} color="#FF8A80" />
+                  <Typography variant="body2" sx={{ fontStyle: 'italic' }}>
+                    {t('editor.category_unknown', { name: category }) || `未识别：${category}`}
+                  </Typography>
                 </Box>
               </MenuItem>
             ) : null}
           </Select>
         </FormControl>
-        {showNewCategoryInput && groupId && (
-          <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center', minWidth: 200 }}>
+        {groupId && (showNewCategoryInput ? (
+          <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center', flex: '1 1 220px', minWidth: 220 }}>
             <TextField
               size="small"
               placeholder={t('category.new_name') || ''}
@@ -1299,12 +1467,34 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
               </IconButton>
             </Tooltip>
             <Tooltip title={tCommon('action.cancel')}>
-              <IconButton size="small" onClick={() => { setShowNewCategoryInput(false); setNewCategoryName(''); }}>
+              <IconButton size="small" onClick={cancelCreateCategory}>
                 <XIcon size={16} color={mutedColor} />
               </IconButton>
             </Tooltip>
           </Box>
-        )}
+        ) : (
+          // 独立"添加分类"按钮：把原来埋在分类下拉框最底部的 __add_category__ MenuItem 提到此处，
+          // 入口显眼，与下方"+ 添加标签"按钮、GroupManageDialog 中"添加分类"按钮保持一致 UX。
+          // 用户再也不用记着「去分类下拉框底部翻 separator 才能新建」。
+          <Button
+            size="small"
+            startIcon={<PlusIcon size={14} />}
+            onClick={() => { setShowNewCategoryInput(true); setNewCategoryName(''); }}
+            sx={{
+              flexShrink: 0,
+              fontSize: 12,
+              textTransform: 'none',
+              color: primaryColor,
+              border: '1px dashed',
+              borderColor: `${primaryColor}55`,
+              borderRadius: 2,
+              px: 1.25,
+              '&:hover': { borderColor: primaryColor, bgcolor: `${primaryColor}08` },
+            }}
+          >
+            {t('category.add')}
+          </Button>
+        ))}
       </Box>
       )}
 
@@ -1321,20 +1511,57 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
         {showTagInput ? (
           <Box sx={{ width: '100%' }}>
             {tagLibrary.length > 0 && (
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 0.75 }}>
-                {tagLibrary.map((tg) => (
-                  <Chip
-                    key={tg.id}
-                    label={tg.name}
-                    size="small"
-                    icon={<TagIcon size={12} />}
-                    clickable
-                    onClick={() => {
-                      if (!tags.includes(tg.name)) { setTags([...tags, tg.name]); scheduleMetaSave(); }
-                    }}
-                    sx={{ borderRadius: 1.5, fontSize: 11, cursor: 'pointer', bgcolor: 'rgba(255,255,255,0.06)' }}
-                  />
-                ))}
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 0.75, alignItems: 'center' }}>
+                <Typography
+                  variant="caption"
+                  sx={{ color: 'text.secondary', fontSize: 10, mr: 0.5, userSelect: 'none' }}
+                >
+                  {t('editor.tag_library_hint') || '从库中选取'}
+                </Typography>
+                {tagLibrary.map((tg) => {
+                  const added = tags.includes(tg.name);
+                  return (
+                    <Chip
+                      key={tg.id}
+                      label={added ? tg.name : `+ ${tg.name}`}
+                      size="small"
+                      icon={<TagIcon size={12} />}
+                      clickable
+                      disabled={added}
+                      onClick={() => {
+                        if (added) return;
+                        setTags([...tags, tg.name]);
+                        scheduleMetaSave();
+                      }}
+                      // R30-J：库内 chip 与已选 chip 视觉严格区分。
+                      //  - 已选：实色填充 + 不可点（防重复加）+ 删除 × 在外层 chips 那里
+                      //  - 未选：虚线边框 + 「+」前缀 + 透明背景，提示"点了会添加"
+                      sx={{
+                        borderRadius: 1.5,
+                        fontSize: 11,
+                        cursor: added ? 'default' : 'pointer',
+                        ...(added
+                          ? {
+                              bgcolor: `${primaryColor}22`,
+                              color: primaryColor,
+                              fontWeight: 600,
+                              opacity: 0.85,
+                            }
+                          : {
+                              bgcolor: 'transparent',
+                              color: 'text.secondary',
+                              border: '1px dashed',
+                              borderColor: 'divider',
+                              '&:hover': {
+                                borderColor: primaryColor,
+                                color: primaryColor,
+                                bgcolor: `${primaryColor}08`,
+                              },
+                            }),
+                      }}
+                    />
+                  );
+                })}
               </Box>
             )}
             <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
@@ -1350,12 +1577,13 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
               <IconButton size="small" onClick={handleAddTag} disabled={!tagInput.trim()}>
                 <CheckIcon size={14} color={tagInput.trim() ? primaryColor : mutedColor} />
               </IconButton>
-              <IconButton size="small" onClick={() => { setShowTagInput(false); setTagInput(''); }}>
+              <IconButton size="small" onClick={cancelCreateTag}>
                 <XIcon size={14} color={mutedColor} />
               </IconButton>
             </Box>
           </Box>
         ) : (
+          // B：与「+ 添加分类」按钮风格一致：虚线边框 + 主色 hover，让"创建入口"视觉可识别
           <Button
             size="small"
             startIcon={<PlusIcon size={12} />}
@@ -1364,8 +1592,13 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
               fontSize: 11,
               textTransform: 'none',
               color: primaryColor,
+              border: '1px dashed',
+              borderColor: `${primaryColor}55`,
+              borderRadius: 2,
               minWidth: 'auto',
-              px: 1,
+              px: 1.25,
+              py: 0.25,
+              '&:hover': { borderColor: primaryColor, bgcolor: `${primaryColor}08` },
             }}
           >
             {t('editor.add_tag')}
@@ -1391,7 +1624,11 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
             color: isDark ? '#E6EDF3' : '#1A1A2E',
             fontSize: 14,
             lineHeight: 1.7,
-            '& p.is-editor-empty:first-child::before': {
+            // Tiptap Placeholder 经典写法：':first-of-type' 替代 ':first-child'，避免 Emotion
+            // 在 SSR 时报「pseudo class :first-child potentially unsafe」。Tiptap 结构是
+            // `<div class="ProseMirror"><p></p><p></p>...</div>`，第一个 <p> 等价于「第一个 <p> 类型子元素」，
+            // 行为不变。
+            '& p.is-editor-empty:first-of-type::before': {
               content: 'attr(data-placeholder)',
               float: 'left',
               color: isDark ? '#484F58' : '#9E9E9E',
@@ -1500,7 +1737,12 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
           },
         }}
       >
-        <EditorToolbar editor={editor} onAiAction={handleAiAction} aiOptimizing={aiOptimizing} aiMode={aiMode} />
+        <EditorToolbar
+          editor={editor}
+          onAiAction={handleAiAction}
+          aiOptimizing={aiOptimizing}
+          aiMode={aiMode}
+        />
         <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto', minHeight: 0 }}>
           <EditorContent editor={editor} />
         </Box>
@@ -1609,6 +1851,64 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
         onAddTag={handleAddTagFromAi}
         onAddAllTags={handleAddAllTags}
       />
+
+      {/*
+        D：未保存关闭二次确认。
+        - 「继续编辑」：关弹窗，回到编辑器
+        - 「保存并关闭」：先 await 一遍 handleSave，再关
+        - 「丢弃并关闭」：直接清 dirty + 关（不写盘）
+        用 Dialog 而非 window.confirm，因为前者可本地化、风格统一、不阻塞 React 事件循环。
+      */}
+      <Dialog
+        open={confirmCloseOpen}
+        onClose={() => setConfirmCloseOpen(false)}
+        maxWidth="xs"
+        fullWidth
+        aria-labelledby="confirm-close-title"
+      >
+        <DialogTitle id="confirm-close-title" sx={{ display: 'flex', alignItems: 'center', gap: 1, pb: 1 }}>
+          <WarningCircleIcon size={20} weight="duotone" style={{ color: 'var(--mui-palette-warning-main)' }} />
+          {t('editor.confirm_close_title') || '有未保存的改动'}
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            {t('editor.confirm_close_desc') || '当前笔记有改动尚未保存（2 秒内会自动保存，也可以立刻手动保存）。要如何处理？'}
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ px: 2, pb: 1.5, gap: 0.5, flexWrap: 'wrap' }}>
+          <Button onClick={() => setConfirmCloseOpen(false)} sx={{ textTransform: 'none' }}>
+            {tCommon('action.cancel') || '继续编辑'}
+          </Button>
+          <Button
+            onClick={() => {
+              // 丢弃：清 dirty + 直接关（不走 handleSave，避免把临时脏内容写盘）
+              dirtyRef.current = false;
+              setSaveStatus('saved');
+              setConfirmCloseOpen(false);
+              onClose();
+            }}
+            color="error"
+            sx={{ textTransform: 'none' }}
+          >
+            {t('editor.discard_and_close') || '丢弃并关闭'}
+          </Button>
+          <Button
+            variant="contained"
+            onClick={async () => {
+              setConfirmCloseOpen(false);
+              try {
+                await handleSave();
+              } catch {
+                /* 失败仍关闭：dirty 已落盘失败，留着编辑也救不回（用户已点"保存并关闭"） */
+              }
+              onClose();
+            }}
+            sx={{ textTransform: 'none' }}
+          >
+            {t('editor.save_and_close') || '保存并关闭'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

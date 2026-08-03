@@ -288,11 +288,15 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
     const program = entry.command.trim().split(/\s+/)[0] || 'command';
     try {
       const content = buildNoteContent(group);
+      // R28 复盘：之前硬编码 category='command'，会污染任何分组的分类库（每组都被 ensure_category
+      // 补建一行 'command'），且与用户在保存对话框里选的分类无关。改为：quick save 不带 category，
+      // 让 note.category=''（即「未分类」），用户进编辑器自己选；同时 tags 仍带 [program, 'command']
+      // 维持"按命令找笔记"的工作流能力。
       const note = await createNote({
         title: `${program}: ${entry.command.slice(0, 50)}`,
         content,
         groupId: '',
-        category: 'command',
+        category: '',
         tags: [program, 'command'],
       });
       if (note && entry.id) {
@@ -317,7 +321,10 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
     setSavingGroup(group);
     setNewNoteTitle(`${program}: ${entry.command.slice(0, 50)}`);
     setNewNoteGroupId('');
-    setNewNoteCategory('command');
+    // R28 复盘：之前初始化为 'command' 会让"用户没选 category 直接保存"的笔记也带 'command'。
+    // 改为：初始 = ''，与 UI 「未分类」占位一致；handleConfirmSave 时若仍空就传空串，
+    // 由用户在 NoteEditor 自行选合适的分类。
+    setNewNoteCategory('');
     setCategories([]);
     setSaveMode('new');
     setSelectedExistingNoteId('');
@@ -336,7 +343,9 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
 
   const handleGroupChange = (gid: string) => {
     setNewNoteGroupId(gid);
-    setNewNoteCategory('command');
+    // R28：切组时重置 category 为空（而不是强制 'command'），
+    // 让用户自行选择目标分组下合适的分类，避免脏的 'command' 行扩散。
+    setNewNoteCategory('');
     if (gid) {
       listNoteCategoriesByGroup(gid).then(setCategories).catch((e) => notify(localizeBackendError(e)));
     } else {
@@ -973,8 +982,8 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
                       label={t('history.save_dialog.category')}
                       onChange={(e) => setNewNoteCategory(e.target.value)}
                     >
-                      <MenuItem value="command">
-                        <em>command</em>
+                      <MenuItem value="">
+                        <em>{t('group.uncategorized', { ns: 'notebook' })}</em>
                       </MenuItem>
                       {categories.map((cat) => (
                         <MenuItem key={cat.id} value={cat.name}>

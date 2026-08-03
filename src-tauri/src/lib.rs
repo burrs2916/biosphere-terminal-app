@@ -763,7 +763,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::connection::test_connection,
             interface::commands::notebook::list_notes,
             interface::commands::notebook::get_note,
-            interface::commands::notebook::get_note_links,
             interface::commands::notebook::create_note,
             interface::commands::notebook::update_note,
             interface::commands::notebook::delete_note,

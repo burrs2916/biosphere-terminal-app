@@ -71,25 +71,17 @@ pub struct NotebookService {
     app_handle: AppHandle,
 }
 
-/// 反链/出链条目（R6-2）。
+/// 切组时 category 被自动重置的详情（仅在确实发生重置时返回 Some）。
+/// 之前 `update_note` 切组时若旧 category 不在新组分类列表，会通过
+/// `ensure_category` 在新组"凭空补建"一行非默认分类（is_default=0），
+/// 用户切到新组后会看到自己没建过的分类。本结构体改在源头拦截重置行为，
+/// 让前端 notify 告知用户「分类 X 在新分组不存在，已重置为 uncategorized」。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BacklinkItem {
-    pub id: String,
-    pub title: String,
-    pub group_id: String,
-    /// 命中链接所在行的简短上下文，便于用户定位引用位置。
-    pub snippet: String,
-}
-
-/// 一条笔记的全部双向链接关系（R6-2）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NoteLinks {
-    /// 链接到本文的笔记（反向链接）。
-    pub backlinks: Vec<BacklinkItem>,
-    /// 本文链接到的笔记（出链）。
-    pub outgoing: Vec<BacklinkItem>,
+pub struct CategoryResetInfo {
+    pub from: String,
+    pub to: String,
+    pub target_group: String,
 }
 
 impl NotebookService {
@@ -215,179 +207,6 @@ impl NotebookService {
         }
     }
 
-    /// 抽取 wikilink 前先剥掉围栏代码块（``` 或 ~~~ 包裹），避免代码样例里的
-    /// `[[标题]]` 被误判为双向链接、产生幽灵反链/出链（R18 修复）。真实笔记内容里的
-    /// `[[标题]]` 几乎不会出现在代码块中，跳过它们是更符合直觉的链接解析行为。
-    fn strip_code_blocks(content: &str) -> String {
-        let mut out = String::with_capacity(content.len());
-        let mut in_fence = false;
-        let mut fence_marker: Option<char> = None;
-        for line in content.lines() {
-            let trimmed = line.trim_start();
-            if in_fence {
-                // 结束围栏：与起始标记同字符且至少 3 个（``` 或 ~~~）
-                if let Some(m) = fence_marker {
-                    if (trimmed.starts_with("```") || trimmed.starts_with("~~~"))
-                        && trimmed.chars().take(3).all(|c| c == m)
-                    {
-                        in_fence = false;
-                        fence_marker = None;
-                    }
-                }
-                continue; // 丢弃围栏内所有行
-            }
-            if trimmed.starts_with("```") {
-                in_fence = true;
-                fence_marker = Some('`');
-                continue;
-            } else if trimmed.starts_with("~~~") {
-                in_fence = true;
-                fence_marker = Some('~');
-                continue;
-            }
-            out.push_str(line);
-            out.push('\n');
-        }
-        out
-    }
-
-    /// 在剥掉围栏代码块之后，再剥掉行内代码（单个反引号 `...` 包裹），避免用户把 `[[标题]]`
-    /// 写在行内代码里（如示意文案、正则示例）时被误判为双向链接、产生幽灵反链/出链（R23，扩展 R18）。
-    /// 仅在「同一行内、成对单个反引号之间」做删除；不跨行、不动已剥离的围栏块，降低误伤正文的概率。
-    fn strip_inline_code(content: &str) -> String {
-        let mut out = String::with_capacity(content.len());
-        for line in content.lines() {
-            let mut in_inline = false;
-            for c in line.chars() {
-                if c == '`' {
-                    in_inline = !in_inline;
-                    continue;
-                }
-                if in_inline {
-                    continue;
-                }
-                out.push(c);
-            }
-            out.push('\n');
-        }
-        out
-    }
-
-    /// 解析 markdown 内容中的 `[[标题]]` / `[[标题|别名]]` 维基链接，返回被引用的笔记标题（去重，大小写保留）。
-    /// 约定：链接目标为 `|` 之前的部分；`|` 之后为展示别名。
-    /// 扫描前会先剥离围栏代码块（见 `strip_code_blocks`），再剥行内代码（见 `strip_inline_code`），
-    /// 避免代码里的 `[[x]]` 污染反链/出链。
-    fn extract_wikilink_titles(content: &str) -> Vec<String> {
-        let cleaned = Self::strip_inline_code(&Self::strip_code_blocks(content));
-        let mut titles: Vec<String> = Vec::new();
-        let bytes = cleaned.as_bytes();
-        let mut i = 0;
-        while i + 1 < bytes.len() {
-            // 找到 "[["
-            if bytes[i] == b'[' && bytes[i + 1] == b'[' {
-                let mut j = i + 2;
-                let mut buf = String::new();
-                while j < bytes.len() {
-                    if bytes[j] == b']' && j + 1 < bytes.len() && bytes[j + 1] == b']' {
-                        break;
-                    }
-                    // 遇到换行视为非法（链接不跨行），提前结束
-                    if bytes[j] == b'\n' {
-                        buf.clear();
-                        break;
-                    }
-                    buf.push(bytes[j] as char);
-                    j += 1;
-                }
-                let target = buf.split('|').next().unwrap_or("").trim().to_string();
-                if !target.is_empty() && !titles.iter().any(|t| t == &target) {
-                    titles.push(target);
-                }
-                i = j + 2;
-            } else {
-                i += 1;
-            }
-        }
-        titles
-    }
-
-    /// 计算一条笔记的双向链接：反链（别人链我）+ 出链（我链别人）（R6-2）。
-    pub fn get_note_links(&self, note_id: &str) -> Result<NoteLinks, String> {
-        let target = NoteRepo::get_by_id(&self.db, note_id)?
-            .ok_or_else(|| "Note not found".to_string())?;
-        let target_title = target.title.trim();
-        let target_lower = target_title.to_lowercase();
-
-        let all = NoteRepo::list_all(&self.db)?;
-        let mut backlinks: Vec<BacklinkItem> = Vec::new();
-        let mut outgoing: Vec<BacklinkItem> = Vec::new();
-
-        // 标题 -> 最佳匹配笔记（用于出链解析）。优先精确匹配，其次大小写不敏感。
-        let mut title_to_note: std::collections::HashMap<String, NoteRow> = std::collections::HashMap::new();
-        for n in &all {
-            if n.id == target.id {
-                continue;
-            }
-            title_to_note.entry(n.title.trim().to_lowercase()).or_insert_with(|| n.clone());
-        }
-
-        for n in &all {
-            if n.id == target.id {
-                continue;
-            }
-            let linked_titles = Self::extract_wikilink_titles(&n.content);
-            // 反链：别人内容里引用了本文标题
-            if linked_titles
-                .iter()
-                .any(|t| t.trim().eq_ignore_ascii_case(target_title))
-            {
-                let snippet = Self::snippet_around_link(&n.content, target_title);
-                backlinks.push(BacklinkItem {
-                    id: n.id.clone(),
-                    title: n.title.clone(),
-                    group_id: n.group_id.clone(),
-                    snippet,
-                });
-            }
-        }
-
-        // 出链：本文（target）内容里引用了别人标题。
-        // 注意：必须解析 target 自己的 content，而非循环里其他笔记的 content（之前误读 n.content 会导致出链错误地统计全库链接）。
-        let target_linked = Self::extract_wikilink_titles(&target.content);
-        for lt in &target_linked {
-            if lt.trim().eq_ignore_ascii_case(&target_lower) {
-                continue; // 自引用，忽略
-            }
-            if let Some(other) = title_to_note.get(&lt.trim().to_lowercase()) {
-                if outgoing.iter().all(|b: &BacklinkItem| b.id != other.id) {
-                    outgoing.push(BacklinkItem {
-                        id: other.id.clone(),
-                        title: other.title.clone(),
-                        group_id: other.group_id.clone(),
-                        snippet: String::new(),
-                    });
-                }
-            }
-        }
-
-        Ok(NoteLinks { backlinks, outgoing })
-    }
-
-    /// 抽取包含 `[[标题]]` 的那一行作为 snippet。
-    fn snippet_around_link(content: &str, title: &str) -> String {
-        let needle = format!("[[{}", title);
-        for line in content.lines() {
-            let lower = line.to_lowercase();
-            if lower.contains(&needle.to_lowercase()) {
-                let trimmed = line.trim();
-                if trimmed.len() > 120 {
-                    return format!("{}…", &trimmed[..117]);
-                }
-                return trimmed.to_string();
-            }
-        }
-        String::new()
-    }
 
     pub fn create_note(
         &self,
@@ -461,6 +280,24 @@ impl NotebookService {
         category: &str,
         tags: Vec<String>,
     ) -> Result<NoteRow, String> {
+        // 切组时若旧分类不在新组，会在 ensure_category 阶段被静默补建（is_default=0）；
+        // 这导致"切到 programming 后凭空出现一个用户没建过的 snippet 分类"。
+        // 改用 update_note_with_outcome 拿到 changed_category 标记，前端 notify 告知用户。
+        self.update_note_with_outcome(id, title, content, group_id, category, tags)
+            .map(|(note, _)| note)
+    }
+
+    /// 同 update_note，但额外返回「切组时是否对 category 做了重置」标记。
+    /// 旧签名 update_note 仍存在，内部走本方法 → 老调用方零迁移成本。
+    pub fn update_note_with_outcome(
+        &self,
+        id: &str,
+        title: &str,
+        content: &str,
+        group_id: &str,
+        category: &str,
+        tags: Vec<String>,
+    ) -> Result<(NoteRow, Option<CategoryResetInfo>), String> {
         let existing = NoteRepo::get_by_id(&self.db, id)?
             .ok_or_else(|| "Note not found".to_string())?;
 
@@ -494,6 +331,29 @@ impl NotebookService {
             existing_file.clone()
         };
 
+        // ===== 切组 category 校验 =====
+        // 切到新组时若旧 category 名字不在新组分类列表里：
+        //   - 若 category 非空：强制改为新组的默认 uncategorized 名字，并记录 reset 供前端 notify
+        //   - 若 category 本身为空：保持空（=「未分类」）
+        //   - 同组内不做此校验（用户可能是改名字还没补登记 → 让 ensure_category 去补）
+        // 避免原先 ensure_category 在新组"凭空补建"非默认分类行（用户根本没建过）的脏数据。
+        let mut final_category = category.to_string();
+        let mut category_reset: Option<CategoryResetInfo> = None;
+        if group_id != existing.group_id && !category.is_empty() {
+            let target_exists = NoteCategoryRepo::find_by_group_and_name(&self.db, group_id, category)?.is_some();
+            if !target_exists {
+                let old = category.to_string();
+                // 新组默认 5 个：uncategorized / snippet / note / tutorial / reference；
+                // uncategorized 必然存在（ensure_uncategorized_group + ensure_default_categories_for_group 保证）。
+                final_category = "uncategorized".to_string();
+                category_reset = Some(CategoryResetInfo {
+                    from: old,
+                    to: final_category.clone(),
+                    target_group: group_id.to_string(),
+                });
+            }
+        }
+
         let links = CommandNoteLinkRepo::list_by_note(&self.db, id)?;
         let linked_commands: Vec<LinkedCommandRef> = links
             .iter()
@@ -509,7 +369,7 @@ impl NotebookService {
         let front_matter = NoteFrontMatter {
             id: id.to_string(),
             title: title.to_string(),
-            category: category.to_string(),
+            category: final_category.clone(),
             tags: tags.clone(),
             created_at: existing.created_at,
             updated_at: now,
@@ -522,7 +382,7 @@ impl NotebookService {
             title: title.to_string(),
             file_path: new_file_path.to_string_lossy().to_string(),
             group_id: group_id.to_string(),
-            category: category.to_string(),
+            category: final_category.clone(),
             tags,
             content: content.to_string(),
             word_count,
@@ -532,7 +392,8 @@ impl NotebookService {
         };
 
         // 先写 DB（真相源）：失败则文件不动，原文件与旧 DB 路径一致，无数据丢失（P0-2）
-        self.ensure_category(group_id, category)?;
+        // 用 final_category（可能已被重置），确保新组分类表里有这一行。
+        self.ensure_category(group_id, &final_category)?;
         NoteRepo::save(&self.db, &note)?;
         self.sync_note_tags(&note.id, group_id, &note.tags)?;
 
@@ -545,7 +406,7 @@ impl NotebookService {
             }
         }
         self.notify_notes_changed();
-        Ok(note)
+        Ok((note, category_reset))
     }
 
     pub fn delete_note(&self, id: &str) -> Result<(), String> {

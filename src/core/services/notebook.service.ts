@@ -1,5 +1,17 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { NoteDto, NoteDetailDto, CreateNoteInput, UpdateNoteInput, LinkCommandInput, CommandNoteLinkDto, NoteGroupDto, CreateGroupInput, UpdateGroupInput, NoteCategoryDto, CreateCategoryInput, UpdateCategoryInput, NoteTagDto, CreateTagInput, UpdateTagInput, NoteLinks } from '../../proto/notebook';
+import type { NoteDto, NoteDetailDto, CreateNoteInput, UpdateNoteInput, LinkCommandInput, CommandNoteLinkDto, NoteGroupDto, CreateGroupInput, UpdateGroupInput, NoteCategoryDto, CreateCategoryInput, UpdateCategoryInput, NoteTagDto, CreateTagInput, UpdateTagInput } from '../../proto/notebook';
+
+/**
+ * `updateNote` 的返回结构：note 本体 + 切组时后端对 category 的自动重置标记。
+ * 后端在 `update_note_with_outcome` 中若发现目标分组没有原 category 名字，
+ * 会把 category 强制改为目标分组的默认 uncategorized 名字，并通过此结构告知前端。
+ * 之前 `updateNote` 返 `NoteDto` 直接 → 前端无法得知"分类被静默改了"，切到新组后
+ * 看到分类下拉里没有自己原来选的那项，体感像"被吞了"。
+ */
+export interface UpdateNoteResult {
+  note: NoteDto;
+  categoryReset: { from: string; to: string; targetGroup: string } | null;
+}
 
 export async function listNotes(groupId?: string, category?: string, search?: string): Promise<NoteDto[]> {
   return invoke('list_notes', { groupId: groupId || null, category: category || null, search: search || null });
@@ -9,15 +21,11 @@ export async function getNote(id: string): Promise<NoteDetailDto | null> {
   return invoke('get_note', { id });
 }
 
-export async function getNoteLinks(id: string): Promise<NoteLinks> {
-  return invoke('get_note_links', { id });
-}
-
 export async function createNote(input: CreateNoteInput): Promise<NoteDto> {
   return invoke('create_note', { input });
 }
 
-export async function updateNote(input: UpdateNoteInput): Promise<NoteDto> {
+export async function updateNote(input: UpdateNoteInput): Promise<UpdateNoteResult> {
   return invoke('update_note', { input });
 }
 

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { NoteDto, NoteDetailDto, CreateNoteInput, UpdateNoteInput, CommandNoteLinkDto, NoteGroupDto, CreateGroupInput, UpdateGroupInput, NoteCategoryDto, CreateCategoryInput, UpdateCategoryInput, NoteTagDto, CreateTagInput, UpdateTagInput } from '../../../proto/notebook';
 import * as notebookService from '../../../core/services/notebook.service';
+import type { UpdateNoteResult } from '../../../core/services/notebook.service';
 import { localizeBackendError } from '../../../core/backendError';
 import { emit } from '@tauri-apps/api/event';
 
@@ -45,7 +46,7 @@ interface NotebookState {
   loadNotes: (groupId?: string, category?: string, search?: string) => Promise<void>;
   loadNote: (id: string) => Promise<void>;
   createNote: (input: CreateNoteInput) => Promise<NoteDto | null>;
-  updateNote: (input: UpdateNoteInput) => Promise<NoteDto | null>;
+  updateNote: (input: UpdateNoteInput) => Promise<UpdateNoteResult | null>;
   deleteNote: (id: string) => Promise<void>;
   togglePin: (id: string) => Promise<void>;
   searchNotes: (query: string) => Promise<void>;
@@ -132,7 +133,11 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
   updateNote: async (input: UpdateNoteInput) => {
     set({ loading: true, error: null });
     try {
-      const note = await notebookService.updateNote(input);
+      const result = await notebookService.updateNote(input);
+      const note = result.note;
+      // 后端在切组时若原 category 不在新组分类列表，会强制重置为目标组默认 uncategorized，
+      // 并通过 result.categoryReset 把旧/新值返回前端。前端 store 不在这里 toast（避免 store 内
+      // 直接耦合 i18n 键），由 NoteEditor 拿到 result 后决定何时通知用户。
       const notes = get().notes.map((n) => (n.id === note.id ? note : n));
       set({ notes, loading: false });
       // 同步刷新 selectedNote（否则打开"所在文件夹"按钮用的 file_path、
@@ -146,7 +151,7 @@ export const useNotebookStore = create<NotebookState>((set, get) => ({
       if (input.title.trim() || input.content.trim()) {
         scheduleAutoTrigger(note.id, note.title, 'update');
       }
-      return note;
+      return result;
     } catch (e) {
       set({ error: localizeBackendError(e), loading: false });
       return null;
