@@ -8,4 +8,5 @@ pub mod agent;
 pub mod environment;
 pub mod icon;
 pub mod remote_desktop;
+pub mod sftp;
 pub mod licensing;

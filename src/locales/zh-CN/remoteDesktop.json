@@ -72,5 +72,21 @@
   "reset_password_warning_desc": "这将覆盖远程服务器上现有的 VNC 密码。设置后，请使用新密码连接。",
   "restart_vnc_after_password_reset": "密码已更改。VNC 服务器需要重启才能使用新密码。点击重启。",
   "setup_guide_title": "设置指南",
-  "setup_guide_desc": "按步骤完成 VNC 配置"
+  "setup_guide_desc": "按步骤完成 VNC 配置",
+  "rd_install_flavor_label": "桌面环境",
+  "rd_flavor_none": "无桌面",
+  "rd_flavor_desktop": "有桌面",
+  "rd_flavor_none_desc": "仅安装 VNC 服务，桌面回退到 xterm 终端",
+  "rd_flavor_desktop_desc": "安装完整 Xfce 桌面环境（含常用应用套件）",
+  "rd_redo": "重做",
+  "rd_reconnect": "重新连接",
+  "rd_redo_confirm_title": "确认重新执行？",
+  "rd_redo_confirm_desc": "这会重新在远程服务器上运行该步骤的命令（可能重装软件包 / 重启 VNC 服务）。确认继续？",
+  "rd_redo_confirm_cancel": "取消",
+  "rd_redo_confirm_ok": "确认重做",
+  "rd_reset_install": "重置并重新安装",
+  "rd_reset_confirm_title": "确认重置并重新安装？",
+  "rd_reset_confirm_desc": "这将先卸载远程服务器上的 VNC 及相关组件，清理 ~/.vnc 配置目录，然后重新安装 VNC 和桌面环境。确认继续？",
+  "rd_reset_confirm_cancel": "取消",
+  "rd_reset_confirm_ok": "确认重置"
 }

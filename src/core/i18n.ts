@@ -8,6 +8,7 @@ import notebookZh from '../locales/zh-CN/notebook.json';
 import agentZh from '../locales/zh-CN/agent.json';
 import commandZh from '../locales/zh-CN/command.json';
 import remoteDesktopZh from '../locales/zh-CN/remoteDesktop.json';
+import fileTransferZh from '../locales/zh-CN/fileTransfer.json';
 import backendZh from '../locales/zh-CN/backend.json';
 
 import commonEn from '../locales/en-US/common.json';
@@ -16,6 +17,7 @@ import notebookEn from '../locales/en-US/notebook.json';
 import agentEn from '../locales/en-US/agent.json';
 import commandEn from '../locales/en-US/command.json';
 import remoteDesktopEn from '../locales/en-US/remoteDesktop.json';
+import fileTransferEn from '../locales/en-US/fileTransfer.json';
 import backendEn from '../locales/en-US/backend.json';
 
 const resources = {
@@ -26,6 +28,7 @@ const resources = {
     agent: agentZh,
     command: commandZh,
     remoteDesktop: remoteDesktopZh,
+    fileTransfer: fileTransferZh,
     backend: backendZh,
   },
   'en-US': {
@@ -35,6 +38,7 @@ const resources = {
     agent: agentEn,
     command: commandEn,
     remoteDesktop: remoteDesktopEn,
+    fileTransfer: fileTransferEn,
     backend: backendEn,
   },
 };
@@ -46,7 +50,7 @@ i18n
     resources,
     fallbackLng: 'zh-CN',
     defaultNS: 'common',
-    ns: ['common', 'terminal', 'notebook', 'agent', 'command', 'remoteDesktop', 'backend'],
+    ns: ['common', 'terminal', 'notebook', 'agent', 'command', 'remoteDesktop', 'fileTransfer', 'backend'],
     interpolation: {
       escapeValue: false,
     },

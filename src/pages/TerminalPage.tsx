@@ -28,7 +28,7 @@ import { copyText, pasteText } from '../core/services/clipboard.service';
 import { parseCommand } from '../core/services/command.service';
 import { generateId } from '../core/utils';
 import type { PtyConfig } from '../proto';
-import { openNotesReferenceWindow, openAiCopilotWindow, openRemoteDesktopWindow } from '../core/services/window.service';
+import { openNotesReferenceWindow, openAiCopilotWindow, openRemoteDesktopWindow, openSftpWindow } from '../core/services/window.service';
 import { useConnectIntent } from '../features/terminal/connectIntent';
 import { localizeBackendError } from '../core/backendError';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -319,8 +319,24 @@ export function TerminalPage() {
         authMethod: activeTab.ssh.authMethod,
         privateKeyPath: activeTab.ssh.privateKeyPath,
         password: activeTab.ssh.password,
+        connectionId: activeTab.connectionId,
       } : undefined;
-      openRemoteDesktopWindow(sshParams).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+      openRemoteDesktopWindow(sshParams, (msg) => notify(msg)).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+    });
+  }, [guardProFeature, notify]);
+
+  const handleOpenSftp = useCallback(() => {
+    guardProFeature('sftp', () => {
+      const activeTab = tabsRef.current.find((t) => t.isActive);
+      const sshParams = activeTab?.ssh ? {
+        host: activeTab.ssh.host,
+        port: activeTab.ssh.port,
+        username: activeTab.ssh.username,
+        authMethod: activeTab.ssh.authMethod,
+        privateKeyPath: activeTab.ssh.privateKeyPath,
+        password: activeTab.ssh.password,
+      } : undefined;
+      openSftpWindow(sshParams, (msg) => notify(msg)).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
     });
   }, [guardProFeature, notify]);
 
@@ -659,6 +675,7 @@ export function TerminalPage() {
         onOpenNotes={handleOpenNotes}
         onOpenAiCopilot={handleOpenAiCopilot}
         onOpenRemoteDesktop={handleOpenRemoteDesktop}
+        onOpenSftp={handleOpenSftp}
         onClearBuffer={handleClearBuffer}
         onCopy={handleCopy}
         onPaste={handlePaste}

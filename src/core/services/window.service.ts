@@ -42,33 +42,74 @@ export async function openCategoryNotesWindow(groupId: string, categoryName: str
   return webview;
 }
 
-export async function openRemoteDesktopWindow(sshParams?: {
+interface SshWindowParams {
   host: string;
   port?: number;
   username: string;
   authMethod: string;
   privateKeyPath?: string;
   password?: string;
-}): Promise<WebviewWindow | null> {
+  /** 来源连接的 id，用于把安装档位等偏好持久化到该连接。 */
+  connectionId?: string;
+}
+
+/**
+ * Resolve an existing window by label, but only if it is actually usable.
+ *
+ * `WebviewWindow.getByLabel` can keep returning a window that failed to load or
+ * was destroyed but not yet released by the runtime. If we then keep
+ * `setFocus()`-ing that dead handle, clicking the toolbar button looks like it
+ * "does nothing" — no new window, no error. So: if the window can't be focused
+ * or isn't visible, destroy it and let the caller create a fresh one.
+ */
+async function reuseOrRecreate(key: string): Promise<WebviewWindow | null> {
+  try {
+    const existing = await WebviewWindow.getByLabel(key);
+    if (!existing) return null;
+    let alive = true;
+    try {
+      await existing.setFocus();
+      const visible = await existing.isVisible().catch(() => false);
+      alive = !!visible;
+    } catch {
+      alive = false;
+    }
+    if (alive) return existing;
+    try {
+      await existing.destroy();
+    } catch {
+      /* ignore */
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function buildSshUrl(path: string, sshParams?: SshWindowParams): string {
+  if (!sshParams) return `/#/${path}`;
+  const params = new URLSearchParams();
+  params.set('host', sshParams.host);
+  if (sshParams.port) params.set('port', String(sshParams.port));
+  params.set('username', sshParams.username);
+  params.set('authMethod', sshParams.authMethod);
+  if (sshParams.privateKeyPath) params.set('privateKeyPath', sshParams.privateKeyPath);
+  if (sshParams.password) params.set('password', sshParams.password);
+  if (sshParams.connectionId) params.set('connectionId', sshParams.connectionId);
+  return `/#/${path}?${params.toString()}`;
+}
+
+export async function openRemoteDesktopWindow(
+  sshParams?: SshWindowParams,
+  onError?: (msg: string) => void,
+): Promise<WebviewWindow | null> {
   const key = 'remote-desktop';
 
-  const existing = await WebviewWindow.getByLabel(key);
-  if (existing) {
-    await existing.setFocus();
-    return existing;
-  }
+  const existing = await reuseOrRecreate(key);
+  if (existing) return existing;
 
   const webview = new WebviewWindow(key, {
-    url: `/#/remote-desktop${sshParams ? (() => {
-      const params = new URLSearchParams();
-      params.set('host', sshParams.host);
-      if (sshParams.port) params.set('port', String(sshParams.port));
-      params.set('username', sshParams.username);
-      params.set('authMethod', sshParams.authMethod);
-      if (sshParams.privateKeyPath) params.set('privateKeyPath', sshParams.privateKeyPath);
-      if (sshParams.password) params.set('password', sshParams.password);
-      return '?' + params.toString();
-    })() : ''}`,
+    url: buildSshUrl('remote-desktop', sshParams),
     title: 'Remote Desktop',
     width: 1200,
     height: 800,
@@ -86,9 +127,49 @@ export async function openRemoteDesktopWindow(sshParams?: {
     openWindows.delete(key);
   });
 
-  webview.once('tauri://error', (e) => {
+  webview.once('tauri://error', (e: any) => {
     console.error('[window] failed to create remote desktop window:', e);
     openWindows.delete(key);
+    const raw = e?.payload?.message ?? e?.payload ?? e;
+    onError?.(typeof raw === 'string' ? raw : JSON.stringify(raw));
+  });
+
+  return webview;
+}
+
+export async function openSftpWindow(
+  sshParams?: SshWindowParams,
+  onError?: (msg: string) => void,
+): Promise<WebviewWindow | null> {
+  const key = 'sftp';
+
+  const existing = await reuseOrRecreate(key);
+  if (existing) return existing;
+
+  const webview = new WebviewWindow(key, {
+    url: buildSshUrl('sftp', sshParams),
+    title: 'SFTP File Transfer',
+    width: 900,
+    height: 650,
+    minWidth: 600,
+    minHeight: 400,
+    center: true,
+    resizable: true,
+    decorations: true,
+    focus: true,
+  });
+
+  openWindows.set(key, webview);
+
+  webview.once('tauri://destroyed', () => {
+    openWindows.delete(key);
+  });
+
+  webview.once('tauri://error', (e: any) => {
+    console.error('[window] failed to create sftp window:', e);
+    openWindows.delete(key);
+    const raw = e?.payload?.message ?? e?.payload ?? e;
+    onError?.(typeof raw === 'string' ? raw : JSON.stringify(raw));
   });
 
   return webview;
@@ -214,10 +295,10 @@ export async function openAiCopilotWindow(): Promise<WebviewWindow | null> {
   const webview = new WebviewWindow(key, {
     url: '/#/ai-copilot',
     title: 'AI Copilot',
-    width: 480,
-    height: 700,
-    minWidth: 360,
-    minHeight: 500,
+    width: 880,
+    height: 760,
+    minWidth: 480,
+    minHeight: 560,
     center: true,
     resizable: true,
     decorations: true,

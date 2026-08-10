@@ -20,6 +20,7 @@ import { CategoryNotesPage } from './features/notebook/components/CategoryNotesP
 import { NotesReferencePage } from './features/notebook/components/NotesReferencePage';
 import { AiCopilotPage } from './pages/AiCopilotPage';
 import { RemoteDesktopPage } from './pages/RemoteDesktopPage';
+import { SftpPage } from './pages/SftpPage';
 import { LicenseProvider, UpgradeDialog } from './features/licensing';
 
 function AppLayout() {
@@ -97,6 +98,7 @@ function StandaloneLayout() {
       <Route path="/notes-reference" element={<NotesReferencePage />} />
       <Route path="/ai-copilot" element={<AiCopilotPage />} />
       <Route path="/remote-desktop" element={<RemoteDesktopPage />} />
+      <Route path="/sftp" element={<SftpPage />} />
       <Route path="*" element={<NotFoundPage />} />
     </Routes>
   );
@@ -108,7 +110,7 @@ function RootRouter() {
   // WebviewWindow urls (e.g. "/#/category-notes") are loaded as pathname "/<any>" with hash "#/category-notes"
   // So we need to inspect both pathname AND hash to determine if we are in a standalone window.
   const checkPath = (location.hash.replace(/^#/, '') || location.pathname);
-  const isStandalone = checkPath.startsWith('/category-notes') || checkPath.startsWith('/notes-reference') || checkPath.startsWith('/ai-copilot') || checkPath.startsWith('/remote-desktop');
+  const isStandalone = checkPath.startsWith('/category-notes') || checkPath.startsWith('/notes-reference') || checkPath.startsWith('/ai-copilot') || checkPath.startsWith('/remote-desktop') || checkPath.startsWith('/sftp');
 
   return isStandalone ? <StandaloneLayout /> : <AppLayout />;
 }

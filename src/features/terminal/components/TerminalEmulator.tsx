@@ -320,7 +320,10 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       });
 
       terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-        if (e.type !== 'keydown') return false;
+        // xterm handles printable characters (incl. Space, keyCode=32) via the
+        // `keypress` event. Returning `false` here would block default handling and
+        // swallow those characters, so non-keydown events must be let through.
+        if (e.type !== 'keydown') return true;
         const mod = e.ctrlKey || e.metaKey;
         if (mod && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
           const selection = terminal.getSelection();

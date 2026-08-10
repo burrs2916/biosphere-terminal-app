@@ -31,6 +31,26 @@ pub fn delete_connection(
     ConnectionService::delete_connection(&db, &id).map_err(|e| e.to_string())
 }
 
+/// 读取某连接持久化的远程桌面安装档位（"none" | "minimal" | "full"）。
+/// 未设置 / 非法时返回 null，前端回退默认 full。
+#[tauri::command]
+pub fn get_rd_install_flavor(
+    connection_id: String,
+    db: State<'_, Arc<Database>>,
+) -> Result<Option<String>, String> {
+    ConnectionService::get_rd_install_flavor(&db, &connection_id).map_err(|e| e.to_string())
+}
+
+/// 把用户在安装向导里选择的远程桌面档位写回该连接（持久化到 config_json）。
+#[tauri::command]
+pub fn set_rd_install_flavor(
+    connection_id: String,
+    flavor: String,
+    db: State<'_, Arc<Database>>,
+) -> Result<(), String> {
+    ConnectionService::set_rd_install_flavor(&db, &connection_id, &flavor).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
     tracing::info!(
@@ -116,7 +136,7 @@ fn run_test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
     if ssh.auth_method == "password" {
         tracing::info!("[TEST-CONN] branch=password (has_pw={})", ssh.password.is_some());
         return match &ssh.password {
-            Some(pw) => match test_ssh_password(&ssh, pw) {
+            Some(pw) => match test_ssh_password(&ssh, pw, false) {
                 Ok(true) => Ok(format!(
                     "✓ SSH 密码认证成功：{}@{}:{}",
                     ssh.username, ssh.host, ssh.port
@@ -138,7 +158,12 @@ fn run_test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
 
 /// 用 pty + expect 实现 sshpass 等效逻辑：起 `ssh user@host true` 会话，
 /// 监控 pty 输出，匹配到密码提示时自动把密码写回。零外部依赖（仅系统 ssh + portable-pty）。
-fn test_ssh_password(ssh: &SshConnectionInfo, pw: &str) -> std::result::Result<bool, String> {
+/// `retried` 为 true 表示已因 host key 变更自动清理并重试过一次。
+fn test_ssh_password(
+    ssh: &SshConnectionInfo,
+    pw: &str,
+    retried: bool,
+) -> std::result::Result<bool, String> {
     tracing::info!("[TEST-CONN] test_ssh_password: spawning pty ssh session...");
     let pty = match crate::domain::terminal::pty::Pty::spawn_ssh_command_session(ssh, "true") {
         Ok(p) => Arc::new(p),
@@ -157,6 +182,9 @@ fn test_ssh_password(ssh: &SshConnectionInfo, pw: &str) -> std::result::Result<b
     // （实测：macOS 上 pty.wait() 对不可达/挂起主机 15s+ 不返回，导致测试卡死）。
     let pty_wait = pty.clone();
     let (tx, rx) = mpsc::channel();
+    let (hk_tx, hk_rx) = mpsc::channel::<bool>();
+    let hk_tx_feeder = hk_tx.clone();
+    drop(hk_tx);
     thread::spawn(move || {
         let start = Instant::now();
         let overall = Duration::from_secs(12);
@@ -196,6 +224,7 @@ fn test_ssh_password(ssh: &SshConnectionInfo, pw: &str) -> std::result::Result<b
     let feeder = thread::spawn(move || {
         let mut buf = [0u8; 4096];
         let mut trailing = String::with_capacity(256);
+        let mut hostkey_buf = String::with_capacity(1024);
         let mut filled = false;
         let mut guard = match reader.lock() {
             Ok(g) => g,
@@ -207,15 +236,25 @@ fn test_ssh_password(ssh: &SshConnectionInfo, pw: &str) -> std::result::Result<b
                 Ok(0) => break,
                 Ok(n) => {
                     let output = String::from_utf8_lossy(&buf[..n]).to_string();
+                    // 累积全部输出用于 host key 变更检测（host key 报错发生在握手阶段、
+                    // 不弹密码提示，若只靠 trailing 256 字可能被截断，故用独立缓冲）。
+                    hostkey_buf.push_str(&output);
+                    if hostkey_buf.len() > 4096 {
+                        hostkey_buf = hostkey_buf[hostkey_buf.len() - 4096..].to_string();
+                    }
+                    let hk_lower = hostkey_buf.to_lowercase();
+                    if hk_lower.contains("host key verification failed")
+                        || hk_lower.contains("remote host identification has changed")
+                    {
+                        let _ = hk_tx_feeder.send(true);
+                        break;
+                    }
                     if !filled {
                         trailing.push_str(&output);
                         if trailing.len() > 256 {
                             trailing = trailing[trailing.len() - 256..].to_string();
                         }
-                        let lower = trailing.to_lowercase();
-                        let needs = lower.ends_with("password:")
-                            || lower.ends_with("password: ")
-                            || (lower.contains("password:") && trailing.trim_end().ends_with(':'));
+                        let needs = crate::domain::terminal::pty::is_password_prompt(&trailing);
                         if needs {
                             let bytes = format!("{}\n", pw_owned).into_bytes();
                             if let Ok(mut w) = writer.lock() {
@@ -230,9 +269,11 @@ fn test_ssh_password(ssh: &SshConnectionInfo, pw: &str) -> std::result::Result<b
                 Err(_) => break,
             }
         }
+        // 兜底：未检测到 host key 变更，通知主线程（false 不影响退出码判断）。
+        let _ = hk_tx_feeder.send(false);
     });
 
-    let result = match rx.recv_timeout(Duration::from_secs(13)) {
+    let mut result = match rx.recv_timeout(Duration::from_secs(13)) {
         Ok(Some(0)) => {
             tracing::info!("[TEST-CONN] test_ssh_password: auth OK (exit 0)");
             Ok(true)
@@ -252,6 +293,19 @@ fn test_ssh_password(ssh: &SshConnectionInfo, pw: &str) -> std::result::Result<b
             Err("SSH 认证超时（握手/网络过慢，或密码提示未出现）".to_string())
         }
     };
+    // host key 变更优先于退出码判断：ssh 在握手阶段直接报错退出，不会弹密码提示，
+    // 否则会被误判为「密码不正确或主机不可达」，误导用户（典型场景：云服务器重置系统后 host key 变了）。
+    if let Ok(true) = hk_rx.try_recv() {
+        if !retried {
+            // 自动清除旧 key 并整体重试一次（等价于用户手动 ssh-keygen -R 后重连）
+            let _ = crate::core::platform::clear_known_host(&ssh.host, ssh.port);
+            return test_ssh_password(ssh, pw, true);
+        }
+        result = Err(format!(
+            "✗ SSH 主机密钥校验失败（远程主机密钥已变更，很可能系统已重置）。已自动清除旧密钥并重试，但仍失败：{}@{}:{}",
+            ssh.username, ssh.host, ssh.port
+        ));
+    }
     // 绝不无限等待 feeder 线程：ssh 已被 kill 或自行退出后读端会返回 EOF，
     // 但为绝对避免 join 阻塞导致命令线程卡死，这里 detach（丢弃 JoinHandle），
     // feeder 线程会在读端返回后自行结束。
@@ -326,7 +380,7 @@ fn tcp_only_test(ssh: &SshConnectionInfo) -> Result<String, String> {
         Ok(Ok(())) => {
             tracing::info!("[TEST-CONN] tcp_only_test: port reachable (no identity verification)");
             Err(format!(
-                "端口 {}:{} 可达，但无法验证密码（系统缺少 sshpass）。请改用密钥登录，或安装 sshpass 后重试。",
+                "端口 {}:{} 可达，但未提供密码，无法验证身份。请在连接配置中填写密码，或改用密钥登录。",
                 ssh.host, ssh.port
             ))
         }

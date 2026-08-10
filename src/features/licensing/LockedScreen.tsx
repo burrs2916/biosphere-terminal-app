@@ -23,6 +23,8 @@ const FEATURE_DESCRIPTIONS: Record<ProFeature, string> = {
     'AI-powered note polishing, summarization, and rewriting directly inside the editor.',
   note_reference:
     'Smart note references and AI-driven command-to-note linking for instant context recall.',
+  sftp:
+    'Encrypted SFTP file transfer reusing your active SSH session. Upload and download files to any server without extra tooling.',
 };
 
 /// Full-page placeholder shown when a Pro feature is locked. Renders a

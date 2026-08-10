@@ -36,12 +36,15 @@ const RULES: BackendErrorRule[] = [
   { re: /^进程 .* 错误/, key: 'connection.process_error' },
   { re: /^连接 .* 超时/, key: 'connection.connect_timeout' },
   { re: /^无法连接到/, key: 'connection.connect_failed' },
-  { re: /^端口 .* 可达，但无法验证密码/, key: 'connection.tcp_no_sshpass' },
+  { re: /^端口 .* 可达，但未提供密码/, key: 'connection.tcp_no_sshpass' },
   // 测试连接：密钥 / 密码认证失败（返回 Err，英文 UI 会露中文）
   // 注意：源码 connection.rs:107 实际文案为「✗ SSH 认证失败（密钥不正确…）」（密钥分支），
   // 仅前缀「SSH 认证失败」稳定，故用宽松前缀匹配（不会误中「SSH 密码认证失败」）。
   { re: /^✗ SSH 认证失败/, key: 'connection.ssh_key_auth_failed' },
   { re: /^✗ SSH 密码认证失败/, key: 'connection.ssh_password_auth_failed' },
+  // 测试连接：host key 变更（云服务器重置系统后最常见）。专属可操作报错，
+  // 避免被误判为「密码不正确或主机不可达」，误导用户。
+  { re: /^✗ SSH 主机密钥校验失败/, key: 'connection.ssh_host_key_changed' },
   // 测试连接：密钥 / 密码认证成功（返回 Ok，英文 UI 会露中文）
   { re: /^✓ SSH 密钥认证成功/, key: 'connection.ssh_key_auth_success' },
   { re: /^✓ SSH 密码认证成功/, key: 'connection.ssh_password_auth_success' },

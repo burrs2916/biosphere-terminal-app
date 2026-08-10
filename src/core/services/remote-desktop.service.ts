@@ -13,12 +13,7 @@ export interface VncSetupResult {
   vncRunning: boolean;
   vncPort: number;
   display: string | null;
-  messages: string[];
   needsPassword: boolean;
-  installHint: string;
-  startHint: string;
-  setupHint: string;
-  passwdHint: string;
   osName: string;
 }
 
@@ -38,12 +33,17 @@ export async function closeRemoteDesktop(sessionId: string): Promise<void> {
   return invoke('close_remote_desktop', { sessionId });
 }
 
+/**
+ * Probe the remote host for VNC state.
+ */
 export async function setupRemoteDesktop(
   ssh: SshConnectionInfo,
   vncPort?: number,
+  runId?: string,
 ): Promise<VncSetupResult> {
   return invoke('setup_remote_desktop', {
     ssh,
     vncPort: vncPort || null,
+    runId: runId || null,
   });
 }

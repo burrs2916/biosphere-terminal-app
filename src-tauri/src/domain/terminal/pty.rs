@@ -133,6 +133,11 @@ impl Pty {
         cmd.args(&args);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // 强制 ssh 客户端用英文消息目录：OpenSSH 会把密码提示本地化成客户端
+        // locale（中文系统下是 "user@host 的密码："），只匹配英文 "password:"
+        // 的自动喂密码逻辑会漏检，导致认证失败。LC_MESSAGES=C 让提示恒为
+        // 英文 "Password: "，是确定性修复（与 sftp 的 locale_env 同一哲学）。
+        cmd.env("LC_MESSAGES", "C");
         Ok(cmd)
     }
 
@@ -186,6 +191,120 @@ impl Pty {
             .wait()
             .map(|s| s.exit_code() as i32)
             .map_err(|e| crate::core::error::Error::Terminal(format!("wait failed: {}", e)))
+    }
+
+    /// Establish an SSH ControlMaster (`ssh -M -N`) via a pty so password auth can
+    /// be fed interactively — the exact same proven path as `spawn_ssh_command_session`
+    /// (same `TERM` env, same `StrictHostKeyChecking`/`ConnectTimeout` flags). The
+    /// control socket at `control_path` is created by ssh only AFTER successful
+    /// authentication; the caller must keep the returned `Pty` alive for the transfer
+    /// and `kill()` it afterwards.
+    pub fn spawn_ssh_master(ssh: &SshConnectionInfo, control_path: &str) -> Result<Self> {
+        let mut cmd = Self::build_ssh_command(ssh, false, None, Some(10))
+            .map_err(|e| crate::core::error::Error::Terminal(e))?;
+
+        // Master mode: stay alive (-N, no remote command) and own the control socket.
+        // ServerAlive* keeps the shared connection up across NAT/firewall idle
+        // timeouts so a long transfer multiplexed over it is not cut halfway.
+        let master_args: Vec<String> = vec![
+            "-M".to_string(),
+            "-N".to_string(),
+            "-o".to_string(),
+            "ControlMaster=yes".to_string(),
+            "-o".to_string(),
+            format!("ControlPath={}", control_path),
+            "-o".to_string(),
+            "ServerAliveInterval=20".to_string(),
+            "-o".to_string(),
+            "ServerAliveCountMax=6".to_string(),
+        ];
+        cmd.args(&master_args);
+
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| {
+                crate::core::error::Error::Terminal(format!("openpty failed: {}", e))
+            })?;
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| {
+                crate::core::error::Error::Terminal(format!("spawn failed: {}", e))
+            })?;
+        drop(pair.slave);
+
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| {
+                crate::core::error::Error::Terminal(format!("take writer failed: {}", e))
+            })?;
+
+        Ok(Pty {
+            master: Arc::new(Mutex::new(pair.master)),
+            writer: Arc::new(Mutex::new(writer)),
+            child: Arc::new(Mutex::new(child)),
+        })
+    }
+
+    /// Spawn an arbitrary program attached to a pty.
+    ///
+    /// Used by the SFTP transfer path: OpenSSH's `sftp` only renders its
+    /// progress meter when stdout is a tty, so a plain piped child would leave
+    /// the UI with no way to report upload/download progress.
+    pub fn spawn_program(program: &str, args: &[String], cols: u16) -> Result<Self> {
+        Self::spawn_program_with_env(program, args, cols, &[("TERM", "xterm-256color")])
+    }
+
+    /// Same as [`spawn_program`] but with an explicit environment overlay.
+    ///
+    /// The interactive SFTP session asks for `TERM=dumb`: OpenSSH's `sftp`
+    /// enables libedit whenever stdin is a tty, and a dumb terminal keeps the
+    /// echoed prompt free of cursor-movement escapes we would have to strip.
+    pub fn spawn_program_with_env(
+        program: &str,
+        args: &[String],
+        cols: u16,
+        envs: &[(&str, &str)],
+    ) -> Result<Self> {
+        let mut cmd = CommandBuilder::new(program);
+        cmd.args(args);
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| crate::core::error::Error::Terminal(format!("openpty failed: {}", e)))?;
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| crate::core::error::Error::Terminal(format!("spawn failed: {}", e)))?;
+        drop(pair.slave);
+
+        let writer = pair.master.take_writer().map_err(|e| {
+            crate::core::error::Error::Terminal(format!("take writer failed: {}", e))
+        })?;
+
+        Ok(Pty {
+            master: Arc::new(Mutex::new(pair.master)),
+            writer: Arc::new(Mutex::new(writer)),
+            child: Arc::new(Mutex::new(child)),
+        })
     }
 
     pub fn reader(&self) -> Arc<Mutex<Box<dyn Read + Send>>> {
@@ -251,6 +370,28 @@ impl Pty {
         let child = self.child.lock().unwrap();
         child.process_id()
     }
+}
+
+/// 判断一段终端输出是否处于 SSH/sftp 密码提示，locale 无关。
+///
+/// OpenSSH 会把密码提示本地化为客户端语言：中文系统下是
+/// "user@host 的密码："（全角冒号结尾），英文系统下是 "user@host's password: "。
+/// 各处自动喂密码逻辑（交互式连接 / 测试连接 / SFTP / 远程桌面）统一走这里，
+/// 避免只匹配英文导致中文 locale 漏检、密码不喂、认证失败。
+///
+/// `trailing` 传未小写的滚动输出窗口即可；函数内部自行 lower。
+pub fn is_password_prompt(trailing: &str) -> bool {
+    let lower = trailing.to_lowercase();
+    // 英文提示：password / passphrase（含 OpenSSH 兼容的 "password: " 尾空格变体）
+    let english = lower.ends_with("password:")
+        || lower.ends_with("password: ")
+        || lower.ends_with("passphrase:")
+        || lower.ends_with("passphrase for key:")
+        || (lower.contains("password:") && trailing.trim_end().ends_with(':'));
+    // 中文提示："user@host 的密码：" —— 要求全角冒号结尾，避免 motd/banner
+    // 里恰好出现"密码"字样时误触发。
+    let chinese = lower.contains("密码") && trailing.trim_end().ends_with('：');
+    english || chinese
 }
 
 /// Returns true if `shell` is a runnable command for the current platform.

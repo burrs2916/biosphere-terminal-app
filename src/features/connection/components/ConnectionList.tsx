@@ -303,14 +303,11 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
     if (conn.connection_type !== 'ssh') return;
     let sshInfo: SshConnectionInfo;
     try { sshInfo = JSON.parse(conn.config_json); } catch { return; }
-    console.log('[TEST-CONN][frontend] list-item test CLICKED conn=', conn.id);
     setTestResults((prev) => ({ ...prev, [conn.id]: { state: 'testing' } }));
     try {
       const msg = await testConnection(sshInfo);
-      console.log('[TEST-CONN][frontend] list-item test SUCCESS conn=', conn.id, '->', msg);
       setTestResults((prev) => ({ ...prev, [conn.id]: { state: 'success', msg: localizeBackendError(msg) } }));
     } catch (err) {
-      console.warn('[TEST-CONN][frontend] list-item test ERROR conn=', conn.id, '->', err);
       setTestResults((prev) => ({ ...prev, [conn.id]: { state: 'error', msg: localizeBackendError(err) } }));
     }
   };
@@ -758,16 +755,13 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
                 type="button"
                 variant="outlined"
                 onClick={async () => {
-                  console.log('[TEST-CONN][frontend] dialog test button CLICKED');
                   setTestState('testing');
                   setTestMsg('');
                   try {
                     const msg = await testConnection(ssh);
-                    console.log('[TEST-CONN][frontend] dialog handler SUCCESS ->', msg);
                     setTestState('success');
                     setTestMsg(localizeBackendError(msg));
                   } catch (e) {
-                    console.warn('[TEST-CONN][frontend] dialog handler ERROR ->', e);
                     setTestState('error');
                     setTestMsg(localizeBackendError(e));
                   }

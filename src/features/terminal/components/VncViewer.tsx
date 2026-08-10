@@ -20,6 +20,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
 import RFB from '@novnc/novnc';
+import { rdLog, rdShape, registerRdSecret } from '../../../core/remoteDesktopLog';
 
 interface VncViewerProps {
   wsUrl: string;
@@ -61,11 +62,24 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
 
     let disposed = false;
     let rfbInstance: any = null;
+    const connectStarted = Date.now();
 
-    console.log('[VncViewer] Creating RFB connection to:', wsUrl);
+    const effectivePassword = pendingPasswordRef.current || vncPassword;
+
+    rdLog('INFO', 'viewer', 'rfb.connect.begin', {
+      ws_url: wsUrl,
+      attempt: retryCount + 1,
+      credential_source: pendingPasswordRef.current
+        ? 'user_entered_in_viewer'
+        : vncPassword
+          ? 'guide_supplied'
+          : 'none',
+      password: rdShape(effectivePassword),
+    });
 
     try {
       if (!containerRef.current) {
+        rdLog('ERROR', 'viewer', 'rfb.connect.aborted', { reason: 'container_not_ready' });
         setConnectionState('error');
         setErrorMessage(t('vnc_container_not_ready'));
         return;
@@ -75,7 +89,6 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
         wsProtocols: ['binary'],
       };
 
-      const effectivePassword = pendingPasswordRef.current || vncPassword;
       if (effectivePassword) {
         options.credentials = { password: effectivePassword };
       }
@@ -85,6 +98,10 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
       rfbRef.current = rfb;
 
       rfb.addEventListener('connect', () => {
+        rdLog('INFO', 'viewer', 'rfb.connected', {
+          elapsed_ms: Date.now() - connectStarted,
+          disposed,
+        });
         if (!disposed) setConnectionState('connected');
       });
 
@@ -92,7 +109,15 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
         if (!disposed) {
           const clean = e.detail?.clean;
           const reason = e.detail?.reason || '';
-          console.error('[VncViewer] disconnect event, clean:', clean, 'detail:', JSON.stringify(e.detail));
+          // A non-clean disconnect right after connect almost always means the
+          // tunnel died or the VNC server refused the session — the single most
+          // reported "it connected then closed" symptom.
+          rdLog(clean ? 'INFO' : 'ERROR', 'viewer', 'rfb.disconnected', {
+            clean,
+            reason,
+            elapsed_ms: Date.now() - connectStarted,
+            after_auth_failure: authFailedRef.current,
+          });
           // Don't override error state set by securityfailure
           if (authFailedRef.current) {
             rfbRef.current = null;
@@ -121,7 +146,12 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
 
       rfb.addEventListener('credentialsrequired', () => {
         needsPasswordRef.current = true;
-        if (rfbRef.current && vncPassword) {
+        const canAutoAnswer = !!(rfbRef.current && vncPassword);
+        rdLog('INFO', 'viewer', 'rfb.credentials_required', {
+          auto_answered: canAutoAnswer,
+          password: rdShape(vncPassword),
+        });
+        if (canAutoAnswer) {
           rfbRef.current.sendCredentials({ password: vncPassword });
         } else if (!disposed) {
           setConnectionState('needs_password');
@@ -130,7 +160,12 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
 
       rfb.addEventListener('securityfailure', (e: any) => {
         if (!disposed) {
-          console.error('[VncViewer] securityfailure event:', JSON.stringify(e.detail));
+          rdLog('ERROR', 'viewer', 'rfb.security_failure', {
+            reason: e.detail?.reason || '',
+            status: e.detail?.status,
+            elapsed_ms: Date.now() - connectStarted,
+            note: 'VNC rejected the credentials; the password on the server differs from the one the guide set',
+          });
           authFailedRef.current = true;
           const reason = e.detail?.reason || '';
           if (reason) {
@@ -144,6 +179,7 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
 
       rfb.addEventListener('desktopname', (e: any) => {
         if (!disposed && e.detail?.name) {
+          rdLog('INFO', 'viewer', 'rfb.desktop_name', { name: e.detail.name });
           setDesktopName(e.detail.name);
         }
       });
@@ -151,6 +187,9 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
       rfb.scaleViewport = true;
       rfb.resizeSession = false;
     } catch (err: any) {
+      rdLog('ERROR', 'viewer', 'rfb.connect.threw', {
+        error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+      });
       if (!disposed) {
         setConnectionState('error');
         setErrorMessage(err?.message || t('connection_failed'));
@@ -159,7 +198,10 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
 
     return () => {
       disposed = true;
-      console.log('[VncViewer] Cleanup, rfbInstance exists:', !!rfbInstance);
+      rdLog('DEBUG', 'viewer', 'rfb.cleanup', {
+        had_instance: !!rfbInstance,
+        lifetime_ms: Date.now() - connectStarted,
+      });
       if (rfbInstance) {
         try { rfbInstance.disconnect(); } catch {}
         rfbInstance = null;
@@ -167,6 +209,36 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
       rfbRef.current = null;
     };
   }, [ready, wsUrl, vncPassword, retryCount, t]);
+
+  /**
+   * Submit the password the user typed into the viewer overlay.
+   *
+   * Two distinct paths hide behind one button: if the RFB session is still
+   * alive we can answer the pending credentials challenge in place; if it
+   * already died we must tear down and reconnect. They fail differently, so
+   * they are logged differently.
+   */
+  const submitPendingPassword = useCallback((trigger: 'enter_key' | 'submit_button') => {
+    if (!pendingPassword) {
+      rdLog('WARN', 'viewer', 'rfb.credentials.submit_skipped', { trigger, reason: 'empty_password' });
+      return;
+    }
+    registerRdSecret(pendingPassword);
+    const live = !!rfbRef.current;
+    rdLog('INFO', 'viewer', 'rfb.credentials.submit', {
+      trigger,
+      password: rdShape(pendingPassword),
+      path: live ? 'send_credentials_in_place' : 'reconnect',
+    });
+    if (live) {
+      rfbRef.current.sendCredentials({ password: pendingPassword });
+      setConnectionState('connecting');
+    } else {
+      // Connection lost while waiting, retry with this password
+      authFailedRef.current = false;
+      setRetryCount(c => c + 1);
+    }
+  }, [pendingPassword]);
 
   const handleFullscreen = useCallback(() => {
     if (!containerRef.current) return;
@@ -364,16 +436,7 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
                   pendingPasswordRef.current = e.target.value;
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && pendingPassword) {
-                    if (rfbRef.current) {
-                      rfbRef.current.sendCredentials({ password: pendingPassword });
-                      setConnectionState('connecting');
-                    } else {
-                      // Connection lost while waiting, retry with this password
-                      authFailedRef.current = false;
-                      setRetryCount(c => c + 1);
-                    }
-                  }
+                  if (e.key === 'Enter') submitPendingPassword('enter_key');
                 }}
                 size="small"
                 autoFocus
@@ -397,17 +460,7 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
               />
               <IconButton
                 size="small"
-                onClick={() => {
-                  if (pendingPassword) {
-                    if (rfbRef.current) {
-                      rfbRef.current.sendCredentials({ password: pendingPassword });
-                      setConnectionState('connecting');
-                    } else {
-                      authFailedRef.current = false;
-                      setRetryCount(c => c + 1);
-                    }
-                  }
-                }}
+                onClick={() => submitPendingPassword('submit_button')}
                 sx={{
                   bgcolor: '#6C63FF',
                   '&:hover': { bgcolor: '#5a52e0' },

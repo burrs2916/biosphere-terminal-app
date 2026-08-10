@@ -72,5 +72,21 @@
   "reset_password_warning_desc": "This will overwrite the existing VNC password on the remote server. After setting, use the new password to connect.",
   "restart_vnc_after_password_reset": "Password changed. VNC server needs to restart to use the new password. Click to restart.",
   "setup_guide_title": "Setup Guide",
-  "setup_guide_desc": "Follow the steps to set up VNC"
+  "setup_guide_desc": "Follow the steps to set up VNC",
+  "rd_install_flavor_label": "Desktop environment",
+  "rd_flavor_none": "No desktop",
+  "rd_flavor_desktop": "With desktop",
+  "rd_flavor_none_desc": "Install VNC server only; desktop falls back to xterm",
+  "rd_flavor_desktop_desc": "Install the full Xfce desktop environment (with common app suite)",
+  "rd_redo": "Redo",
+  "rd_reconnect": "Reconnect",
+  "rd_redo_confirm_title": "Confirm re-run?",
+  "rd_redo_confirm_desc": "This re-runs the step's command on the remote server (may reinstall packages / restart the VNC service). Continue?",
+  "rd_redo_confirm_cancel": "Cancel",
+  "rd_redo_confirm_ok": "Re-run",
+  "rd_reset_install": "Reset & Reinstall",
+  "rd_reset_confirm_title": "Reset and reinstall?",
+  "rd_reset_confirm_desc": "This will uninstall VNC and related components on the remote server, clean the ~/.vnc configuration directory, then reinstall VNC and the desktop environment. Continue?",
+  "rd_reset_confirm_cancel": "Cancel",
+  "rd_reset_confirm_ok": "Reset & Reinstall"
 }

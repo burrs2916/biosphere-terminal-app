@@ -17,6 +17,7 @@ use app::plugin_service::PluginService;
 use app::linker_service::LinkerService;
 use app::icon_service::IconService;
 use app::remote_desktop_service::RemoteDesktopService;
+use app::sftp_service::SftpService;
 use app::licensing::LicensingService;
 use domain::command::executor::CommandExecutor;
 
@@ -34,7 +35,10 @@ fn get_dev_log_dir() -> std::path::PathBuf {
         .join("logs")
 }
 
-type DebugLogPaths = std::sync::Arc<Vec<std::path::PathBuf>>;
+/// Paths are owned by `infra::logging::debug_log`, which also exposes a
+/// process-global sink so services/commands (and the frontend, via IPC) can
+/// append to the very same file instead of only `lib.rs` bootstrap code.
+type DebugLogPaths = infra::logging::debug_log::DebugLogPaths;
 
 /// Writable log locations (AppData first, exe dir as fallback).
 fn resolve_debug_log_paths(exe_path: &Option<std::path::PathBuf>) -> DebugLogPaths {
@@ -55,8 +59,16 @@ fn resolve_debug_log_paths(exe_path: &Option<std::path::PathBuf>) -> DebugLogPat
             paths.push(p);
         }
     }
-    if cfg!(debug_assertions) {
-        paths.push(get_dev_log_dir().join("debug.log"));
+    // The project's `logs/debug.log` is the canonical, user-facing trace file
+    // the support workflow asks users to attach. It must be written in EVERY
+    // build profile — not only `debug_assertions` — otherwise a release/non-dev
+    // run silently routes the Remote Desktop guide trace to the OS data dir and
+    // the file at this path stays empty. `get_dev_log_dir` resolves to
+    // `<project>/logs` via `CARGO_MANIFEST_DIR`, which is exactly the path the
+    // user inspects, so always include it alongside the OS/persistent copies.
+    let proj_log = get_dev_log_dir().join("debug.log");
+    if !paths.contains(&proj_log) {
+        paths.push(proj_log);
     }
     if let Some(exe) = exe_path.as_ref().and_then(|p| p.parent()) {
         let exe_log = exe.join("debug.log");
@@ -72,9 +84,7 @@ fn resolve_debug_log_paths(exe_path: &Option<std::path::PathBuf>) -> DebugLogPat
 }
 
 fn write_debug_log_all(paths: &DebugLogPaths, message: &str) {
-    for path in paths.iter() {
-        let _ = write_debug_log(path, message);
-    }
+    infra::logging::debug_log::write_to(paths, message);
 }
 
 fn install_panic_hook(paths: DebugLogPaths) {
@@ -287,6 +297,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Truncate debug.log on every startup so it only holds the current
     // session's diagnostics. This prevents unbounded growth over time.
     truncate_debug_logs(&debug_paths);
+
+    // Publish the paths process-globally *before* anything else can log, so
+    // services/commands (e.g. the Remote Desktop setup guide trace) and the
+    // frontend IPC bridge land in the same file as bootstrap diagnostics.
+    infra::logging::debug_log::init_paths(debug_paths.clone());
 
     install_panic_hook(debug_paths.clone());
 
@@ -626,6 +641,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let icons_dir = effective_data_dir.join("icons");
             let icon_service = Arc::new(IconService::new(db_arc.clone(), icons_dir));
             let remote_desktop_service = Arc::new(RemoteDesktopService::new());
+            let sftp_service = Arc::new(SftpService::new());
             let licensing_service = Arc::new(LicensingService::new(effective_data_dir.clone()));
             let _ = write_debug_log_all(&debug_paths, "[setup] all services initialized");
 
@@ -649,6 +665,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             app_handle.manage(command_executor);
             app_handle.manage(icon_service);
             app_handle.manage(remote_desktop_service);
+            app_handle.manage(sftp_service);
             app_handle.manage(licensing_service);
             let _ = write_debug_log_all(&debug_paths, "[setup] all services registered with app_handle");
 
@@ -761,6 +778,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::connection::save_connection,
             interface::commands::connection::delete_connection,
             interface::commands::connection::test_connection,
+            interface::commands::connection::get_rd_install_flavor,
+            interface::commands::connection::set_rd_install_flavor,
             interface::commands::notebook::list_notes,
             interface::commands::notebook::get_note,
             interface::commands::notebook::create_note,
@@ -827,6 +846,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::remote_desktop::create_remote_desktop,
             interface::commands::remote_desktop::close_remote_desktop,
             interface::commands::remote_desktop::setup_remote_desktop,
+            interface::commands::remote_desktop::append_remote_desktop_log,
+            interface::commands::remote_desktop::diagnose_vnc_error,
+            interface::commands::sftp::sftp_list,
+            interface::commands::sftp::sftp_upload,
+            interface::commands::sftp::sftp_download,
+            interface::commands::sftp::sftp_remove,
+            interface::commands::sftp::sftp_rename,
+            interface::commands::sftp::sftp_mkdir,
+            interface::commands::sftp::sftp_chmod,
+            interface::commands::sftp::sftp_cancel,
+            interface::commands::sftp::sftp_disconnect,
             interface::commands::licensing::check_pro_status,
             interface::commands::licensing::purchase_pro_lifetime,
             interface::commands::licensing::restore_pro_license,
@@ -863,38 +893,11 @@ fn truncate_debug_logs(paths: &DebugLogPaths) {
     }
 }
 
-/// Maximum size of debug.log before it gets truncated in-place.
-/// 5 MB is enough for a full session of diagnostics without bloating disk.
-const DEBUG_LOG_MAX_SIZE: u64 = 5 * 1024 * 1024;
-
 /// Append a line to a single debug log file.
-/// Best-effort: ignores errors so it never breaks startup.
-/// If the file exceeds `DEBUG_LOG_MAX_SIZE`, it is truncated to empty
-/// before writing, preventing unbounded growth during a single session.
+/// Kept as a thin alias so existing call sites read unchanged; the size-capped
+/// append itself lives in `infra::logging::debug_log`, shared with the
+/// process-global sink used by services, commands and the frontend bridge.
+#[allow(dead_code)]
 fn write_debug_log(path: &std::path::Path, message: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    // Check file size; truncate if it has grown too large.
-    if let Ok(metadata) = std::fs::metadata(path) {
-        if metadata.len() >= DEBUG_LOG_MAX_SIZE {
-            let _ = std::fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(path);
-        }
-    }
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    writeln!(file, "[{}] {}", timestamp, message)?;
-    Ok(())
+    infra::logging::debug_log::write_line(path, message)
 }

@@ -55,6 +55,30 @@ impl ConnectionRepo {
         conn.execute("DELETE FROM connections WHERE id = ?1", rusqlite::params![id])?;
         Ok(())
     }
+
+    pub fn get_by_id(db: &Database, id: &str) -> Result<Option<ConnectionConfig>> {
+        let conn = db.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, connection_type, config_json, created_at FROM connections WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map([id], |row| {
+            Ok(ConnectionConfig {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                connection_type: row.get(2)?,
+                config_json: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        match rows.next() {
+            Some(row) => {
+                let mut c = row?;
+                c.config_json = decrypt_config_password(&c.config_json);
+                Ok(Some(c))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 /// 解析 config_json，对未加密的顶层 `password` 字段做 AES 加密。

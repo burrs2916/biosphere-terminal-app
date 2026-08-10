@@ -9,9 +9,10 @@
     "process_error": "进程执行出错",
     "connect_timeout": "连接超时（握手/认证过慢）",
     "connect_failed": "无法连接到远程主机，请检查地址、端口与网络",
-    "tcp_no_sshpass": "端口可达，但无法验证密码（系统缺少 sshpass）。请改用密钥登录，或安装 sshpass 后重试",
+    "tcp_no_sshpass": "端口可达，但未提供密码，无法验证身份。请在连接配置中填写密码，或改用密钥登录",
     "ssh_key_auth_failed": "SSH 密钥认证失败（密钥不正确、主机不可达或被拒绝）",
     "ssh_password_auth_failed": "SSH 密码认证失败（密码不正确或主机不可达）",
+    "ssh_host_key_changed": "SSH 主机密钥校验失败（远程主机密钥已变更，很可能系统已重置）。请在本机终端执行 ssh-keygen -R <host> 删除旧密钥后重试，或确认此变更可信",
     "ssh_key_auth_success": "✓ SSH 密钥认证成功",
     "ssh_password_auth_success": "✓ SSH 密码认证成功"
   },

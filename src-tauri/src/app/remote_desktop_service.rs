@@ -33,16 +33,17 @@ pub struct RemoteDesktopSession {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VncSetupResult {
+    /// VNC 是否已安装（任意 VNC server）
     pub vnc_installed: bool,
+    /// VNC 是否正在运行（端口监听或有活跃会话）
     pub vnc_running: bool,
+    /// 检测到的 VNC 端口
     pub vnc_port: u16,
+    /// 当前活跃 VNC 会话的 display 号（如 :1）
     pub display: Option<String>,
-    pub messages: Vec<String>,
+    /// 是否需要设置密码（无密码文件 && 有 TigerVNC）
     pub needs_password: bool,
-    pub install_hint: String,
-    pub start_hint: String,
-    pub setup_hint: String,
-    pub passwd_hint: String,
+    /// 远程主机操作系统名称
     pub os_name: String,
 }
 
@@ -51,6 +52,20 @@ impl RemoteDesktopService {
         RemoteDesktopService {
             tunnels: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Wrapper around `setup_vnc` that also writes an entry to debug_log so
+    /// the backend probe call is correlated with the frontend guide's
+    /// run_id. The frontend bridge in `commands/remote_desktop.rs` calls
+    /// this method instead of `setup_vnc` directly so every probe shows up
+    /// in `debug.log` alongside the guide's own phase transitions.
+    pub async fn setup_vnc_traced(
+        &self,
+        ssh: &SshConnectionInfo,
+        vnc_port: u16,
+        _run_id: &str,
+    ) -> Result<VncSetupResult, String> {
+        self.setup_vnc(ssh, vnc_port).await
     }
 
     pub async fn setup_vnc(
@@ -230,124 +245,22 @@ impl RemoteDesktopService {
         let has_xfce = desktop_output.contains("startxfce4");
         let has_gnome = desktop_output.contains("gnome-session");
         let has_xterm = desktop_output.contains("xterm");
-        let has_desktop = has_xfce || has_gnome || has_xterm;
+        // 仅当检测到完整的桌面环境（Xfce / GNOME）时才认为"桌面已安装"。
+        // xterm 只是终端模拟器，不是桌面环境。用户选择"有桌面"时，xterm 不应算作满足条件，
+        // 否则 AI 诊断永远不会触发（onInstallSuccess 会因为 desktopInstalled=true 而跳过诊断）。
+        let has_desktop = has_xfce || has_gnome;
 
         tracing::info!(
             "[remote-desktop-setup] Detection: vnc_installed={}, vnc_running={}, port_listening={}, vnc_has_active_session={}, detected_port={}, has_passwd={}, has_xfce={}, has_gnome={}, has_xterm={}, has_desktop={}",
             vnc_installed, vnc_running, port_listening, vnc_has_active_session, detected_port, has_passwd, has_xfce, has_gnome, has_xterm, has_desktop
         );
 
-        let install_hint = if is_macos {
-            // macOS 原生屏幕共享使用独立的 VNC 密码机制（非 ~/.vnc/passwd），本工具统一在 macOS 上
-            // 安装 TigerVNC（Homebrew）来管理，故走与 Linux 一致的 TigerVNC 路径。TigerVNC 依赖 X11，
-            // 故同时装 XQuartz（Homebrew cask）。若未装 Homebrew 给出可读的兜底提示。
-            "brew install --cask xquartz; brew install tigervnc || echo '[WARN] Homebrew not found. Install from https://brew.sh then retry the step.'".to_string()
-        } else if is_debian {
-            "sudo apt update && sudo apt install -y tigervnc-standalone-server tigervnc-common xfce4 dbus-x11".to_string()
-        } else if is_rhel {
-            // Xfce 组来自 EPEL，默认源里没有会导致 `groupinstall` 失败并因 && 短路连 tigervnc-server 都不装。
-            // 改为：始终先装 tigervnc-server + dbus-x11 + xterm（基础源必有，xterm 作 xstartup 兜底），
-            // Xfce 组作为可选步骤非致命安装，失败也不影响 VNC 起一个可用的 xterm 会话。
-            "sudo yum install -y tigervnc-server dbus-x11 xterm; (sudo yum install -y epel-release && sudo yum groupinstall -y 'Xfce') || echo '[WARN] Xfce group unavailable; VNC will start an xterm session'".to_string()
-        } else if is_fedora {
-            "sudo dnf install -y tigervnc-server dbus-x11 xterm; sudo dnf groupinstall -y 'Xfce' || echo '[WARN] Xfce unavailable; xterm session will be used'".to_string()
-        } else if is_suse {
-            "sudo zypper install -y tigervnc xterm; sudo zypper install -y patterns-xfce || sudo zypper install -y xfce4-session || echo '[WARN] Xfce unavailable; xterm session will be used'".to_string()
-        } else if is_arch {
-            "sudo pacman -S --noconfirm tigervnc xterm; sudo pacman -S --noconfirm xfce4 || echo '[WARN] xfce4 unavailable; xterm session will be used'".to_string()
-        } else if is_alpine {
-            "sudo apk add --update tigervnc xterm || echo '[WARN] Failed to install TigerVNC via apk'".to_string()
-        } else if is_gentoo {
-            "sudo emerge --ask tigervnc xterm || echo '[WARN] Failed to install TigerVNC via emerge'".to_string()
-        } else if is_void {
-            "sudo xbps-install -S tigervnc xterm || echo '[WARN] Failed to install TigerVNC via xbps'".to_string()
-        } else if is_nixos {
-            "nix-env -iA nixos.tigervnc || echo '[WARN] Failed to install TigerVNC via nix-env'".to_string()
-        } else if is_solus {
-            "sudo eopkg it tigervnc xterm || echo '[WARN] Failed to install TigerVNC via eopkg'".to_string()
-        } else {
-            "Install TigerVNC (package tigervnc-server / tigervnc) and a desktop environment (e.g. Xfce), then run: vncserver :1 -geometry 1280x800 -depth 24 -localhost no".to_string()
-        };
-
-        let start_hint = if is_macos && has_vncserver {
-            // macOS 上 TigerVNC/TightVNC 依赖 XQuartz（X11 环境）。若 XQuartz 未运行，
-            // `vncserver :1` 会立即失败且无明确原因，故在启动前先拉起 XQuartz。
-            "open -a XQuartz && vncserver :1 -geometry 1280x800 -depth 24 -localhost no".to_string()
-        } else if has_vncserver {
-            "vncserver :1 -geometry 1280x800 -depth 24 -localhost no".to_string()
-        } else if has_x11vnc {
-            "x11vnc -display :0 -forever -shared -rfbport 5900".to_string()
-        } else {
-            install_hint.clone()
-        };
-
-        let setup_hint = if has_tigervnc {
-            let mut cmds = Vec::new();
-            cmds.push("mkdir -p ~/.vnc".to_string());
-            if !has_desktop {
-                if is_debian {
-                    cmds.push("sudo apt update && sudo apt install -y xfce4 dbus-x11".to_string());
-                } else if is_rhel {
-                    // 与 install_hint 一致：始终装 xterm 兜底，Xfce 组非致命
-                    cmds.push("sudo yum install -y dbus-x11 xterm; (sudo yum install -y epel-release && sudo yum groupinstall -y 'Xfce') || echo '[WARN] Xfce unavailable; xterm session will be used'".to_string());
-                } else if is_fedora {
-                    cmds.push("sudo dnf install -y dbus-x11 xterm; sudo dnf groupinstall -y 'Xfce' || echo '[WARN] Xfce unavailable; xterm session will be used'".to_string());
-                } else if is_suse {
-                    cmds.push("sudo zypper install -y dbus-x11 xterm; sudo zypper install -y patterns-xfce || sudo zypper install -y xfce4-session || echo '[WARN] Xfce unavailable; xterm session will be used'".to_string());
-                } else if is_arch {
-                    cmds.push("sudo pacman -S --noconfirm dbus xterm; sudo pacman -S --noconfirm xfce4 || echo '[WARN] xfce4 unavailable; xterm session will be used'".to_string());
-                }
-            }
-            // xstartup 自检式多兜底：不依赖探测时的桌面状态，实际装了什么就启动什么，
-            // 彻底避免「装了 xterm 却仍 exec startxfce4」的错配（Xfce 组缺失时尤其关键）。
-            let xstartup = "#!/bin/sh\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nif command -v startxfce4 >/dev/null 2>&1; then\n  exec startxfce4\nelif command -v gnome-session >/dev/null 2>&1; then\n  exec gnome-session\nelif command -v xterm >/dev/null 2>&1; then\n  exec xterm\nelse\n  exec xterm\nfi\n";
-            cmds.push(format!("printf '{}\\n' > ~/.vnc/xstartup && chmod +x ~/.vnc/xstartup", xstartup.replace('\n', "\\n")));
-            cmds.join(" && ")
-        } else if has_vncserver {
-            // TightVNC / Xtightvnc：同样使用 ~/.vnc/xstartup 机制，但避免猜测发行版专属桌面包名，
-            // 仅建 ~/.vnc 与自检式 xstartup（装了什么就起什么，否则回落 xterm）。
-            let xstartup = "#!/bin/sh\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nif command -v startxfce4 >/dev/null 2>&1; then\n  exec startxfce4\nelif command -v gnome-session >/dev/null 2>&1; then\n  exec gnome-session\nelif command -v xterm >/dev/null 2>&1; then\n  exec xterm\nelse\n  exec xterm\nfi\n";
-            format!("mkdir -p ~/.vnc && printf '{}\\n' > ~/.vnc/xstartup && chmod +x ~/.vnc/xstartup", xstartup.replace('\n', "\\n"))
-        } else if is_macos {
-            // macOS + TigerVNC(Homebrew)：brew 不提供标准 Linux 桌面环境，仅建 ~/.vnc 与自检式 xstartup，
-            // 优先起用户已装的 DE（startxfce4/gnome-session），都没有则回落 xterm，保证 VNC 至少可用。
-            let xstartup = "#!/bin/sh\nunset SESSION_MANAGER\nunset DBUS_SESSION_BUS_ADDRESS\nif command -v startxfce4 >/dev/null 2>&1; then\n  exec startxfce4\nelif command -v gnome-session >/dev/null 2>&1; then\n  exec gnome-session\nelif command -v xterm >/dev/null 2>&1; then\n  exec xterm\nelse\n  exec xterm\nfi\n";
-            format!("mkdir -p ~/.vnc && printf '{}\\n' > ~/.vnc/xstartup && chmod +x ~/.vnc/xstartup", xstartup.replace('\n', "\\n"))
-        } else {
-            String::new()
-        };
-
-        let passwd_hint = if has_tigervnc && !has_passwd {
-            // 自动设置走前端的 `vncpasswd -f`；此处仅作手动兜底提示
-            "vncpasswd".to_string()
-        } else if has_vncserver && !has_passwd {
-            // TightVNC / 其它 VNC 实现的 vncpasswd 不支持 -f（TigerVNC 专属），只能交互式设置；
-            // 该情况 needs_password 为 false（前端不会跑 -f），改为在 UI 提示用户手动执行。
-            "vncpasswd ~/.vnc/passwd".to_string()
-        } else {
-            String::new()
-        };
-
-        // macOS 平台提示：TigerVNC 跑在 XQuartz 上，且 brew 不提供 Linux 风格桌面环境，
-        // 默认只会起一个 xterm 会话——这与用户预期「看到完整桌面」不同，需提前告知以免困惑。
-        let mut messages: Vec<String> = Vec::new();
-        if is_macos {
-            messages.push(
-                "macOS note: TigerVNC on macOS requires XQuartz (auto-launched before start). Without a Linux-style desktop (Xfce/GNOME) installed, the VNC session shows a terminal (xterm) window — this is expected, not an error.".to_string()
-            );
-        }
-
         Ok(VncSetupResult {
             vnc_installed,
             vnc_running,
             vnc_port: detected_port,
             display: detected_display,
-            messages,
             needs_password: !has_passwd && has_tigervnc,
-            install_hint,
-            start_hint,
-            setup_hint,
-            passwd_hint,
             os_name: if is_macos {
                 "macos".to_string()
             } else if is_debian {

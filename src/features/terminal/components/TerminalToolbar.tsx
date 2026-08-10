@@ -13,6 +13,7 @@ import {
   MagnifyingGlassIcon,
   MonitorIcon,
   PlugsConnectedIcon,
+  FolderIcon,
 } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
@@ -23,6 +24,7 @@ interface TerminalToolbarProps {
   onOpenNotes?: () => void;
   onOpenAiCopilot?: () => void;
   onOpenRemoteDesktop?: () => void;
+  onOpenSftp?: () => void;
   onClearBuffer?: () => void;
   onCopy?: () => void;
   onPaste?: () => void;
@@ -38,6 +40,7 @@ export function TerminalToolbar({
   onOpenNotes,
   onOpenAiCopilot,
   onOpenRemoteDesktop,
+  onOpenSftp,
   onClearBuffer,
   onCopy,
   onPaste,
@@ -135,6 +138,13 @@ export function TerminalToolbar({
           <Tooltip title={t('open_remote_desktop')}>
             <IconButton size="small" onClick={onOpenRemoteDesktop}>
               <MonitorIcon size={16} color={isDark ? '#4FC3F7' : '#0277BD'} />
+            </IconButton>
+          </Tooltip>
+        )}
+        {isSshSession && (
+          <Tooltip title={t('open_sftp')}>
+            <IconButton size="small" onClick={onOpenSftp}>
+              <FolderIcon size={16} color={isDark ? '#FFD740' : '#E65100'} />
             </IconButton>
           </Tooltip>
         )}

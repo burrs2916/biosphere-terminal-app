@@ -1,3 +1,5 @@
+pub mod debug_log;
+
 use std::path::Path;
 use std::io::{self, Seek};
 

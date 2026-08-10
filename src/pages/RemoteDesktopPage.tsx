@@ -18,12 +18,11 @@ import {
   DesktopIcon,
   CheckCircleIcon,
   XCircleIcon,
-  PlayIcon,
-  ArrowRightIcon,
-  LockIcon,
   WarningIcon,
   EyeIcon,
   EyeSlashIcon,
+  RobotIcon,
+  ArrowRight,
 } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
@@ -31,26 +30,18 @@ import { useSearchParams } from 'react-router-dom';
 import { VncViewer } from '../features/terminal/components/VncViewer';
 import { createRemoteDesktop, closeRemoteDesktop, setupRemoteDesktop, type RemoteDesktopSession } from '../core/services/remote-desktop.service';
 import type { SshConnectionInfo } from '../proto/connection';
-import { spawnTerminal, killTerminal, writeToTerminal } from '../core/services/terminal.service';
+import { spawnTerminal, killTerminal } from '../core/services/terminal.service';
 import { localizeBackendError } from '../core/backendError';
 import { useNotify } from '../core/notification';
 import { TerminalEmulator } from '../features/terminal';
 import type { TerminalEmulatorHandle } from '../features/terminal';
 import type { PtyConfig } from '../proto';
 import { useFeatureGate, LockedScreen } from '../features/licensing';
+import { openAiCopilotWindow } from '../core/services/window.service';
 
 type Step = 'config' | 'connecting' | 'setup' | 'viewer';
 type Mode = 'x11' | 'vnc';
-type SetupPhase = 'checking' | 'install' | 'password' | 'start' | 'ready' | 'error';
-
-interface SetupStep {
-  id: SetupPhase;
-  title: string;
-  description: string;
-  command: string;
-  startCommand?: string;
-  status: 'pending' | 'running' | 'done' | 'failed' | 'timeout' | 'manual';
-}
+type VncStatus = 'checking' | 'installed' | 'not_installed' | 'error';
 
 export function RemoteDesktopPage() {
   const { t } = useTranslation('remoteDesktop');
@@ -80,40 +71,22 @@ export function RemoteDesktopPage() {
   const [showSshPassword, setShowSshPassword] = useState(false);
   const [showVncPassword, setShowVncPassword] = useState(false);
   const [session, setSession] = useState<RemoteDesktopSession | null>(null);
-  const [showResetPassword, setShowResetPassword] = useState(false);
 
-  const [setupSteps, setSetupSteps] = useState<SetupStep[]>([]);
-  const [setupResult, setSetupResult] = useState<any>(null);
-  const [currentPhase, setCurrentPhase] = useState<SetupPhase>('checking');
+  // VNC 状态检测
+  const [vncStatus, setVncStatus] = useState<VncStatus>('checking');
+  const [vncStatusMessage, setVncStatusMessage] = useState('');
+  const [vncDetectedPort, setVncDetectedPort] = useState<number | null>(null);
 
-  const setupTerminalIdRef = useRef<string | null>(null);
-  const sessionIdRef = useRef<string | null>(null);
   const terminalRef = useRef<TerminalEmulatorHandle | null>(null);
-  const sshRef = useRef<SshConnectionInfo | null>(null);
-  // 跟踪最新的 session 值，供卸载清理函数使用，避免 useEffect 闭包陷阱。
+  const setupTerminalIdRef = useRef<string | null>(null);
   const sessionRef = useRef<RemoteDesktopSession | null>(null);
+  const sshRef = useRef<SshConnectionInfo | null>(null);
+  const x11TerminalIdRef = useRef<string | null>(null);
 
   const bgColor = isDark ? '#0d1117' : '#f5f5f5';
   const cardBg = isDark ? '#161B22' : '#ffffff';
   const textColor = isDark ? '#c9d1d9' : '#24292f';
   const accentColor = '#6C63FF';
-
-  const getPasswordStrength = useCallback((pwd: string): { level: 'weak' | 'medium' | 'strong'; color: string } => {
-    if (pwd.length < 6) return { level: 'weak', color: '#ff5252' };
-    let score = 0;
-    if (pwd.length >= 8) score++;
-    if (pwd.length >= 12) score++;
-    if (/[a-z]/.test(pwd) && /[A-Z]/.test(pwd)) score++;
-    if (/\d/.test(pwd)) score++;
-    if (/[!@#$%^&*(),.?":{}|<>]/.test(pwd)) score++;
-    if (score <= 1) return { level: 'weak', color: '#ff5252' };
-    if (score <= 3) return { level: 'medium', color: '#ffb74d' };
-    return { level: 'strong', color: '#4caf50' };
-  }, []);
-
-  const updateStep = useCallback((id: SetupPhase, updates: Partial<SetupStep>) => {
-    setSetupSteps(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
-  }, []);
 
   const getSshConfig = useCallback((): SshConnectionInfo => ({
     host,
@@ -124,70 +97,36 @@ export function RemoteDesktopPage() {
     password: authMethod === 'password' ? password : undefined,
   }), [host, port, username, authMethod, privateKeyPath, password]);
 
-  const executeInTerminal = useCallback(async (command: string) => {
-    const term = terminalRef.current;
-    if (!term || !setupTerminalIdRef.current) return;
-    term.focus();
-    term.paste(command);
-    await new Promise(r => setTimeout(r, 50));
-    const encoder = new TextEncoder();
-    const bytes = Array.from(encoder.encode('\r'));
-    await writeToTerminal(setupTerminalIdRef.current, bytes);
-  }, []);
-
+  // 检测 VNC 状态
   const checkVncStatus = useCallback(async () => {
-    if (!sshRef.current) return;
+    if (!sshRef.current) return null;
+    setVncStatus('checking');
+    setVncStatusMessage(t('checking_vnc_status', { defaultValue: 'Verifying VNC server status on remote host...' }));
     try {
       const result = await setupRemoteDesktop(sshRef.current, parseInt(vncPort) || 5900);
-      if (result) setSetupResult(result);
+      if (result.vncInstalled && result.vncRunning) {
+        setVncStatus('installed');
+        setVncDetectedPort(result.vncPort);
+        setVncStatusMessage(
+          result.needsPassword
+            ? t('vnc_running_need_password', { defaultValue: 'VNC server is running on port {port}. Enter the VNC password to connect.' })
+            : t('vnc_running_no_password', { defaultValue: 'VNC server is running on port {port} with no password required.' })
+        );
+      } else if (result.vncInstalled && !result.vncRunning) {
+        setVncStatus('not_installed');
+        setVncStatusMessage(t('vnc_installed_not_running', { defaultValue: 'VNC is installed but not running. Start it in the terminal or use the AI Assistant for help.' }));
+      } else {
+        setVncStatus('not_installed');
+        setVncStatusMessage(t('vnc_not_installed', { defaultValue: 'VNC server is not installed on the remote host. Use the AI Assistant below to install it.' }));
+      }
       return result;
-    } catch (e) {
+    } catch (err: any) {
+      setVncStatus('error');
+      setVncStatusMessage(localizeBackendError(err) || t('vnc_check_failed', { defaultValue: 'Failed to check VNC status.' }));
+      notify(localizeBackendError(err) || t('connection_failed'));
       return null;
     }
-  }, [vncPort, setSetupResult]);
-
-  // 进入"手动设密码"模式：用于 TightVNC / 其它不支持 `vncpasswd -f` 的 VNC 实现。
-  // 此时后端 needs_password 为 false（不会跑 TigerVNC 专属的 -f），改为在 UI 提示用户到终端手动执行命令。
-  const enterManualPassword = useCallback((result: any) => {
-    updateStep('password', {
-      status: 'manual',
-      description: t('password_manual_desc', {
-        defaultValue: 'This VNC server does not support automatic password setup. Run the command below in the terminal to set the password, then click Continue.',
-      }),
-      command: result.passwdHint,
-    });
-    setCurrentPhase('password');
-  }, [updateStep, t]);
-
-  const handleManualPasswordDone = useCallback(async () => {
-    updateStep('password', {
-      status: 'done',
-      description: t('password_manual_done', { defaultValue: 'VNC password set manually' }),
-    });
-    const result = await checkVncStatus();
-    if (result && result.vncRunning) {
-      updateStep('start', { status: 'done', description: 'Already running' });
-      updateStep('ready', {
-        status: 'pending',
-        description: 'VNC is ready. Click to connect to remote desktop.',
-      });
-      setCurrentPhase('ready');
-    } else if (result && result.setupHint) {
-      updateStep('start', {
-        status: 'pending',
-        description: 'Configure desktop environment and start VNC server.',
-        command: `${result.setupHint} && ${result.startHint}`,
-      });
-      setCurrentPhase('start');
-    } else if (result) {
-      updateStep('start', {
-        status: 'pending',
-        description: 'VNC installed. Click to start it.',
-        command: result.startHint,
-      });
-      setCurrentPhase('start');
-    }
-  }, [updateStep, checkVncStatus, t]);
+  }, [vncPort, notify, t]);
 
   const handleConnect = useCallback(async () => {
     if (!host || !username) {
@@ -197,10 +136,12 @@ export function RemoteDesktopPage() {
 
     const ssh = getSshConfig();
     sshRef.current = ssh;
-    setStep('connecting');
 
-    try {
-      if (mode === 'vnc') {
+    if (mode === 'vnc') {
+      setStep('connecting');
+
+      try {
+        // 启动终端会话（左侧终端，给用户和 AI 助手用）
         const setupSessionId = `vnc-setup-${Date.now()}`;
         setupTerminalIdRef.current = setupSessionId;
 
@@ -212,108 +153,21 @@ export function RemoteDesktopPage() {
         };
 
         await spawnTerminal(setupSessionId, config);
-
-        setSetupSteps([
-          { id: 'checking', title: 'Check VNC Status', description: 'Detect if VNC server is installed and running', command: '', status: 'running' },
-          { id: 'install', title: 'Install VNC Server', description: 'Install TigerVNC on the remote server', command: '', status: 'pending' },
-          { id: 'password', title: 'Set VNC Password', description: 'Set a password for VNC authentication', command: '', status: 'pending' },
-          { id: 'start', title: 'Start VNC Server', description: 'Launch VNC server with display', command: '', status: 'pending' },
-          { id: 'ready', title: 'Connect', description: 'Establish SSH tunnel and connect', command: '', status: 'pending' },
-        ]);
-        setCurrentPhase('checking');
         setStep('setup');
 
-        await new Promise(r => setTimeout(r, 1500));
-
-        const result = await checkVncStatus();
-        if (!result) {
-          updateStep('checking', { status: 'failed', description: 'Failed to connect to remote server' });
-          setCurrentPhase('error');
-          return;
-        }
-
-        if (result.vncInstalled && result.vncRunning) {
-          updateStep('checking', { status: 'done', description: 'VNC is installed and running' });
-          updateStep('install', { status: 'done', description: 'Already installed' });
-          if (result.needsPassword) {
-            updateStep('password', {
-              status: 'pending',
-              description: 'VNC requires a password to connect. Enter a password below (at least 6 characters).',
-              command: '',
-            });
-            updateStep('start', { status: 'done', description: 'Already running' });
-            setCurrentPhase('password');
-          } else if (result.passwdHint) {
-            enterManualPassword(result);
-          } else {
-            updateStep('password', { status: 'done', description: 'Password already configured' });
-            updateStep('start', { status: 'done', description: 'Already running' });
-            updateStep('ready', {
-              status: 'pending',
-              description: 'Enter the VNC password you set on the remote server, then click Connect.',
-            });
-            setCurrentPhase('ready');
-          }
-          return;
-        }
-
-        if (result.vncInstalled && !result.vncRunning) {
-          updateStep('checking', { status: 'done', description: 'VNC is installed but not running' });
-          updateStep('install', { status: 'done', description: 'Already installed' });
-          if (result.needsPassword) {
-            updateStep('password', {
-              status: 'pending',
-              description: 'VNC requires a password to connect. Enter a password below (at least 6 characters).',
-              command: '',
-            });
-            updateStep('start', {
-              status: 'pending',
-              description: 'After setting the password, start the VNC server.',
-              command: result.setupHint ? `${result.setupHint} && ${result.startHint}` : result.startHint,
-            });
-            setCurrentPhase('password');
-          } else if (result.passwdHint) {
-            enterManualPassword(result);
-          } else {
-            updateStep('password', { status: 'done', description: 'Password already set' });
-            if (result.setupHint) {
-              updateStep('start', {
-                status: 'pending',
-                description: 'Configure desktop environment and start VNC server.',
-                command: `${result.setupHint} && ${result.startHint}`,
-              });
-            } else {
-              updateStep('start', {
-                status: 'pending',
-                description: 'VNC is installed but not running. Click to start it.',
-                command: result.startHint,
-              });
-            }
-            setCurrentPhase('start');
-          }
-          return;
-        }
-
-        updateStep('checking', { status: 'done', description: 'VNC is not installed' });
-        updateStep('install', {
-          status: 'pending',
-          description: 'VNC server not found. Click to install.',
-          command: result.installHint,
-        });
-        updateStep('password', {
-          status: 'pending',
-          description: 'After installation, set a VNC password.',
-          command: '',
-        });
-        updateStep('start', {
-          status: 'pending',
-          description: 'After setting the password, start VNC server.',
-          command: result.startHint,
-        });
-        setCurrentPhase('install');
-      } else {
+        // 检测 VNC 状态
+        await new Promise(r => setTimeout(r, 1500)); // 等 SSH banner 结束
+        await checkVncStatus();
+      } catch (err: any) {
+        notify(localizeBackendError(err) || t('connection_failed'));
+        setStep('config');
+      }
+    } else {
+      // X11 模式
+      setStep('connecting');
+      try {
         const sessionId = `x11-${Date.now()}`;
-        sessionIdRef.current = sessionId;
+        x11TerminalIdRef.current = sessionId;
 
         const config: PtyConfig = {
           rows: 24,
@@ -325,271 +179,75 @@ export function RemoteDesktopPage() {
 
         await spawnTerminal(sessionId, config);
         setStep('viewer');
-      }
-    } catch (err: any) {
-      notify(localizeBackendError(err) || t('connection_failed'));
-      setStep('config');
-    }
-  }, [host, port, username, authMethod, privateKeyPath, password, vncPort, mode, notify, t, getSshConfig, checkVncStatus, updateStep, enterManualPassword]);
-
-  const pollVncStatus = useCallback(async (
-    phase: SetupPhase,
-    checkFn: (result: any) => boolean,
-    onSuccess: (result: any) => void,
-    maxWaitMs: number = 1800000,
-    baseDescription?: string,
-    onTimeout?: () => void,
-  ) => {
-    const intervalMs = 5000;
-    const start = Date.now();
-
-    const fmtElapsed = (ms: number) => {
-      const totalSec = Math.floor(ms / 1000);
-      const m = Math.floor(totalSec / 60);
-      const s = totalSec % 60;
-      return m > 0 ? `${m}m ${s}s` : `${s}s`;
-    };
-
-    while (Date.now() - start < maxWaitMs) {
-      await new Promise(r => setTimeout(r, intervalMs));
-      const elapsed = Date.now() - start;
-      if (baseDescription) {
-        updateStep(phase, { description: `${baseDescription} (elapsed ${fmtElapsed(elapsed)})` });
-      }
-
-      const result = await checkVncStatus();
-      if (result && checkFn(result)) {
-        onSuccess(result);
-        return;
+      } catch (err: any) {
+        notify(localizeBackendError(err) || t('connection_failed'));
+        setStep('config');
       }
     }
-
-    // 超时不做致命失败：长耗时安装（如 RHEL 装完整 Xfce 桌面）往往仍在终端后台继续跑，
-    // 落入软超时状态 + 提供「Re-check」按钮，等命令真正完成后再验证，避免误报失败阻断用户。
-    if (onTimeout) {
-      onTimeout();
-    } else {
-      updateStep(phase, { status: 'failed', description: 'Timed out waiting for operation to complete. Check terminal output and try again.' });
-    }
-  }, [checkVncStatus, updateStep]);
-
-  // 安装/启动成功后的推进逻辑（install 与 start 共用，供初次执行与 Re-check 复用）
-  const onInstallSuccess = useCallback((result: any) => {
-    updateStep('install', { status: 'done', description: 'VNC server installed successfully' });
-    if (result.needsPassword) {
-      updateStep('password', {
-        status: 'pending',
-        description: 'VNC requires a password. Enter a password below (at least 6 characters).',
-        command: '',
-      });
-      setCurrentPhase('password');
-    } else if (result.passwdHint) {
-      enterManualPassword(result);
-    } else {
-      updateStep('password', { status: 'done', description: 'Password already set' });
-      if (result.setupHint) {
-        updateStep('start', {
-          status: 'pending',
-          description: 'Configure desktop environment and start VNC server.',
-          command: `${result.setupHint} && ${result.startHint}`,
-        });
-      } else {
-        updateStep('start', {
-          status: 'pending',
-          description: 'VNC installed. Click to start it.',
-          command: result.startHint,
-        });
-      }
-      setCurrentPhase('start');
-    }
-  }, [updateStep, enterManualPassword]);
-
-  const onStartSuccess = useCallback(() => {
-    updateStep('start', { status: 'done', description: 'VNC server is running' });
-    updateStep('ready', {
-      status: 'pending',
-      description: 'VNC is ready. Click to connect to remote desktop.',
-    });
-    setCurrentPhase('ready');
-  }, [updateStep]);
-
-  // 软超时：长耗时安装/启动往往仍在终端后台继续，不报致命失败，改用语义化的 timeout 状态 + Re-check。
-  const onInstallTimeout = useCallback(() => {
-    updateStep('install', {
-      status: 'timeout',
-      description: 'Installation is taking longer than expected. The command is likely still running in the terminal and will continue in the background — do NOT re-run it. Click "Re-check" to verify once it finishes.',
-    });
-  }, [updateStep]);
-
-  const onStartTimeout = useCallback(() => {
-    updateStep('start', {
-      status: 'timeout',
-      description: 'VNC did not report as running within the expected time. It may still be starting in the background. Click "Re-check" to verify, or inspect the terminal output.',
-    });
-  }, [updateStep]);
-
-  const handleExecuteStep = useCallback(async (phase: SetupPhase) => {
-    const stepData = setupSteps.find(s => s.id === phase);
-    if (!stepData || !stepData.command) return;
-
-    updateStep(phase, {
-      status: 'running',
-      description: phase === 'install'
-        ? 'Installing VNC and desktop environment... (this may take several minutes)'
-        : 'Setting up desktop environment and starting VNC... (this may take several minutes)',
-    });
-
-    const fullCommand = stepData.startCommand
-      ? `${stepData.command} && ${stepData.startCommand}`
-      : stepData.command;
-
-    await executeInTerminal(fullCommand);
-
-    if (phase === 'install') {
-      // 安装完整桌面环境可能耗时很久（RHEL 装 Xfce 实测可超 10 分钟），窗口放宽到 30 分钟，
-      // 且超时落入软状态而非致命失败。
-      await pollVncStatus(
-        'install',
-        (result) => result.vncInstalled,
-        onInstallSuccess,
-        1800000,
-        'Installing VNC and desktop environment',
-        onInstallTimeout,
-      );
-    } else if (phase === 'start') {
-      await pollVncStatus(
-        'start',
-        (result) => result.vncRunning,
-        onStartSuccess,
-        600000,
-        'Starting VNC server',
-        onStartTimeout,
-      );
-    }
-  }, [setupSteps, updateStep, executeInTerminal, pollVncStatus, onInstallSuccess, onStartSuccess, onInstallTimeout, onStartTimeout]);
-
-  // Re-check：不重新执行长耗时命令，仅重新轮询后端状态，用于软超时后命令实际完成时收尾。
-  const handleRecheck = useCallback(async (phase: SetupPhase) => {
-    updateStep(phase, { status: 'running', description: 'Re-checking status...' });
-    if (phase === 'install') {
-      await pollVncStatus('install', (result) => result.vncInstalled, onInstallSuccess, 1800000, 'Installing VNC and desktop environment', onInstallTimeout);
-    } else if (phase === 'start') {
-      await pollVncStatus('start', (result) => result.vncRunning, onStartSuccess, 600000, 'Starting VNC server', onStartTimeout);
-    }
-  }, [updateStep, pollVncStatus, onInstallSuccess, onStartSuccess, onInstallTimeout, onStartTimeout]);
-
-  const handleSetPassword = useCallback(async (password: string) => {
-    if (!password || password.length < 6) return;
-
-    updateStep('password', { status: 'running', description: 'Setting VNC password...' });
-
-    // Use vncpasswd -f to read password from stdin (TigerVNC supports this)
-    // -f reads password once from stdin, outputs encrypted hash to stdout
-    const escapedPwd = password.replace(/'/g, "'\\''");
-    const cmd = `mkdir -p ~/.vnc && printf '%s\\n' '${escapedPwd}' | vncpasswd -f > ~/.vnc/passwd && chmod 600 ~/.vnc/passwd`;
-
-    await executeInTerminal(cmd);
-
-    // Wait a moment then check if password was set
-    await new Promise(r => setTimeout(r, 2000));
-
-    const result = await checkVncStatus();
-    if (result && !result.needsPassword) {
-      updateStep('password', { status: 'done', description: 'VNC password set successfully' });
-      setVncPassword(password);
-
-      // If this is a password reset (VNC was already running), need to restart VNC
-      if (showResetPassword && result.vncRunning) {
-        // Construct stop command based on display
-        const stopCmd = result.display ? `vncserver -kill ${result.display}` : 'pkill -f vncserver || true';
-        updateStep('start', {
-          status: 'pending',
-          description: t('restart_vnc_after_password_reset', {
-            defaultValue: 'Password changed. VNC server needs to restart to use the new password. Click to restart.',
-          }),
-          command: `${stopCmd} && sleep 2 && ${result.startHint}`,
-        });
-        setCurrentPhase('start');
-        setShowResetPassword(false);
-      } else if (result.vncRunning) {
-        // VNC is running and this is initial setup, go to connect
-        updateStep('start', { status: 'done', description: 'Already running' });
-        updateStep('ready', {
-          status: 'pending',
-          description: 'VNC is ready. Click to connect to remote desktop.',
-        });
-        setCurrentPhase('ready');
-      } else if (result.setupHint) {
-        updateStep('start', {
-          status: 'pending',
-          description: 'Password set. Now configure and start VNC server.',
-          command: `${result.setupHint} && ${result.startHint}`,
-        });
-        setCurrentPhase('start');
-      } else {
-        updateStep('start', {
-          status: 'pending',
-          description: 'Password set. Click to start VNC server.',
-          command: result.startHint,
-        });
-        setCurrentPhase('start');
-      }
-    } else {
-      updateStep('password', { status: 'failed', description: 'Failed to set password. Try again or set it manually via vncpasswd.' });
-    }
-  }, [updateStep, executeInTerminal, checkVncStatus, showResetPassword, t]);
+  }, [host, port, username, authMethod, privateKeyPath, password, vncPort, mode, notify, t, getSshConfig, checkVncStatus]);
 
   const handleConnectVnc = useCallback(async () => {
     if (!sshRef.current) return;
-    try {
-      updateStep('ready', { status: 'running' });
 
+    try {
+      const desktopSessionId = `rd-${Date.now()}`;
+      const port = vncDetectedPort || parseInt(vncPort) || 5900;
+      const desktopSession = await createRemoteDesktop(desktopSessionId, sshRef.current, port);
+      setSession(desktopSession);
+      sessionRef.current = desktopSession;
+
+      // 关闭 setup 终端
       if (setupTerminalIdRef.current) {
-        try { await killTerminal(setupTerminalIdRef.current); } catch {}
+        try { await killTerminal(setupTerminalIdRef.current); } catch (e) {
+          console.error('[remote-desktop] setup terminal close failed:', e);
+        }
         setupTerminalIdRef.current = null;
       }
 
-      const result = await checkVncStatus();
-      console.log('[RemoteDesktop] checkVncStatus result:', JSON.stringify(result));
-      if (result?.vncRunning) {
-        const desktopSession = await createRemoteDesktop(`rd-${Date.now()}`, sshRef.current!, result.vncPort);
-        console.log('[RemoteDesktop] createRemoteDesktop result:', JSON.stringify(desktopSession));
-        setSession(desktopSession);
-        sessionRef.current = desktopSession;
-        updateStep('ready', { status: 'done', description: 'Connected!' });
-        setStep('viewer');
-      } else {
-        updateStep('ready', { status: 'failed', description: 'VNC is not running. Please start it first.' });
-      }
-    } catch (e) {
-      console.error('[RemoteDesktop] handleConnectVnc error:', e);
-      updateStep('ready', { status: 'failed', description: t('connection_failed') });
+      setStep('viewer');
+    } catch (err: any) {
+      notify(localizeBackendError(err) || t('connection_failed'));
     }
-  }, [checkVncStatus, updateStep]);
+  }, [vncDetectedPort, vncPort, notify, t]);
 
   const handleClose = useCallback(async () => {
     if (session) {
-      try { await closeRemoteDesktop(session.id); } catch {}
+      try {
+        await closeRemoteDesktop(session.id);
+      } catch (e) {
+        console.error('[remote-desktop] close failed:', e);
+      }
     }
     if (setupTerminalIdRef.current) {
-      try { await killTerminal(setupTerminalIdRef.current); } catch {}
+      try { await killTerminal(setupTerminalIdRef.current); } catch (e) {
+        console.error('[remote-desktop] setup terminal close failed:', e);
+      }
       setupTerminalIdRef.current = null;
     }
-    if (sessionIdRef.current) {
-      try { await killTerminal(sessionIdRef.current); } catch {}
-      sessionIdRef.current = null;
+    if (x11TerminalIdRef.current) {
+      try { await killTerminal(x11TerminalIdRef.current); } catch (e) {
+        console.error('[remote-desktop] x11 terminal close failed:', e);
+      }
+      x11TerminalIdRef.current = null;
     }
     setSession(null);
     sessionRef.current = null;
+    setVncStatus('checking');
+    setVncStatusMessage('');
+    setVncDetectedPort(null);
     setStep('config');
-    setSetupSteps([]);
-    setCurrentPhase('checking');
   }, [session]);
+
+  const handleOpenAiAssistant = useCallback(async () => {
+    await openAiCopilotWindow();
+  }, []);
+
+  const handleRecheck = useCallback(async () => {
+    await checkVncStatus();
+  }, [checkVncStatus]);
 
   useEffect(() => {
     return () => {
-      // 使用 sessionRef 而非 session 状态，避免闭包捕获挂载时的初始值（null）。
-      // 这样组件卸载时能正确关闭后续创建的远程桌面会话。
       const currentSession = sessionRef.current;
       if (currentSession) {
         closeRemoteDesktop(currentSession.id).catch(() => {});
@@ -597,14 +255,13 @@ export function RemoteDesktopPage() {
       if (setupTerminalIdRef.current) {
         killTerminal(setupTerminalIdRef.current).catch(() => {});
       }
-      if (sessionIdRef.current) {
-        killTerminal(sessionIdRef.current).catch(() => {});
+      if (x11TerminalIdRef.current) {
+        killTerminal(x11TerminalIdRef.current).catch(() => {});
       }
     };
   }, []);
 
-  // License gate: remote desktop is a Pro feature. Free / expired users see
-  // a locked screen instead of the connection UI.
+  // License gate
   const featureGate = useFeatureGate('remote_desktop');
   if (!featureGate.canUse) {
     return <LockedScreen feature="remote_desktop" />;
@@ -633,10 +290,10 @@ export function RemoteDesktopPage() {
           </Button>
         </Box>
         <Box sx={{ flex: 1, position: 'relative' }}>
-          {sessionIdRef.current && (
+          {x11TerminalIdRef.current && (
             <TerminalEmulator
               ref={terminalRef}
-              sessionId={sessionIdRef.current}
+              sessionId={x11TerminalIdRef.current}
               onTitleChange={() => {}}
             />
           )}
@@ -660,7 +317,9 @@ export function RemoteDesktopPage() {
       </Box>
 
       {step === 'setup' ? (
+        // 双栏布局：左侧终端，右侧指南
         <Box sx={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+          {/* 左侧：终端 */}
           <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', borderRight: '1px solid', borderColor: 'divider' }}>
             <Box sx={{ px: 2, py: 1, display: 'flex', alignItems: 'center', gap: 1, borderBottom: '1px solid', borderColor: 'divider', bgcolor: cardBg }}>
               <TerminalIcon size={16} weight="duotone" color={accentColor} />
@@ -679,6 +338,7 @@ export function RemoteDesktopPage() {
             </Box>
           </Box>
 
+          {/* 右侧：设置指南 */}
           <Box sx={{ width: 340, display: 'flex', flexDirection: 'column', bgcolor: cardBg, overflow: 'auto' }}>
             <Box sx={{ px: 2, py: 1.5, borderBottom: '1px solid', borderColor: 'divider' }}>
               <Typography variant="subtitle2" sx={{ fontWeight: 700, color: textColor }}>
@@ -689,385 +349,194 @@ export function RemoteDesktopPage() {
               </Typography>
             </Box>
 
-            {setupResult?.messages && setupResult.messages.length > 0 && (
-              <Box sx={{ mx: 2, mt: 1.5, p: 1.25, display: 'flex', gap: 1, alignItems: 'flex-start', borderRadius: 1.5, bgcolor: isDark ? 'rgba(255, 193, 7, 0.10)' : 'rgba(255, 193, 7, 0.14)', border: '1px solid', borderColor: isDark ? 'rgba(255, 193, 7, 0.35)' : 'rgba(255, 193, 7, 0.5)' }}>
-                <InfoIcon size={16} weight="fill" color="#ffb300" style={{ flexShrink: 0, marginTop: 1 }} />
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-                  {setupResult.messages.map((msg: string, i: number) => (
-                    <Typography key={i} variant="caption" sx={{ color: isDark ? 'rgba(255,224,178,0.95)' : 'rgba(102,74,0,0.95)', lineHeight: 1.4 }}>
-                      {msg}
-                    </Typography>
-                  ))}
-                </Box>
-              </Box>
-            )}
-
             <Box sx={{ flex: 1, p: 2, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-              {setupSteps.map((s, idx) => {
-                const isActive = s.id === currentPhase;
-                const showExecute = isActive && (s.status === 'pending' || s.status === 'failed') && s.command;
-                const showRecheck = isActive && s.status === 'timeout' && s.command;
-                const showPasswordInput = s.id === 'password' && isActive && (s.status === 'pending' || s.status === 'failed');
-                const showManualPassword = s.id === 'password' && isActive && s.status === 'manual';
-                const showConnect = s.id === 'ready' && currentPhase === 'ready';
+              {/* 第 1 步：检查 VNC 状态 */}
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 1.5,
+                  borderColor: accentColor,
+                  borderWidth: 2,
+                  bgcolor: isDark ? 'rgba(108,99,255,0.06)' : 'rgba(108,99,255,0.04)',
+                }}
+              >
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+                  {vncStatus === 'checking' ? (
+                    <CircularProgress size={16} sx={{ color: accentColor }} />
+                  ) : vncStatus === 'installed' ? (
+                    <CheckCircleIcon size={18} weight="fill" color="#4caf50" />
+                  ) : vncStatus === 'error' ? (
+                    <XCircleIcon size={18} weight="fill" color="#f44336" />
+                  ) : (
+                    <WarningIcon size={18} weight="fill" color="#ff9800" />
+                  )}
+                  <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
+                    {t('check_vnc_status', { defaultValue: 'Check VNC Status' })}
+                  </Typography>
+                </Box>
+                <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4, display: 'block', ml: 3.2 }}>
+                  {vncStatusMessage}
+                </Typography>
 
-                return (
-                  <Paper
-                    key={s.id}
-                    variant="outlined"
-                    sx={{
-                      p: 1.5,
-                      borderColor: isActive ? accentColor : s.status === 'failed' ? '#f44336' : s.status === 'timeout' ? '#ff9800' : 'divider',
-                      borderWidth: isActive ? 2 : 1,
-                      bgcolor: isActive ? (isDark ? 'rgba(108,99,255,0.06)' : 'rgba(108,99,255,0.04)') : 'transparent',
-                      opacity: s.status === 'pending' && !isActive ? 0.5 : 1,
-                    }}
-                  >
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                      {s.status === 'done' ? (
-                        <CheckCircleIcon size={18} weight="fill" color="#4caf50" />
-                      ) : s.status === 'failed' ? (
-                        <XCircleIcon size={18} weight="fill" color="#f44336" />
-                      ) : s.status === 'timeout' ? (
-                        <WarningIcon size={18} weight="fill" color="#ff9800" />
-                      ) : s.status === 'running' ? (
-                        <CircularProgress size={16} sx={{ color: accentColor }} />
-                      ) : (
-                        <Box sx={{ width: 18, height: 18, borderRadius: '50%', border: '2px solid', borderColor: isActive ? accentColor : 'divider', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                          <Typography variant="caption" sx={{ fontSize: 10, color: isActive ? accentColor : 'text.secondary', fontWeight: 700 }}>
-                            {idx + 1}
-                          </Typography>
-                        </Box>
-                      )}
-                      <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
-                        {s.title}
-                      </Typography>
-                    </Box>
+                {vncStatus !== 'checking' && (
+                  <Box sx={{ ml: 3.2, mt: 1 }}>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={handleRecheck}
+                      sx={{
+                        color: accentColor,
+                        borderColor: accentColor,
+                        '&:hover': { borderColor: '#5A52E0', bgcolor: 'rgba(108,99,255,0.08)' },
+                        textTransform: 'none',
+                        fontWeight: 600,
+                        fontSize: 12,
+                        py: 0.2,
+                      }}
+                    >
+                      {t('recheck', { defaultValue: 'Re-check' })}
+                    </Button>
+                  </Box>
+                )}
+              </Paper>
 
-                    <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4, display: 'block', ml: 3.2, mb: s.command && (showExecute || isActive) ? 1 : 0 }}>
-                      {s.description}
+              {/* VNC 已安装并运行 → 密码输入 + 连接 */}
+              {vncStatus === 'installed' && (
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 1.5,
+                    borderColor: '#4caf50',
+                    bgcolor: isDark ? 'rgba(76,175,80,0.05)' : 'rgba(76,175,80,0.03)',
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                    <CheckCircleIcon size={18} weight="fill" color="#4caf50" />
+                    <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
+                      {t('connect_to_vnc', { defaultValue: 'Connect to VNC' })}
                     </Typography>
-
-                    {s.status === 'running' && isActive && (
-                      <Box sx={{ ml: 3.2, mt: 0.5, display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                        <CircularProgress size={10} sx={{ color: accentColor }} />
-                        <Typography variant="caption" sx={{ color: accentColor, fontSize: 10 }}>
-                          Checking every 5s...
-                        </Typography>
-                      </Box>
-                    )}
-
-                    {s.command && isActive && (
-                      <Paper
-                        variant="outlined"
+                  </Box>
+                  <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, mb: 1 }}>
+                    {t('enter_vnc_password_to_connect', { defaultValue: 'Enter the VNC password and click Connect.' })}
+                  </Typography>
+                  <Box sx={{ ml: 3.2, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <TextField
+                        size="small"
+                        type={showVncPassword ? 'text' : 'password'}
+                        placeholder={t('password_placeholder_connect', { defaultValue: 'Enter VNC password' })}
+                        value={vncPassword}
+                        onChange={(e) => setVncPassword(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && vncPassword) handleConnectVnc();
+                        }}
                         sx={{
-                          ml: 3.2,
-                          p: 1,
-                          bgcolor: isDark ? '#0d1117' : '#f5f5f5',
-                          borderColor: 'divider',
-                          position: 'relative',
+                          flex: 1,
+                          '& .MuiInputBase-input': { fontSize: 12, py: 0.5 },
+                          '& .MuiOutlinedInput-root': { borderRadius: 1 },
+                        }}
+                        slotProps={{
+                          input: {
+                            endAdornment: (
+                              <InputAdornment position="end">
+                                <IconButton
+                                  aria-label={t('toggle_password_visibility')}
+                                  onClick={() => setShowVncPassword((v) => !v)}
+                                  edge="end"
+                                  size="small"
+                                >
+                                  {showVncPassword ? <EyeSlashIcon size={16} /> : <EyeIcon size={16} />}
+                                </IconButton>
+                              </InputAdornment>
+                            ),
+                          },
+                        }}
+                      />
+                      <Button
+                        size="small"
+                        variant="contained"
+                        disabled={!vncPassword}
+                        startIcon={<ArrowRight size={14} weight="bold" />}
+                        onClick={handleConnectVnc}
+                        sx={{
+                          bgcolor: '#4caf50',
+                          '&:hover': { bgcolor: '#388e3c' },
+                          '&:disabled': { bgcolor: 'action.disabledBackground' },
+                          textTransform: 'none',
+                          fontWeight: 600,
+                          fontSize: 12,
+                          py: 0.3,
+                          whiteSpace: 'nowrap',
                         }}
                       >
-                        <Typography
-                          variant="caption"
-                          sx={{
-                            fontFamily: 'monospace',
-                            fontSize: 11,
-                            color: accentColor,
-                            wordBreak: 'break-all',
-                            lineHeight: 1.5,
-                            display: 'block',
-                            pr: 4,
-                          }}
-                        >
-                          {s.command}
-                        </Typography>
-                        <Button
-                          size="small"
-                          onClick={() => navigator.clipboard.writeText(s.command)}
-                          sx={{ position: 'absolute', top: 2, right: 2, minWidth: 'auto', px: 0.5, py: 0, fontSize: 9, textTransform: 'none', color: 'text.secondary' }}
-                        >
-                          Copy
-                        </Button>
-                      </Paper>
-                    )}
+                        Connect Now
+                      </Button>
+                    </Box>
+                  </Box>
+                </Paper>
+              )}
 
-                    {showExecute && (
-                      <Box sx={{ ml: 3.2, mt: 1 }}>
-                        <Button
-                          size="small"
-                          variant="contained"
-                          startIcon={<PlayIcon size={14} weight="fill" />}
-                          onClick={() => handleExecuteStep(s.id)}
-                          sx={{
-                            bgcolor: accentColor,
-                            '&:hover': { bgcolor: '#5A52E0' },
-                            textTransform: 'none',
-                            fontWeight: 600,
-                            fontSize: 12,
-                            py: 0.3,
-                          }}
-                        >
-                          Execute
-                        </Button>
-                      </Box>
-                    )}
+              {/* VNC 未安装或未运行 → AI 助手按钮 */}
+              {vncStatus === 'not_installed' && (
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 1.5,
+                    borderColor: '#ff9800',
+                    bgcolor: isDark ? 'rgba(255,152,0,0.05)' : 'rgba(255,152,0,0.03)',
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                    <WarningIcon size={18} weight="fill" color="#ff9800" />
+                    <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
+                      {t('vnc_setup_required', { defaultValue: 'VNC Setup Required' })}
+                    </Typography>
+                  </Box>
+                  <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, mb: 1.5, lineHeight: 1.4 }}>
+                    {t('vnc_setup_ai_hint', { defaultValue: 'VNC is not installed or not running. Click the button below to open the AI Assistant, which can help you install and configure VNC on the remote server.' })}
+                  </Typography>
+                  <Box sx={{ ml: 3.2 }}>
+                    <Button
+                      size="small"
+                      variant="contained"
+                      startIcon={<RobotIcon size={14} weight="fill" />}
+                      onClick={handleOpenAiAssistant}
+                      sx={{
+                        bgcolor: accentColor,
+                        '&:hover': { bgcolor: '#5A52E0' },
+                        textTransform: 'none',
+                        fontWeight: 600,
+                        fontSize: 12,
+                        py: 0.3,
+                      }}
+                    >
+                      {t('open_ai_assistant', { defaultValue: 'Open AI Assistant' })}
+                    </Button>
+                  </Box>
+                </Paper>
+              )}
 
-                    {showRecheck && (
-                      <Box sx={{ ml: 3.2, mt: 1 }}>
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          startIcon={<ArrowRightIcon size={14} weight="fill" />}
-                          onClick={() => handleRecheck(s.id)}
-                          sx={{
-                            color: '#ff9800',
-                            borderColor: '#ff9800',
-                            '&:hover': { borderColor: '#f57c00', bgcolor: 'rgba(255,152,0,0.08)' },
-                            textTransform: 'none',
-                            fontWeight: 600,
-                            fontSize: 12,
-                            py: 0.3,
-                          }}
-                        >
-                          Re-check
-                        </Button>
-                      </Box>
-                    )}
-
-                    {showPasswordInput && (
-                      <Box sx={{ ml: 3.2, mt: 1.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                        {showResetPassword && (
-                          <Paper variant="outlined" sx={{ p: 1.5, bgcolor: isDark ? 'rgba(255,152,0,0.05)' : 'rgba(255,152,0,0.02)', borderColor: isDark ? 'rgba(255,152,0,0.3)' : 'rgba(255,152,0,0.2)' }}>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
-                              <WarningIcon size={14} weight="fill" color="#ff9800" />
-                              <Typography variant="caption" sx={{ fontWeight: 600, color: '#ff9800' }}>
-                                {t('reset_password_warning_title', { defaultValue: 'Resetting VNC Password' })}
-                              </Typography>
-                            </Box>
-                            <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                              {t('reset_password_warning_desc', { defaultValue: 'This will overwrite the existing VNC password on the remote server. After setting, use the new password to connect.' })}
-                            </Typography>
-                          </Paper>
-                        )}
-                        <Paper variant="outlined" sx={{ p: 1.5, bgcolor: isDark ? 'rgba(108,99,255,0.05)' : 'rgba(108,99,255,0.02)', borderColor: isDark ? 'rgba(108,99,255,0.2)' : 'rgba(108,99,255,0.1)' }}>
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
-                            <LockIcon size={14} weight="fill" color={accentColor} />
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: accentColor }}>
-                              {t('password_setup_title')}
-                            </Typography>
-                          </Box>
-                          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 1 }}>
-                            {t('password_setup_desc')}
-                          </Typography>
-                          <Box component="ul" sx={{ m: 0, pl: 2, li: { mb: 0.3 } }}>
-                            <Typography component="li" variant="caption" sx={{ color: 'text.secondary' }}>
-                              {t('password_stored_remotely')}
-                            </Typography>
-                            <Typography component="li" variant="caption" sx={{ color: 'text.secondary' }}>
-                              {t('password_required_on_connect')}
-                            </Typography>
-                            <Typography component="li" variant="caption" sx={{ color: 'text.secondary' }}>
-                              {t('password_min_length')}
-                            </Typography>
-                          </Box>
-                        </Paper>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                          <TextField
-                            size="small"
-                            type={showVncPassword ? 'text' : 'password'}
-                            placeholder={t('password_placeholder_set')}
-                            value={vncPassword}
-                            onChange={(e) => setVncPassword(e.target.value)}
-                            sx={{
-                              flex: 1,
-                              '& .MuiInputBase-input': { fontSize: 12, py: 0.5 },
-                              '& .MuiOutlinedInput-root': { borderRadius: 1 },
-                            }}
-                            slotProps={{
-                              input: {
-                                endAdornment: (
-                                  <InputAdornment position="end">
-                                    <IconButton
-                                      aria-label={t('toggle_password_visibility')}
-                                      onClick={() => setShowVncPassword((v) => !v)}
-                                      edge="end"
-                                      size="small"
-                                    >
-                                      {showVncPassword ? <EyeSlashIcon size={16} /> : <EyeIcon size={16} />}
-                                    </IconButton>
-                                  </InputAdornment>
-                                ),
-                              },
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' && vncPassword.length >= 6) {
-                                handleSetPassword(vncPassword);
-                              }
-                            }}
-                          />
-                          <Button
-                            size="small"
-                            variant="contained"
-                            disabled={vncPassword.length < 6}
-                            startIcon={<LockIcon size={14} weight="fill" />}
-                            onClick={() => handleSetPassword(vncPassword)}
-                            sx={{
-                              bgcolor: accentColor,
-                              '&:hover': { bgcolor: '#5A52E0' },
-                              '&:disabled': { bgcolor: 'action.disabledBackground' },
-                              textTransform: 'none',
-                              fontWeight: 600,
-                              fontSize: 12,
-                              py: 0.3,
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            {t('set_password')}
-                          </Button>
-                        </Box>
-                        {vncPassword.length > 0 && (
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
-                              {t('password_strength_hint')}:
-                            </Typography>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                              <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: getPasswordStrength(vncPassword).color }} />
-                              <Typography variant="caption" sx={{ color: getPasswordStrength(vncPassword).color, fontWeight: 600, fontSize: 10 }}>
-                                {t(`password_strength_${getPasswordStrength(vncPassword).level}`)}
-                              </Typography>
-                            </Box>
-                          </Box>
-                        )}
-                      </Box>
-                    )}
-
-                    {showManualPassword && (
-                      <Box sx={{ ml: 3.2, mt: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
-                        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                          {t('password_manual_note', { defaultValue: 'After running the command above in the terminal, click Continue to proceed.' })}
-                        </Typography>
-                        <Box sx={{ mt: 0.5 }}>
-                          <Button
-                            size="small"
-                            variant="contained"
-                            startIcon={<ArrowRightIcon size={14} weight="fill" />}
-                            onClick={handleManualPasswordDone}
-                            sx={{
-                              bgcolor: accentColor,
-                              '&:hover': { bgcolor: '#5A52E0' },
-                              textTransform: 'none',
-                              fontWeight: 600,
-                              fontSize: 12,
-                              py: 0.3,
-                            }}
-                          >
-                            {t('password_manual_continue', { defaultValue: 'Continue' })}
-                          </Button>
-                        </Box>
-                      </Box>
-                    )}
-
-                    {showConnect && (
-                      <Box sx={{ ml: 3.2, mt: 1.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                        <Paper variant="outlined" sx={{ p: 1.5, bgcolor: isDark ? 'rgba(76,175,80,0.05)' : 'rgba(76,175,80,0.02)', borderColor: isDark ? 'rgba(76,175,80,0.2)' : 'rgba(76,175,80,0.1)' }}>
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 1 }}>
-                            <LockIcon size={14} weight="fill" color="#4caf50" />
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: '#4caf50' }}>
-                              {t('password_connect_title')}
-                            </Typography>
-                          </Box>
-                          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 0.5 }}>
-                            {t('password_connect_desc')}
-                          </Typography>
-                          <Typography variant="caption" sx={{ color: 'text.secondary', fontStyle: 'italic' }}>
-                            {t('password_connect_hint')}
-                          </Typography>
-                        </Paper>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                          <TextField
-                            size="small"
-                            type={showVncPassword ? 'text' : 'password'}
-                            placeholder={t('password_placeholder_connect')}
-                            value={vncPassword}
-                            onChange={(e) => setVncPassword(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' && vncPassword) handleConnectVnc();
-                            }}
-                            sx={{
-                              flex: 1,
-                              '& .MuiInputBase-input': { fontSize: 12, py: 0.5 },
-                              '& .MuiOutlinedInput-root': { borderRadius: 1 },
-                            }}
-                            slotProps={{
-                              input: {
-                                endAdornment: (
-                                  <InputAdornment position="end">
-                                    <IconButton
-                                      aria-label={t('toggle_password_visibility')}
-                                      onClick={() => setShowVncPassword((v) => !v)}
-                                      edge="end"
-                                      size="small"
-                                    >
-                                      {showVncPassword ? <EyeSlashIcon size={16} /> : <EyeIcon size={16} />}
-                                    </IconButton>
-                                  </InputAdornment>
-                                ),
-                              },
-                            }}
-                          />
-                          <Button
-                            size="small"
-                            variant="contained"
-                            disabled={!vncPassword}
-                            startIcon={<ArrowRightIcon size={14} weight="bold" />}
-                            onClick={handleConnectVnc}
-                            sx={{
-                              bgcolor: '#4caf50',
-                              '&:hover': { bgcolor: '#388e3c' },
-                              '&:disabled': { bgcolor: 'action.disabledBackground' },
-                              textTransform: 'none',
-                              fontWeight: 600,
-                              fontSize: 12,
-                              py: 0.3,
-                              whiteSpace: 'nowrap',
-                            }}
-                          >
-                            Connect Now
-                          </Button>
-                        </Box>
-                        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                          <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10 }}>
-                            {t('dont_know_password', { defaultValue: "Don't know the password?" })}
-                          </Typography>
-                          <Button
-                            size="small"
-                            variant="text"
-                            startIcon={<LockIcon size={12} />}
-                            onClick={() => {
-                              setShowResetPassword(true);
-                              setCurrentPhase('password');
-                              updateStep('password', {
-                                status: 'pending',
-                                description: t('reset_password_desc', { defaultValue: 'Set a new VNC password on the remote server.' }),
-                              });
-                            }}
-                            sx={{
-                              textTransform: 'none',
-                              fontSize: 10,
-                              color: accentColor,
-                              py: 0.2,
-                              minWidth: 'auto',
-                            }}
-                          >
-                            {t('reset_password', { defaultValue: 'Reset Password' })}
-                          </Button>
-                        </Box>
-                      </Box>
-                    )}
-                  </Paper>
-                );
-              })}
+              {/* 检测错误 */}
+              {vncStatus === 'error' && (
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 1.5,
+                    borderColor: '#f44336',
+                    bgcolor: isDark ? 'rgba(244,67,54,0.05)' : 'rgba(244,67,54,0.03)',
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                    <XCircleIcon size={18} weight="fill" color="#f44336" />
+                    <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
+                      {t('check_failed', { defaultValue: 'Check Failed' })}
+                    </Typography>
+                  </Box>
+                  <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, mb: 1.5, lineHeight: 1.4 }}>
+                    {vncStatusMessage}
+                  </Typography>
+                </Paper>
+              )}
             </Box>
 
             <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider' }}>
@@ -1078,7 +547,7 @@ export function RemoteDesktopPage() {
                 onClick={handleClose}
                 sx={{ textTransform: 'none' }}
               >
-                Cancel
+                {t('cancel', { defaultValue: 'Cancel' })}
               </Button>
             </Box>
           </Box>
@@ -1096,6 +565,7 @@ export function RemoteDesktopPage() {
           </Box>
         </Box>
       ) : (
+        // 初始配置页面
         <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', p: 3 }}>
           <Paper sx={{ p: 3, maxWidth: 480, width: '100%', bgcolor: cardBg, borderRadius: 2 }}>
             <Box sx={{ mb: 2.5, display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -1226,15 +696,6 @@ export function RemoteDesktopPage() {
                     </Typography>
                   </Box>
 
-                  <Paper variant="outlined" sx={{ p: 1.5, bgcolor: isDark ? 'rgba(108,99,255,0.06)' : 'rgba(108,99,255,0.04)', borderColor: `${accentColor}30` }}>
-                    <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
-                      <InfoIcon size={14} color={accentColor} />
-                      <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
-                        Will auto-detect VNC on the remote server and guide you through setup if needed.
-                      </Typography>
-                    </Box>
-                  </Paper>
-
                   <Box sx={{ display: 'flex', gap: 1.5 }}>
                     <TextField
                       label={t('vnc_port')}
@@ -1244,31 +705,6 @@ export function RemoteDesktopPage() {
                       sx={{ width: 120 }}
                       type="number"
                       helperText="Auto-detected if running"
-                    />
-                    <TextField
-                      label={t('vnc_password')}
-                      value={vncPassword}
-                      onChange={(e) => setVncPassword(e.target.value)}
-                      size="small"
-                      fullWidth
-                      type={showVncPassword ? 'text' : 'password'}
-                      helperText="Optional, for VNC auth"
-                      slotProps={{
-                        input: {
-                          endAdornment: (
-                            <InputAdornment position="end">
-                              <IconButton
-                                aria-label={t('toggle_password_visibility')}
-                                onClick={() => setShowVncPassword((v) => !v)}
-                                edge="end"
-                                size="small"
-                              >
-                                {showVncPassword ? <EyeSlashIcon size={18} /> : <EyeIcon size={18} />}
-                              </IconButton>
-                            </InputAdornment>
-                          ),
-                        },
-                      }}
                     />
                   </Box>
                 </>
