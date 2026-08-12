@@ -52,6 +52,10 @@ export function RemoteDesktopPage() {
   const [searchParams] = useSearchParams();
   const notify = useNotify().notify;
 
+  // X11 转发仅 macOS 可用（需 XQuartz）；Windows 无系统 X Server，禁用该模式。
+  const isWindows = typeof navigator !== 'undefined'
+    && /Windows|Win32|Win64/i.test(`${navigator.userAgent} ${navigator.platform || ''}`);
+
   const hostParam = searchParams.get('host') || '';
   const portParam = searchParams.get('port') || '22';
   const usernameParam = searchParams.get('username') || '';
@@ -62,6 +66,11 @@ export function RemoteDesktopPage() {
 
   const [step, setStep] = useState<Step>('config');
   const [mode, setMode] = useState<Mode>((modeParam || 'vnc') as Mode);
+
+  // Windows 无 X Server：强制回退 VNC 模式，避免用户选 X11 后连接失败。
+  useEffect(() => {
+    if (isWindows && mode === 'x11') setMode('vnc');
+  }, [isWindows, mode]);
   const [host, setHost] = useState(hostParam);
   const [port, setPort] = useState(portParam);
   const [username, setUsername] = useState(usernameParam);
@@ -663,7 +672,7 @@ export function RemoteDesktopPage() {
                 fullWidth
                 sx={{ mb: 1 }}
               >
-                <ToggleButton value="x11" sx={{ textTransform: 'none', py: 1 }}>
+                <ToggleButton value="x11" disabled={isWindows} sx={{ textTransform: 'none', py: 1 }}>
                   <TerminalIcon size={16} weight="duotone" style={{ marginRight: 6 }} />
                   {t('mode_x11')}
                 </ToggleButton>

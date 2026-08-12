@@ -48,7 +48,7 @@
   "install_mode_full": "全量安装",
   "mode_x11": "X11 转发",
   "mode_vnc": "VNC 桌面",
-  "x11_mode_hint": "X11 转发模式：无需安装 VNC，直接转发图形应用。需要在本地安装 XQuartz（macOS）。适合运行单个图形程序。",
+  "x11_mode_hint": "X11 转发模式：无需安装 VNC，直接转发图形应用。需要在本地安装 XQuartz（macOS）。适合运行单个图形程序。（Windows 不支持，请使用 VNC 模式）",
   "vnc_mode_hint": "VNC 桌面模式：需要远程运行 VNC 服务，可获取完整桌面环境。适合需要完整图形界面的场景。",
   "x11_session": "X11 会话",
   "x11_hint": "在此终端中运行图形应用（如 xclock、firefox），窗口将显示在本地 X11 服务器上。",

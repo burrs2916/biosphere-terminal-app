@@ -74,6 +74,25 @@ impl Pty {
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
 
+        // Windows 控制台默认 OEM 代码页 936(GBK)，而本应用/ConPTY 全程 UTF-8：
+        // 不切换到 UTF-8 代码页的话，中文（以及其它非 ASCII）输入会按 GBK 解读成
+        // 乱码/无效命令（现象：输入中文后按回车"没有效果"）。
+        // - cmd.exe：`/K chcp 65001` 保留交互并切 UTF-8 代码页；
+        // - powershell.exe(5.1)：同样受 chcp 影响（`-NoExit -Command` 保留交互）；
+        // - pwsh(7+)：默认 UTF-8，无需处理。
+        #[cfg(target_os = "windows")]
+        {
+            let name = std::path::Path::new(&shell)
+                .file_name()
+                .map(|s| s.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if name.ends_with("cmd.exe") || name == "cmd" {
+                cmd.args(&["/K", "chcp", "65001>nul"]);
+            } else if name.ends_with("powershell.exe") {
+                cmd.args(&["-NoExit", "-Command", "chcp 65001>nul"]);
+            }
+        }
+
         if let Some(cwd) = &config.cwd {
             cmd.cwd(cwd);
         }

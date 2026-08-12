@@ -21,7 +21,7 @@ export interface AppSettings {
 }
 
 export const DARK_APPEARANCE: AppearanceConfig = {
-  fontFamily: '"JetBrains Mono", "Fira Code", Menlo, Monaco, monospace',
+  fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, Menlo, Monaco, monospace',
   fontSize: 14,
   lineHeight: 1.2,
   cursorStyle: 'block',
@@ -40,7 +40,7 @@ export const DARK_APPEARANCE: AppearanceConfig = {
 };
 
 export const LIGHT_APPEARANCE: AppearanceConfig = {
-  fontFamily: '"JetBrains Mono", "Fira Code", Menlo, Monaco, monospace',
+  fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, Menlo, Monaco, monospace',
   fontSize: 14,
   lineHeight: 1.2,
   cursorStyle: 'block',

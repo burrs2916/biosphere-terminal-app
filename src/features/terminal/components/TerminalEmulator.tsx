@@ -324,6 +324,12 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         // `keypress` event. Returning `false` here would block default handling and
         // swallow those characters, so non-keydown events must be let through.
         if (e.type !== 'keydown') return true;
+        // IME 组合中（中文输入法拼音/五笔组合等）：Enter 是"确认选词"而不是发送命令，
+        // keyCode 229 表示浏览器正处于 IME 组合状态。这里放行给 xterm/输入法处理，
+        // 避免把选词回车误发成 \r（导致命令被空回车打断），也避免组合状态吞掉后续回车。
+        if (e.isComposing || e.keyCode === 229) {
+          return true;
+        }
         const mod = e.ctrlKey || e.metaKey;
         if (mod && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
           const selection = terminal.getSelection();
@@ -411,8 +417,12 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         if (event.payload.type === 'drop') {
           const paths = event.payload.paths;
           if (paths && paths.length > 0) {
+            // Windows shell（cmd/PowerShell）用双引号包裹含空格路径；
+            // Unix 系 shell 用单引号。用错引号会导致 cmd 不认路径。
+            const isWindows = /Windows|Win32|Win64/i.test(`${navigator.userAgent} ${navigator.platform || ''}`);
+            const q = isWindows ? '"' : "'";
             const formatted = paths.map((p: string) =>
-              p.includes(' ') ? `'${p}'` : p
+              p.includes(' ') ? `${q}${p}${q}` : p
             );
             terminal.paste(formatted.join(' '));
           }

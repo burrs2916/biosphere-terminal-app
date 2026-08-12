@@ -48,7 +48,7 @@
   "install_mode_full": "Full",
   "mode_x11": "X11 Forwarding",
   "mode_vnc": "VNC Desktop",
-  "x11_mode_hint": "X11 Forwarding: No VNC required, forwards graphical apps directly. Requires XQuartz on macOS. Best for running single graphical programs.",
+  "x11_mode_hint": "X11 Forwarding: No VNC required, forwards graphical apps directly. Requires XQuartz on macOS. Best for running single graphical programs. (Not supported on Windows — use VNC mode.)",
   "vnc_mode_hint": "VNC Desktop: Requires VNC server on remote, provides full desktop environment. Best for complete GUI sessions.",
   "x11_session": "X11 Session",
   "x11_hint": "Run graphical applications in this terminal (e.g. xclock, firefox). Windows will appear on your local X11 server.",
