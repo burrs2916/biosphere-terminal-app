@@ -18,7 +18,7 @@ import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
 import { open } from '@tauri-apps/plugin-dialog';
 
-const BUILTIN_TOOLS = ['terminal', 'notebook', 'file', 'command_history', 'terminal_session'];
+const ALL_AGENT_TOOLS = ['terminal', 'notebook', 'file', 'command_history', 'terminal_session', 'plugin_manager', 'memory'];
 const BRAND = '#6C63FF';
 const GRADIENT = 'linear-gradient(135deg, #6C63FF 0%, #4FC3F7 100%)';
 
@@ -138,7 +138,7 @@ function defaultFormData(): AgentFormData {
     systemPrompt: '',
     temperature: 0.7,
     maxIterations: 10,
-    toolIds: ['terminal'],
+    toolIds: [...ALL_AGENT_TOOLS],
     triggerType: 'manual',
     autoConfirm: false,
     permissionMode: 'confirm',
@@ -151,10 +151,9 @@ function defaultFormData(): AgentFormData {
 
 export function AgentManager() {
   const {
-    agents, models, loadAgents, loadModels, saveAgent, deleteAgent,
+    agents, models, endpoints, loadAgents, loadModels, loadEndpoints, saveAgent, deleteAgent,
   } = useAgentStore();
   const pendingAgentEditorId = useAgentStore((s) => s.pendingAgentEditorId);
-  const pendingHighlightTool = useAgentStore((s) => s.pendingHighlightTool);
   const clearPendingAgentEditor = useAgentStore((s) => s.clearPendingAgentEditor);
   const { t } = useTranslation('agent');
   const theme = useTheme();
@@ -168,16 +167,15 @@ export function AgentManager() {
     message: '',
     severity: 'success',
   });
-  const [toolHint, setToolHint] = useState<string | null>(null);
   const [nameTouched, setNameTouched] = useState(false);
   const [modelTouched, setModelTouched] = useState(false);
-  const toolsRef = useRef<HTMLDivElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadAgents();
     loadModels();
-  }, [loadAgents, loadModels]);
+    loadEndpoints();
+  }, [loadAgents, loadModels, loadEndpoints]);
 
   const handleNew = () => {
     setEditing({
@@ -208,21 +206,14 @@ export function AgentManager() {
     });
   };
 
-  // 从「笔记助手 / 终端助手」绑定 Tab 跳转过来时，自动打开该智能体编辑器并滚动/高亮工具区
+  // 从「笔记助手 / 终端助手」绑定 Tab 跳转过来时，自动打开该智能体编辑器
   useEffect(() => {
     if (!pendingAgentEditorId) return;
     const agent = agents.find((a) => a.id === pendingAgentEditorId);
     if (!agent) return;
     handleEdit(agent);
-    if (pendingHighlightTool) {
-      window.setTimeout(() => {
-        toolsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        setToolHint(pendingHighlightTool);
-        window.setTimeout(() => setToolHint(null), 4500);
-      }, 200);
-    }
     clearPendingAgentEditor();
-  }, [pendingAgentEditorId, agents, pendingHighlightTool, handleEdit, clearPendingAgentEditor]);
+  }, [pendingAgentEditorId, agents, handleEdit, clearPendingAgentEditor]);
 
   // dialog 打开后自动聚焦名称输入框（自造 OutlinedField 的 input，聚焦即可输入）
   useEffect(() => {
@@ -280,24 +271,6 @@ export function AgentManager() {
       setEditing(null);
     }
     setSnackbar({ open: true, message: t('agent.delete_success'), severity: 'success' });
-  };
-
-  const toggleTool = (toolId: string) => {
-    if (!editing) return;
-    const toolIds = editing.toolIds.includes(toolId)
-      ? editing.toolIds.filter((t) => t !== toolId)
-      : [...editing.toolIds, toolId];
-    // 取消勾选某工具时，同步从「始终允许」列表移除，避免悬空引用
-    const alwaysAllowedTools = editing.alwaysAllowedTools.filter((t) => toolIds.includes(t));
-    setEditing({ ...editing, toolIds, alwaysAllowedTools });
-  };
-
-  const toggleAlwaysAllowed = (toolId: string) => {
-    if (!editing) return;
-    const alwaysAllowedTools = editing.alwaysAllowedTools.includes(toolId)
-      ? editing.alwaysAllowedTools.filter((t) => t !== toolId)
-      : [...editing.alwaysAllowedTools, toolId];
-    setEditing({ ...editing, alwaysAllowedTools });
   };
 
   const getToolLabel = (toolId: string) => {
@@ -463,6 +436,7 @@ export function AgentManager() {
             ) : (
               filteredAgents.map((agent) => {
                 const model = models.find((m) => m.id === agent.modelId);
+                const modelEndpoint = model ? endpoints.find((e) => e.id === model.endpointId) : undefined;
                 const isSelected = editing?.id === agent.id;
                 return (
                   <Paper
@@ -511,6 +485,7 @@ export function AgentManager() {
                         </Typography>
                         <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: 10.5 }}>
                           {model?.name || t('agent.no_model')}
+                          {modelEndpoint ? ` · ${modelEndpoint.name}` : ''}
                         </Typography>
                       </Box>
                       <IconButton
@@ -539,23 +514,27 @@ export function AgentManager() {
                         {agent.description}
                       </Typography>
                     )}
-                    <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-                      {agent.toolIds.slice(0, 3).map((tid) => (
-                        <Chip
-                          key={tid}
-                          label={getToolLabel(tid)}
-                          size="small"
-                          sx={{ height: 18, fontSize: 10 }}
-                        />
-                      ))}
-                      {agent.toolIds.length > 3 && (
-                        <Chip
-                          label={`+${agent.toolIds.length - 3}`}
-                          size="small"
-                          sx={{ height: 18, fontSize: 10 }}
-                        />
-                      )}
-                    </Box>
+                    {ALL_AGENT_TOOLS.every((t) => agent.toolIds.includes(t)) ? (
+                      <Chip label={t('agent.all_tools')} size="small" sx={{ height: 18, fontSize: 10 }} />
+                    ) : (
+                      <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                        {agent.toolIds.slice(0, 3).map((tid) => (
+                          <Chip
+                            key={tid}
+                            label={getToolLabel(tid)}
+                            size="small"
+                            sx={{ height: 18, fontSize: 10 }}
+                          />
+                        ))}
+                        {agent.toolIds.length > 3 && (
+                          <Chip
+                            label={`+${agent.toolIds.length - 3}`}
+                            size="small"
+                            sx={{ height: 18, fontSize: 10 }}
+                          />
+                        )}
+                      </Box>
+                    )}
                   </Paper>
                 );
               })
@@ -703,12 +682,6 @@ export function AgentManager() {
         </DialogTitle>
 
         <DialogContent sx={{ p: 3 }}>
-          {toolHint && (
-            <Alert severity="warning" sx={{ mb: 2.5, '& .MuiAlert-message': { fontSize: '0.8rem' } }}>
-              {t('agent.enable_tool_hint', { tool: getToolLabel(toolHint) })}
-            </Alert>
-          )}
-
           {/* 基本信息 */}
           {renderSection(
             <IdentificationCardIcon size={16} color={BRAND} />,
@@ -761,11 +734,40 @@ export function AgentManager() {
                   <MenuItem value="" disabled>
                     {t('agent.select_model')}
                   </MenuItem>
-                  {enabledModels.map((model) => (
-                    <MenuItem key={model.id} value={model.id}>
-                      {model.name} ({model.refKey})
-                    </MenuItem>
-                  ))}
+                  {endpoints.flatMap((ep) => {
+                    const epModels = enabledModels.filter((m) => m.endpointId === ep.id);
+                    if (epModels.length === 0) return [];
+                    return [
+                      <MenuItem
+                        key={`ep-${ep.id}`}
+                        disabled
+                        sx={{
+                          opacity: 1,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          color: 'text.secondary',
+                          py: 0.6,
+                          borderTop: '1px solid',
+                          borderColor: 'divider',
+                          mt: 0.5,
+                          cursor: 'default',
+                        }}
+                      >
+                        {ep.name}
+                        {ep.baseUrl ? ` · ${ep.baseUrl.replace(/^https?:\/\//, '')}` : ''}
+                      </MenuItem>,
+                      ...epModels.map((model) => (
+                        <MenuItem
+                          key={model.id}
+                          value={model.id}
+                          title={`${ep.name}${ep.baseUrl ? ` · ${ep.baseUrl}` : ''}`}
+                          sx={{ fontSize: 13 }}
+                        >
+                          {model.name} ({model.refKey})
+                        </MenuItem>
+                      )),
+                    ];
+                  })}
                 </Select>
               </OutlinedField>
               <OutlinedField label={t('agent.description_label')}>
@@ -844,11 +846,35 @@ export function AgentManager() {
                     <MenuItem value="">
                       <em>{t('agent.none')}</em>
                     </MenuItem>
-                    {models.filter((m) => m.id !== editing?.modelId).map((m) => (
-                      <MenuItem key={m.id} value={m.id}>
-                        {m.name || m.refKey}
-                      </MenuItem>
-                    ))}
+                    {endpoints.flatMap((ep) => {
+                      const epModels = models.filter((m) => m.endpointId === ep.id && m.id !== editing?.modelId);
+                      if (epModels.length === 0) return [];
+                      return [
+                        <MenuItem
+                          key={`fb-ep-${ep.id}`}
+                          disabled
+                          sx={{
+                            opacity: 1,
+                            fontSize: 11,
+                            fontWeight: 700,
+                            color: 'text.secondary',
+                            py: 0.6,
+                            borderTop: '1px solid',
+                            borderColor: 'divider',
+                            mt: 0.5,
+                            cursor: 'default',
+                          }}
+                        >
+                          {ep.name}
+                          {ep.baseUrl ? ` · ${ep.baseUrl.replace(/^https?:\/\//, '')}` : ''}
+                        </MenuItem>,
+                        ...epModels.map((m) => (
+                          <MenuItem key={m.id} value={m.id} sx={{ fontSize: 13 }}>
+                            {m.name || m.refKey}
+                          </MenuItem>
+                        )),
+                      ];
+                    })}
                   </Select>
                 </OutlinedField>
               </Box>
@@ -906,67 +932,6 @@ export function AgentManager() {
                   (v) => setEditing({ ...editing!, maxIterations: v }),
                 )}
               </Box>
-            </Box>,
-          )}
-
-          {/* 工具 */}
-          {renderSection(
-            <WrenchIcon size={16} color={BRAND} />,
-            t('agent.tools_label'),
-            undefined,
-            <Box ref={toolsRef}>
-              <Box sx={{ display: 'flex', gap: 1, mb: 1, flexWrap: 'wrap' }}>
-                {BUILTIN_TOOLS.map((toolId) => {
-                  const active = editing?.toolIds.includes(toolId);
-                  return (
-                    <Chip
-                      key={toolId}
-                      label={getToolLabel(toolId)}
-                      size="medium"
-                      variant={active ? 'filled' : 'outlined'}
-                      color={active ? 'primary' : 'default'}
-                      onClick={() => toggleTool(toolId)}
-                      sx={{
-                        cursor: 'pointer',
-                        transition: 'all 0.2s',
-                        '&:hover': { transform: 'translateY(-2px)' },
-                      }}
-                    />
-                  );
-                })}
-              </Box>
-
-              {editing && editing.toolIds.length > 0 && (
-                <Box sx={{ mt: 2, pt: 2, borderTop: '1px dashed', borderColor: 'divider' }}>
-                  <Typography variant="subtitle2" sx={{ mb: 0.8, color: 'warning.main', fontWeight: 600, fontSize: 12.5 }}>
-                    {t('agent.allowed_tools_label')}
-                  </Typography>
-                  <Typography variant="caption" sx={{ mb: 1.2, color: 'text.secondary', display: 'block', fontSize: 11 }}>
-                    {t('agent.allowed_tools_desc')}
-                  </Typography>
-                  <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
-                    {editing.toolIds.map((toolId) => {
-                      const allowed = editing.alwaysAllowedTools.includes(toolId);
-                      return (
-                        <Chip
-                          key={toolId}
-                          label={getToolLabel(toolId)}
-                          size="small"
-                          color={allowed ? 'warning' : 'default'}
-                          variant={allowed ? 'filled' : 'outlined'}
-                          onClick={() => toggleAlwaysAllowed(toolId)}
-                          sx={{
-                            fontSize: 10,
-                            cursor: 'pointer',
-                            borderColor: allowed ? 'warning.main' : 'divider',
-                            '&:hover': { borderColor: 'warning.main', color: 'warning.main' },
-                          }}
-                        />
-                      );
-                    })}
-                  </Box>
-                </Box>
-              )}
             </Box>,
           )}
 

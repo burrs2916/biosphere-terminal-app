@@ -283,8 +283,23 @@ export async function openNotesReferenceWindow(): Promise<WebviewWindow | null> 
   return webview;
 }
 
-export async function openAiCopilotWindow(): Promise<WebviewWindow | null> {
-  const key = 'ai-copilot';
+export interface OpenAiCopilotOptions {
+  /// 绑定到指定 Agent（如远程桌面安装助手），不传则沿用用户已绑定的 copilot Agent。
+  agentId?: string;
+  /// 远程桌面设置指南携带的上下文，写入窗口 URL，供 AiCopilotPage 解析。
+  sessionId?: string;
+  host?: string;
+  username?: string;
+  /// 远程桌面安装模式：headless（无桌面版）/ basic（基础桌面版）/ full（全量安装）。
+  installMode?: string;
+}
+
+export async function openAiCopilotWindow(opts?: OpenAiCopilotOptions): Promise<WebviewWindow | null> {
+  // 远程桌面安装助手（带 agentId/sessionId 等上下文）必须是独立窗口，
+  // 否则会与普通 AI 对话共用 `ai-copilot` label，导致普通对话复用其窗口、
+  // 继承 rdSetup 上下文并误触发安装指令。
+  const isRdSetup = !!(opts?.agentId || opts?.sessionId || opts?.host || opts?.username);
+  const key = isRdSetup ? 'ai-copilot-rd-setup' : 'ai-copilot';
 
   const existing = await WebviewWindow.getByLabel(key);
   if (existing) {
@@ -292,8 +307,18 @@ export async function openAiCopilotWindow(): Promise<WebviewWindow | null> {
     return existing;
   }
 
+  // 把上下文编码进 hash 路由的 query，供 AiCopilotPage 通过 useSearchParams 读取。
+  const params = new URLSearchParams();
+  if (opts?.agentId) params.set('agentId', opts.agentId);
+  if (opts?.sessionId) params.set('sessionId', opts.sessionId);
+  if (opts?.host) params.set('host', opts.host);
+  if (opts?.username) params.set('username', opts.username);
+  if (opts?.installMode) params.set('installMode', opts.installMode);
+  const query = params.toString();
+  const url = query ? `/#/ai-copilot?${query}` : '/#/ai-copilot';
+
   const webview = new WebviewWindow(key, {
-    url: '/#/ai-copilot',
+    url,
     title: 'AI Copilot',
     width: 880,
     height: 760,

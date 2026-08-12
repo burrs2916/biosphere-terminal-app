@@ -116,3 +116,9 @@ export async function respondPermission(conversationId: string, approved: boolea
 export async function updateAgentAllowedTools(agentId: string, alwaysAllowedTools: string[]): Promise<void> {
   return invoke('update_agent_allowed_tools', { agentId, alwaysAllowedTools });
 }
+
+/// 确保「远程桌面安装助手」专用 Agent 存在（后端幂等播种），返回其固定 id。
+/// lang：用户界面语言（如 'zh-CN' / 'en-US'），决定播种时写入的提示词语言版本。
+export async function ensureRemoteDesktopSetupAgent(modelId?: string, lang?: string): Promise<string> {
+  return invoke('ensure_remote_desktop_setup_agent', { modelId: modelId ?? null, lang: lang ?? null });
+}

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  Box, Typography, Divider, Chip, IconButton, Tooltip,
+  Box, Typography, Divider, Chip, IconButton, Tooltip, Button,
 } from '@mui/material';
 import {
   RobotIcon, SparkleIcon, PlusIcon, ListIcon, TrashIcon,
@@ -8,9 +8,10 @@ import {
 import { useAgentStore } from '../features/agent/store/agentStore';
 import { runAgent, saveMessage, listMessages, createConversation, listConversations, stopAgent, updateConversationTitle, deleteConversation } from '../core/services/agent.service';
 import type { MessageDto, ConversationDto } from '../proto/agent';
-import { listen } from '@tauri-apps/api/event';
+import { listen, emit } from '@tauri-apps/api/event';
 import { useTheme } from '@mui/material/styles';
 import { useTranslation } from 'react-i18next';
+import { useSearchParams } from 'react-router-dom';
 import { useNotify } from '../core/notification';
 import { ChatMessagesArea, ChatInputArea, type FileAttachment } from '../components/chat/ChatComponents';
 import type { ToolCallDisplay } from '../components/chat/ChatComponents';
@@ -47,7 +48,7 @@ export function AiCopilotPage() {
   // Pro 功能：未付费时显示锁定页
   const featureGate = useFeatureGate('ai_copilot');
 
-  const { t } = useTranslation('agent');
+  const { t, i18n } = useTranslation('agent');
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
   const agentColor = isDark ? '#4FC3F7' : '#0288D1';
@@ -68,20 +69,49 @@ export function AiCopilotPage() {
   const streamingMsgIdRef = useRef<string | null>(null);
   const toolCallCounterRef = useRef(0);
 
+  const [searchParams] = useSearchParams();
+  const urlAgentId = searchParams.get('agentId');
+  const rdSessionId = searchParams.get('sessionId');
+  const rdHost = searchParams.get('host');
+  const rdUsername = searchParams.get('username');
+  const rdInstallMode = searchParams.get('installMode') || 'basic';
+  const hasRdContext = !!rdSessionId;
+  // 远程桌面安装流程状态：null=未检测 / 'installed'=已装 / 'not_installed'=未装待用户确认
+  const [rdStatus, setRdStatus] = useState<null | 'installed' | 'not_installed'>(null);
+  const userConsentedRef = useRef(false);
+
   const storedAgentId = getTerminalCopilotAgentId();
-  const boundAgentId = storedAgentId;
+  const boundAgentId = urlAgentId ?? storedAgentId;
   const boundAgent = agents.find((a) => a.id === boundAgentId);
   const boundModel = boundAgent ? models.find((m) => m.id === boundAgent.modelId) : null;
   // 绑定 id 残留但对应智能体已不存在（被删/改）时，给出明确提示，而非运行期崩溃
   const boundAgentMissing = boundAgentId != null && agents.length > 0 && !boundAgent;
   const notify = useNotify().notify;
 
+  // 远程桌面设置指南携带的上下文：建会话时写入 metadata，供后端 run_agent 注入 system prompt。
+  // lang 字段让后端按用户界面语言选择提示词版本（智能体提示词国际化）。
+  const buildRdMetadata = useCallback((): Record<string, unknown> | undefined => {
+    if (!hasRdContext) return undefined;
+    return { rdSetup: { sessionId: rdSessionId as string, host: rdHost ?? '', username: rdUsername ?? '', installMode: rdInstallMode, lang: i18n.language || 'zh-CN' } };
+  }, [hasRdContext, rdSessionId, rdHost, rdUsername, rdInstallMode, i18n.language]);
+
+  const createConversationWithContext = useCallback(async (agentId: string, title: string): Promise<ConversationDto> => {
+    // 所有会话都带界面语言（lang），后端据此锁定输出语言（对自定义 prompt 的智能体同样生效）；
+    // rd 场景再叠加 rdSetup 上下文。
+    const meta: Record<string, unknown> = { lang: i18n.language || 'zh-CN' };
+    const rdMeta = buildRdMetadata();
+    if (rdMeta) Object.assign(meta, rdMeta);
+    return createConversation(agentId, title, meta);
+  }, [buildRdMetadata, i18n.language]);
+
   // 若回退发生了，持久化新选择，保证后续加载稳定。
+  // 注：来自设置指南的临时绑定（URL 带 agentId）不覆盖用户常驻的 copilot 绑定。
   useEffect(() => {
+    if (urlAgentId) return;
     if (boundAgentId && boundAgentId !== storedAgentId) {
       setTerminalCopilotAgentId(boundAgentId);
     }
-  }, [boundAgentId, storedAgentId]);
+  }, [boundAgentId, storedAgentId, urlAgentId]);
 
   useEffect(() => {
     loadAgents();
@@ -112,7 +142,7 @@ export function AiCopilotPage() {
         } catch (e) { console.error('AiCopilotPage: operation failed', e); }
       } else {
         try {
-          const conv = await createConversation(boundAgentId!, 'AI Copilot');
+          const conv = await createConversationWithContext(boundAgentId!, 'AI Copilot');
           if (!cancelled) {
             setConversationId(conv.id);
             setMessages([]);
@@ -136,7 +166,7 @@ export function AiCopilotPage() {
   const handleNewChat = async () => {
     if (!boundAgentId) return;
     try {
-      const conv = await createConversation(boundAgentId, 'AI Copilot');
+      const conv = await createConversationWithContext(boundAgentId, 'AI Copilot');
       setConvList((prev) => [conv, ...prev].sort((a, b) => b.updatedAt - a.updatedAt));
       setConversationId(conv.id);
       setMessages([]);
@@ -190,6 +220,11 @@ export function AiCopilotPage() {
             }
           }
         } catch (err) { console.error('AiCopilotPage: operation failed', err); }
+        // 远程桌面安装助手：同意过安装的会话结束时，通知设置指南窗口自动刷新 VNC 状态，
+        // 省去用户手动点「重新检查」。
+        if (hasRdContext && userConsentedRef.current) {
+          emit('rd-setup-completed', { conversationId }).catch(() => {});
+        }
         setStreamingContent('');
         setLoading(false);
         streamingMsgIdRef.current = null;
@@ -329,6 +364,32 @@ export function AiCopilotPage() {
     }
   };
 
+  // 不再打开即自动触发检测：对话未要求安装时不应自动发起该流程。
+  // 用户可在助手窗口中主动提问或要求"检测远程桌面环境"，助手仍走「检查→同意→安装」闸门。
+
+  // 解析助手返回的检查结论（RD_STATUS: installed|not_installed），决定何时弹出安装确认。
+  useEffect(() => {
+    if (loading || !hasRdContext || userConsentedRef.current) return;
+    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+    if (!lastAssistant || !lastAssistant.content) return;
+    const m = lastAssistant.content.match(/RD_STATUS:\s*(installed|not_installed)/i);
+    if (m) {
+      setRdStatus(m[1].toLowerCase() === 'installed' ? 'installed' : 'not_installed');
+    }
+  }, [messages, loading, hasRdContext]);
+
+  const handleAgreeInstall = useCallback(async () => {
+    userConsentedRef.current = true;
+    setRdStatus(null);
+    // 发给模型的消息跟随界面语言（英文环境下必须是英文，避免把模型带偏成中文回复）
+    await sendMessage(t('copilot.rd_consent_message', '用户已确认：请在远程服务器上安装并配置 VNC 远程桌面（按标准流程执行，sudo 密码会自动填写）。'));
+  }, [sendMessage, t]);
+
+  const handleDeclineInstall = useCallback(async () => {
+    setRdStatus(null);
+    await sendMessage(t('copilot.rd_decline_message', '好的，暂不安装。等你需要在远程服务器上安装 VNC 时再告诉我。'));
+  }, [sendMessage, t]);
+
   const handleStop = async () => {
     if (conversationId) {
       try {
@@ -451,7 +512,7 @@ export function AiCopilotPage() {
           isDark={isDark}
           conversationId={conversationId ?? undefined}
           emptyIcon={<RobotIcon size={40} weight="duotone" color={agentColor} />}
-          emptyText={t('copilot.empty_hint')}
+          emptyText={hasRdContext ? t('copilot.rd_empty_hint') : t('copilot.empty_hint')}
           thinkingText={t('copilot.thinking')}
         />
         <ChatInputArea
@@ -465,11 +526,44 @@ export function AiCopilotPage() {
           agentColor={agentColor}
           userColor={userColor}
           isDark={isDark}
-          placeholder={t('copilot.input_placeholder')}
+          placeholder={hasRdContext ? t('copilot.rd_input_placeholder') : t('copilot.input_placeholder')}
           onStop={handleStop}
           attachments={attachments}
           onAttachmentsChange={setAttachments}
         />
+        {hasRdContext && !loading && rdStatus === 'not_installed' && (
+          <Box sx={{
+            mx: 2, mb: 1.5, p: 1.5, borderRadius: 2,
+            border: `1px solid ${agentColor}55`,
+            bgcolor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
+          }}>
+            <Typography variant="body2" sx={{ mb: 1, fontWeight: 600 }}>
+              {t('copilot.rd_install_confirm_title', '检测到远程服务器尚未安装 VNC 远程桌面')}
+            </Typography>
+            <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 1 }}>
+              {t('copilot.rd_install_confirm_desc', '是否让 AI 助手辅助安装并配置？安装过程会修改远程服务器（非交互式安装 TigerVNC 与桌面环境）。')}
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
+              <Button size="small" variant="text" onClick={handleDeclineInstall}>
+                {t('copilot.rd_install_decline', '暂不安装')}
+              </Button>
+              <Button size="small" variant="contained" onClick={handleAgreeInstall} sx={{ bgcolor: agentColor }}>
+                {t('copilot.rd_install_agree', '同意，开始安装')}
+              </Button>
+            </Box>
+          </Box>
+        )}
+        {hasRdContext && !loading && rdStatus === 'installed' && (
+          <Box sx={{
+            mx: 2, mb: 1.5, p: 1.5, borderRadius: 2,
+            border: `1px solid ${mutedBorder}`,
+            bgcolor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
+          }}>
+            <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+              {t('copilot.rd_already_installed', '已检测到 VNC 远程桌面，可直接连接使用。')}
+            </Typography>
+          </Box>
+        )}
       </Box>
     </Box>
   );

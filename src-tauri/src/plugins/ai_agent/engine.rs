@@ -242,6 +242,9 @@ pub struct AgentEngine {
     always_allowed_tools: Arc<tokio::sync::Mutex<Vec<String>>>,
     permission_requester: Option<Arc<dyn Fn(PermissionRequest) -> Pin<Box<dyn Future<Output = (bool, bool)> + Send>> + Send + Sync>>,
     message_persister: Option<Arc<dyn Fn(PersistMessage) + Send + Sync>>,
+    /// 自主任务模式：当模型返回纯文本（无工具调用）但任务尚未完成时，自动注入提醒并继续循环，
+    /// 避免每完成一小步就停下等用户点"继续"。仅对明确开启的会话（如远程桌面安装）生效。
+    auto_continue: bool,
 }
 
 pub type PermissionRequesterFn = Arc<dyn Fn(PermissionRequest) -> Pin<Box<dyn Future<Output = (bool, bool)> + Send>> + Send + Sync>;
@@ -280,6 +283,7 @@ impl AgentEngine {
             always_allowed_tools: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             permission_requester: None,
             message_persister: None,
+            auto_continue: false,
         }
     }
 
@@ -311,6 +315,11 @@ impl AgentEngine {
     pub fn with_fallback(mut self, provider: Arc<dyn super::provider::LlmProvider>, model: String) -> Self {
         self.fallback_provider = Some(provider);
         self.fallback_model = Some(model);
+        self
+    }
+
+    pub fn with_auto_continue(mut self, enabled: bool) -> Self {
+        self.auto_continue = enabled;
         self
     }
 
@@ -403,6 +412,8 @@ impl AgentEngine {
         let mut iteration = 0;
         let mut force_tool_attempts = 0;
         let mut tool_call_count = 0;
+        let mut auto_continue_count = 0;
+        const MAX_AUTO_CONTINUE: i32 = 10;
         tracing::info!("[AgentEngine] starting loop, max_iterations={}, tools_count={}", self.max_iterations, tools_opt.as_ref().map(|t| t.len()).unwrap_or(0));
         let result = 'outer: loop {
             if iteration >= self.max_iterations {
@@ -481,10 +492,47 @@ impl AgentEngine {
                 }
             }
 
+            // 某些 OpenAI 兼容模型（如 deepseek-v4-flash-0731）在流式响应中会省略
+            // tool_calls[].function.name（只返回 arguments），导致 `Tool '' is not available`。
+            // 依据上下文修复空工具名：注册表只有 1 个工具时直接用该工具名（绝对安全）；
+            // 多工具时按参数特征推断（session_id 是 terminal_session 的独有特征）。
+            let mut response_tool_calls = response.tool_calls.clone();
+            if let Some(ref mut tcs) = response_tool_calls {
+                let registry_names: Vec<String> = {
+                    let tools = self.tools.lock().await;
+                    tools.list_names()
+                };
+                for tc in tcs.iter_mut() {
+                    if tc.function.name.trim().is_empty() {
+                        let inferred = if registry_names.len() == 1 {
+                            Some(registry_names[0].clone())
+                        } else if let Ok(v) = serde_json::from_str::<Value>(&tc.function.arguments) {
+                            if v.get("session_id").is_some() {
+                                Some("terminal_session".to_string())
+                            } else if v.get("command").is_some() && (v.get("working_dir").is_some() || v.get("cwd").is_some()) {
+                                Some("terminal".to_string())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(name) = inferred {
+                            tracing::warn!(
+                                "[AgentEngine] empty tool name inferred as '{}' from context (args={})",
+                                name,
+                                &tc.function.arguments[..tc.function.arguments.len().min(80)]
+                            );
+                            tc.function.name = name;
+                        }
+                    }
+                }
+            }
+
             let assistant_msg = super::provider::ChatMessage {
                 role: "assistant".to_string(),
                 content: response.content.clone().unwrap_or_default(),
-                tool_calls: response.tool_calls.clone(),
+                tool_calls: response_tool_calls.clone(),
                 tool_call_id: None,
             };
             messages.push(assistant_msg.clone());
@@ -498,7 +546,7 @@ impl AgentEngine {
                 });
             }
 
-            match &response.tool_calls {
+            match &response_tool_calls {
                 Some(tool_calls) if !tool_calls.is_empty() => {
                     tracing::info!("[AgentEngine] iteration={}, processing {} tool calls", iteration, tool_calls.len());
 
@@ -737,6 +785,57 @@ impl AgentEngine {
                         });
                         iteration += 1;
                         continue;
+                    }
+
+                    // 自主任务模式：模型返回纯文本但未给出完成结论时，自动注入提醒继续驱动终端，
+                    // 避免每一步都停下等用户点"继续"。受 MAX_AUTO_CONTINUE 与 max_iterations 双重兜底，不会死循环。
+                    if self.auto_continue && auto_continue_count < MAX_AUTO_CONTINUE {
+                        let last = response.content.clone().unwrap_or_default().to_lowercase();
+                        let looks_done = last.contains("完成")
+                            || last.contains("已完成")
+                            || last.contains("done")
+                            || last.contains("finished")
+                            || last.contains("complete")
+                            || last.contains("completed")
+                            || last.contains("vnc is ready")
+                            || last.contains("is ready")
+                            || last.contains("已达到")
+                            || last.contains("可以连接")
+                            || last.contains("可连接");
+                        // 等待用户确认：检测到"检查结论标记"或模型在征询用户意见时，绝不自动续跑，
+                        // 必须先交还用户（如远程桌面安装前的"是否安装"确认）。
+                        // 词表覆盖中英文常见征询说法（英文环境下模型可能用 would you like / shall i 等）。
+                        let awaiting_user = last.contains("rd_status:")
+                            || last.contains("需要我")
+                            || last.contains("要我")
+                            || last.contains("是否")
+                            || last.contains("请确认")
+                            || last.contains("确认吗")
+                            || last.contains("安装吗")
+                            || last.contains("do you want")
+                            || last.contains("would you like")
+                            || last.contains("want me to")
+                            || last.contains("shall i")
+                            || last.contains("shall we")
+                            || last.contains("may i")
+                            || last.contains("should i")
+                            || last.contains("proceed with")
+                            || last.contains("ready to install")
+                            || last.contains("do you agree")
+                            || last.contains("please confirm");
+                        if !looks_done && !awaiting_user {
+                            auto_continue_count += 1;
+                            tracing::info!("[AgentEngine] auto-continue ({}/{}), nudging model to keep driving the terminal", auto_continue_count, MAX_AUTO_CONTINUE);
+                            on_chunk("\n[auto-continue: installation not finished yet, resuming...]\n".to_string());
+                            messages.push(super::provider::ChatMessage {
+                                role: "user".to_string(),
+                                content: "[System] The remote desktop setup is NOT complete yet. Do NOT stop and do NOT end your turn with a plain-text summary. Continue calling the `terminal_session` tool: write the next command, then read_output to verify. Only output a final summary once the VNC server is verified running and reachable (e.g. listening on 5901 and serving a desktop).".to_string(),
+                                tool_calls: None,
+                                tool_call_id: None,
+                            });
+                            iteration += 1;
+                            continue;
+                        }
                     }
 
                     tracing::info!("[AgentEngine] loop completed at iteration {}, no more tool calls, total messages={}", iteration, messages.len());

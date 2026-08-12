@@ -3,6 +3,10 @@ import type { ProviderDto, EndpointDto, ModelDto, AgentDto, ConversationDto, Mes
 import * as agentService from '../../../core/services/agent.service';
 import { localizeBackendError } from '../../../core/backendError';
 
+// 空 toolIds 表示「全部工具」。前端统一规范化为全部内置工具名，
+// 保证各处 `agent.toolIds.includes(...)` 判断在「全部」语义下正确（文件附件、插件 tab、笔记等）。
+const ALL_AGENT_TOOLS = ['terminal', 'notebook', 'file', 'command_history', 'terminal_session', 'plugin_manager', 'memory'];
+
 function genId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -186,7 +190,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const agents = await agentService.listAgents();
-      set({ agents, loading: false, error: null });
+      const normalized = agents.map((a) =>
+        !a.toolIds || a.toolIds.length === 0 ? { ...a, toolIds: [...ALL_AGENT_TOOLS] } : a,
+      );
+      set({ agents: normalized, loading: false, error: null });
     } catch (e) {
       set({ error: localizeBackendError(e), loading: false });
     }

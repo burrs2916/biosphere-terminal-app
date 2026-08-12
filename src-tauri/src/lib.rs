@@ -832,6 +832,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::agent::write_frontend_log,
             interface::commands::agent::respond_permission,
             interface::commands::agent::update_agent_allowed_tools,
+            interface::commands::agent::ensure_remote_desktop_setup_agent,
             interface::commands::environment::get_environment,
             interface::commands::icon::list_icon_groups,
             interface::commands::icon::create_icon_group,

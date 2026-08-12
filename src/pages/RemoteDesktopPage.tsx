@@ -25,6 +25,7 @@ import {
   ArrowRight,
 } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
+import { listen } from '@tauri-apps/api/event';
 import { useTheme } from '@mui/material/styles';
 import { useSearchParams } from 'react-router-dom';
 import { VncViewer } from '../features/terminal/components/VncViewer';
@@ -38,13 +39,14 @@ import type { TerminalEmulatorHandle } from '../features/terminal';
 import type { PtyConfig } from '../proto';
 import { useFeatureGate, LockedScreen } from '../features/licensing';
 import { openAiCopilotWindow } from '../core/services/window.service';
+import { ensureRemoteDesktopSetupAgent } from '../core/services/agent.service';
 
 type Step = 'config' | 'connecting' | 'setup' | 'viewer';
 type Mode = 'x11' | 'vnc';
 type VncStatus = 'checking' | 'installed' | 'not_installed' | 'error';
 
 export function RemoteDesktopPage() {
-  const { t } = useTranslation('remoteDesktop');
+  const { t, i18n } = useTranslation('remoteDesktop');
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
   const [searchParams] = useSearchParams();
@@ -71,6 +73,8 @@ export function RemoteDesktopPage() {
   const [showSshPassword, setShowSshPassword] = useState(false);
   const [showVncPassword, setShowVncPassword] = useState(false);
   const [session, setSession] = useState<RemoteDesktopSession | null>(null);
+  // 安装模式：headless（无桌面版）/ basic（基础桌面版）/ full（全量安装），默认 full 保持原安装效果
+  const [installMode, setInstallMode] = useState<'headless' | 'basic' | 'full'>('full');
 
   // VNC 状态检测
   const [vncStatus, setVncStatus] = useState<VncStatus>('checking');
@@ -239,11 +243,42 @@ export function RemoteDesktopPage() {
   }, [session]);
 
   const handleOpenAiAssistant = useCallback(async () => {
-    await openAiCopilotWindow();
-  }, []);
+    try {
+      const agentId = await ensureRemoteDesktopSetupAgent(undefined, i18n.language || 'zh-CN');
+      const sessionId = setupTerminalIdRef.current ?? undefined;
+      const ssh = sshRef.current;
+      await openAiCopilotWindow({
+        agentId,
+        sessionId: sessionId ?? undefined,
+        host: ssh?.host,
+        username: ssh?.username,
+        installMode,
+      });
+    } catch (e) {
+      console.error('[remote-desktop] open AI assistant failed:', e);
+      notify(localizeBackendError(e) || t('open_ai_assistant_failed', { defaultValue: '无法打开 AI 助手，请检查是否已配置 AI 模型' }));
+    }
+  }, [notify, installMode, i18n.language, t]);
 
   const handleRecheck = useCallback(async () => {
     await checkVncStatus();
+  }, [checkVncStatus]);
+
+  // 安装助手会话结束（已同意过安装）时，自动刷新 VNC 状态，省去手动点「重新检查」。
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      const un = await listen('rd-setup-completed', () => {
+        if (!disposed && sshRef.current) checkVncStatus();
+      });
+      if (disposed) un();
+      else unlisten = un;
+    })();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [checkVncStatus]);
 
   useEffect(() => {
@@ -492,27 +527,9 @@ export function RemoteDesktopPage() {
                       {t('vnc_setup_required', { defaultValue: 'VNC Setup Required' })}
                     </Typography>
                   </Box>
-                  <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, mb: 1.5, lineHeight: 1.4 }}>
-                    {t('vnc_setup_ai_hint', { defaultValue: 'VNC is not installed or not running. Click the button below to open the AI Assistant, which can help you install and configure VNC on the remote server.' })}
+                  <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, mb: 0.5, lineHeight: 1.4 }}>
+                    {t('vnc_setup_ai_hint', { defaultValue: 'VNC is not installed or not running. Use the AI Assistant below to install and configure it on the remote server.' })}
                   </Typography>
-                  <Box sx={{ ml: 3.2 }}>
-                    <Button
-                      size="small"
-                      variant="contained"
-                      startIcon={<RobotIcon size={14} weight="fill" />}
-                      onClick={handleOpenAiAssistant}
-                      sx={{
-                        bgcolor: accentColor,
-                        '&:hover': { bgcolor: '#5A52E0' },
-                        textTransform: 'none',
-                        fontWeight: 600,
-                        fontSize: 12,
-                        py: 0.3,
-                      }}
-                    >
-                      {t('open_ai_assistant', { defaultValue: 'Open AI Assistant' })}
-                    </Button>
-                  </Box>
                 </Paper>
               )}
 
@@ -537,6 +554,68 @@ export function RemoteDesktopPage() {
                   </Typography>
                 </Paper>
               )}
+
+              {/* AI 助手：任何状态都常驻。可安装/配置 VNC，也可做其它远程维护（改密码、查端口、解释命令等）。 */}
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 1.5,
+                  borderColor: accentColor,
+                  bgcolor: isDark ? 'rgba(108,99,255,0.05)' : 'rgba(108,99,255,0.03)',
+                }}
+              >
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+                  <RobotIcon size={18} weight="fill" color={accentColor} />
+                  <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
+                    {t('ai_assistant', { defaultValue: 'AI Assistant' })}
+                  </Typography>
+                </Box>
+                <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, mb: 1.2, lineHeight: 1.4 }}>
+                  {t('ai_assistant_always_hint', { defaultValue: 'Install/configure VNC, change passwords, check port usage, explain commands, and more — just ask.' })}
+                </Typography>
+                <Box sx={{ ml: 3.2, mb: 1.2 }}>
+                  <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 0.5 }}>
+                    {t('install_mode', { defaultValue: 'Install Mode' })}
+                  </Typography>
+                  <ToggleButtonGroup
+                    exclusive
+                    size="small"
+                    value={installMode}
+                    onChange={(_, v) => { if (v) setInstallMode(v); }}
+                    sx={{
+                      '& .MuiToggleButton-root': { textTransform: 'none', fontSize: 11, px: 1.2, py: 0.3 },
+                    }}
+                  >
+                    <ToggleButton value="headless">
+                      {t('install_mode_headless', { defaultValue: 'Headless' })}
+                    </ToggleButton>
+                    <ToggleButton value="basic">
+                      {t('install_mode_basic', { defaultValue: 'Basic' })}
+                    </ToggleButton>
+                    <ToggleButton value="full">
+                      {t('install_mode_full', { defaultValue: 'Full' })}
+                    </ToggleButton>
+                  </ToggleButtonGroup>
+                </Box>
+                <Box sx={{ ml: 3.2 }}>
+                  <Button
+                    size="small"
+                    variant="contained"
+                    startIcon={<RobotIcon size={14} weight="fill" />}
+                    onClick={handleOpenAiAssistant}
+                    sx={{
+                      bgcolor: accentColor,
+                      '&:hover': { bgcolor: '#5A52E0' },
+                      textTransform: 'none',
+                      fontWeight: 600,
+                      fontSize: 12,
+                      py: 0.3,
+                    }}
+                  >
+                    {t('open_ai_assistant', { defaultValue: 'Open AI Assistant' })}
+                  </Button>
+                </Box>
+              </Paper>
             </Box>
 
             <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider' }}>

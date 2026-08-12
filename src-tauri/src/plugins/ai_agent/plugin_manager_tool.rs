@@ -530,7 +530,7 @@ impl PluginManagerTool {
             if let Ok(mut agents) = agent_svc.list_agents() {
                 if let Some(agent) = agents.iter_mut().find(|a| a.id == *agent_id) {
                     for tool_name in &tool_names {
-                        if !agent.tool_ids.contains(tool_name) {
+                        if !agent.tool_ids.is_empty() && !agent.tool_ids.contains(tool_name) {
                             agent.tool_ids.push(tool_name.clone());
                         }
                     }
@@ -720,7 +720,7 @@ impl PluginManagerTool {
                     // Add new tool names only to the current agent
                     if agent.id == *current_id {
                         for name in &new_tool_names {
-                            if !agent.tool_ids.contains(name) {
+                            if !agent.tool_ids.is_empty() && !agent.tool_ids.contains(name) {
                                 agent.tool_ids.push(name.clone());
                             }
                         }
@@ -1456,7 +1456,7 @@ impl PluginManagerTool {
                     // Add new tool names only to the current agent
                     if agent.id == *current_id {
                         for name in &new_tool_names {
-                            if !agent.tool_ids.contains(name) {
+                            if !agent.tool_ids.is_empty() && !agent.tool_ids.contains(name) {
                                 agent.tool_ids.push(name.clone());
                             }
                         }
