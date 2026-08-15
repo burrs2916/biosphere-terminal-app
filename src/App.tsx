@@ -6,7 +6,7 @@ import { AppTheme } from './theme';
 import { AppShell, Sidebar, Header, StatusBar } from './components/layout';
 import { NotificationProvider } from './core/notification';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { useLayoutStore, useSettingsStore } from './engine';
+import { useSettingsStore } from './engine';
 import i18n from './core/i18n';
 import { TerminalPage } from './pages/TerminalPage';
 import { CommandPage } from './pages/CommandPage';
@@ -24,17 +24,15 @@ import { SftpPage } from './pages/SftpPage';
 import { LicenseProvider, UpgradeDialog } from './features/licensing';
 
 function AppLayout() {
-  const sidebarOpen = useLayoutStore((s) => s.sidebarOpen);
-  const toggleSidebar = useLayoutStore((s) => s.toggleSidebar);
   const showStatusBar = useSettingsStore((s) => s.settings.showStatusBar);
   const location = useLocation();
   const isTerminal = location.pathname === '/';
 
   return (
     <AppShell>
-      <Header onToggleSidebar={toggleSidebar} />
+      <Header />
       <Box sx={{ display: 'flex', flex: 1, overflow: 'hidden', mt: '48px' }}>
-        <Sidebar open={sidebarOpen} />
+        <Sidebar />
         <Box
           component="main"
           sx={{

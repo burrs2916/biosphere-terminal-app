@@ -23,10 +23,6 @@ import { useUpgradeDialogStore } from '../../features/licensing/upgradeDialogSto
 import { useConnectionCountStore } from '../../features/connection/connectionCountStore';
 import type { ProFeature } from '../../proto/licensing';
 
-interface SidebarProps {
-  open: boolean;
-}
-
 interface MenuItem {
   path: string;
   labelKey: string;
@@ -45,7 +41,7 @@ const menuConfig: MenuItem[] = [
   { path: '/settings', labelKey: 'menu.settings', icon: GearSixIcon, color: '#90A4AE' },
 ];
 
-export function Sidebar({ open }: SidebarProps) {
+export function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
   const { t } = useTranslation();
@@ -63,7 +59,7 @@ export function Sidebar({ open }: SidebarProps) {
     <Drawer
       variant="persistent"
       anchor="left"
-      open={open}
+      open
       sx={{
         width: 220,
         flexShrink: 0,
