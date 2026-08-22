@@ -37,6 +37,11 @@ interface TerminalEmulatorProps {
   onExit?: (sessionId: string) => void;
   onTitleChange?: (sessionId: string, title: string) => void;
   onFindResultsChange?: (resultIndex: number, resultCount: number) => void;
+  /** Fired once all Tauri event listeners for this session are registered.
+   *  The parent uses it to defer `spawnTerminal` until the listener is live,
+   *  so the backend's initial screen output is never emitted before we can
+   *  receive it (fixes the "first tab only shows a cursor" race). */
+  onReady?: (sessionId: string) => void;
   visible?: boolean;
   profileId?: string;
 }
@@ -69,7 +74,7 @@ function buildTheme(appearance: ReturnType<typeof getThemeAppearance>) {
 }
 
 export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmulatorProps>(
-  function TerminalEmulator({ sessionId, onExit, onTitleChange, onFindResultsChange, visible = true, profileId }, ref) {
+  function TerminalEmulator({ sessionId, onExit, onTitleChange, onFindResultsChange, onReady, visible = true, profileId }, ref) {
     const { t } = useTranslation('terminal');
     const containerRef = useRef<HTMLDivElement>(null);
     const terminalRef = useRef<Terminal | null>(null);
@@ -84,6 +89,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
     const middleClickHandlerRef = useRef<((e: MouseEvent) => void) | null>(null);
     const dragDropUnlistenRef = useRef<UnlistenFn | null>(null);
     const resizeOffRef = useRef<import('@xterm/xterm').IDisposable | null>(null);
+    const readyFiredRef = useRef(false);
     const [terminalReady, setTerminalReady] = useState(false);
     const [profileAppearance, setProfileAppearance] = useState<AppearanceConfig | null>(null);
 
@@ -495,13 +501,27 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
 
       const unlisteners = unlistenersRef.current;
 
+      // onReady must fire only after EVERY listener is registered, otherwise the
+      // backend could emit the initial screen output before we are listening and
+      // that first chunk would be permanently lost (the "first tab only shows a
+      // cursor" bug). Count down as each listener resolves.
+      let listenersRegistered = 0;
+      const fireReadyOnce = () => {
+        listenersRegistered += 1;
+        if (listenersRegistered === 3 && !readyFiredRef.current) {
+          readyFiredRef.current = true;
+          onReady?.(sessionId);
+        }
+      };
+
       listen<{ session_id: string; data: string }>('terminal-output', (event) => {
         if (event.payload.session_id === sessionId) {
           terminal.write(event.payload.data);
         }
       }).then((unlisten) => {
         unlisteners.push(unlisten);
-      });
+        fireReadyOnce();
+      }).catch(() => fireReadyOnce());
 
       listen<{ session_id: string; exit_code: number | null }>('terminal-closed', (event) => {
         if (event.payload.session_id === sessionId) {
@@ -520,7 +540,8 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         }
       }).then((unlisten) => {
         unlisteners.push(unlisten);
-      });
+        fireReadyOnce();
+      }).catch(() => fireReadyOnce());
 
       listen<{ session_id: string; error: string }>('terminal-error', (event) => {
         if (event.payload.session_id === sessionId) {
@@ -528,7 +549,8 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         }
       }).then((unlisten) => {
         unlisteners.push(unlisten);
-      });
+        fireReadyOnce();
+      }).catch(() => fireReadyOnce());
 
       const resizeObserver = new ResizeObserver(() => {
         handleResize();

@@ -95,6 +95,9 @@ export function RemoteDesktopPage() {
   const sessionRef = useRef<RemoteDesktopSession | null>(null);
   const sshRef = useRef<SshConnectionInfo | null>(null);
   const x11TerminalIdRef = useRef<string | null>(null);
+  // 暂存待 spawn 的终端配置：spawnTerminal 延迟到 TerminalEmulator 的 onReady
+  // 之后执行，确保监听器先注册，避免首屏输出竞态丢失（与 TerminalPage 同一修复）。
+  const pendingSpawnRef = useRef<Record<string, PtyConfig>>({});
 
   const bgColor = isDark ? '#0d1117' : '#f5f5f5';
   const cardBg = isDark ? '#161B22' : '#ffffff';
@@ -154,7 +157,10 @@ export function RemoteDesktopPage() {
       setStep('connecting');
 
       try {
-        // 启动终端会话（左侧终端，给用户和 AI 助手用）
+        // 启动终端会话（左侧终端，给用户和 AI 助手用）。
+        // 注意：spawnTerminal 不在此处调用，改为暂存配置，由 TerminalEmulator
+        // 的 onReady 回调（handleSpawnReady）在监听器注册完成后触发，避免首屏
+        // 输出竞态丢失。VNC 状态检测也顺延到 spawn 完成后执行。
         const setupSessionId = `vnc-setup-${Date.now()}`;
         setupTerminalIdRef.current = setupSessionId;
 
@@ -165,12 +171,8 @@ export function RemoteDesktopPage() {
           ssh,
         };
 
-        await spawnTerminal(setupSessionId, config);
+        pendingSpawnRef.current[setupSessionId] = config;
         setStep('setup');
-
-        // 检测 VNC 状态
-        await new Promise(r => setTimeout(r, 1500)); // 等 SSH banner 结束
-        await checkVncStatus();
       } catch (err: any) {
         notify(localizeBackendError(err) || t('connection_failed'));
         setStep('config');
@@ -190,14 +192,38 @@ export function RemoteDesktopPage() {
           x11_forwarding: true,
         };
 
-        await spawnTerminal(sessionId, config);
+        pendingSpawnRef.current[sessionId] = config;
         setStep('viewer');
       } catch (err: any) {
         notify(localizeBackendError(err) || t('connection_failed'));
         setStep('config');
       }
     }
-  }, [host, port, username, authMethod, privateKeyPath, password, vncPort, mode, notify, t, getSshConfig, checkVncStatus]);
+  }, [host, port, username, authMethod, privateKeyPath, password, vncPort, mode, notify, t, getSshConfig]);
+
+  // 由 TerminalEmulator 的 onReady 触发：此时监听器已注册，再 spawn 可保证首屏
+  // 输出不丢失。VNC 安装终端 spawn 完成后继续等待 SSH banner 并检测 VNC 状态。
+  const handleSpawnReady = useCallback(async (sessionId: string) => {
+    const config = pendingSpawnRef.current[sessionId];
+    if (!config) return;
+    delete pendingSpawnRef.current[sessionId];
+    try {
+      await spawnTerminal(sessionId, config);
+    } catch (err: any) {
+      notify(localizeBackendError(err) || t('connection_failed'));
+      setStep('config');
+      return;
+    }
+    if (sessionId === setupTerminalIdRef.current) {
+      // 等 SSH banner 结束后再检测 VNC 状态（保持原逻辑时序）
+      await new Promise(r => setTimeout(r, 1500));
+      try {
+        await checkVncStatus();
+      } catch (err: any) {
+        notify(localizeBackendError(err) || t('connection_failed'));
+      }
+    }
+  }, [notify, t, checkVncStatus]);
 
   const handleConnectVnc = useCallback(async () => {
     if (!sshRef.current) return;
@@ -339,6 +365,7 @@ export function RemoteDesktopPage() {
               ref={terminalRef}
               sessionId={x11TerminalIdRef.current}
               onTitleChange={() => {}}
+              onReady={handleSpawnReady}
             />
           )}
         </Box>
@@ -377,6 +404,7 @@ export function RemoteDesktopPage() {
                   ref={terminalRef}
                   sessionId={setupTerminalIdRef.current}
                   onTitleChange={() => {}}
+                  onReady={handleSpawnReady}
                 />
               )}
             </Box>

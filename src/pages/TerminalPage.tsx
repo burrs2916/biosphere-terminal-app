@@ -68,6 +68,10 @@ export function TerminalPage() {
   const tabsRef = useRef<Tab[]>([]);
   const navigate = useNavigate();
   const terminalRefs = useRef<Map<string, TerminalEmulatorHandle>>(new Map());
+  // 临时存放「待启动的会话配置」：spawnTerminal 不再在 handleConnect/handleReconnect
+  // 里直接调用，而是等到对应 TerminalEmulator 的 onReady（即 Tauri 事件监听已注册）
+  // 之后再触发。这样后端首屏输出永远不会早于前端监听器发出，根除「首连丢首屏」竞态。
+  const configStashRef = useRef<Map<string, PtyConfig>>(new Map());
   tabsRef.current = tabs;
 
   const shell = useSettingsStore((s) => s.settings.shell);
@@ -96,6 +100,15 @@ export function TerminalPage() {
     if (!activeTab) return undefined;
     return terminalRefs.current.get(activeTab.id);
   }, []);
+
+  // 由 TerminalEmulator 的 onReady 触发：监听器已就绪，此时再真正启动后端 PTY。
+  // config 来自 handleConnect/handleReconnect 暂存在 configStashRef 中的值。
+  const handleSpawnReady = useCallback((id: string) => {
+    const cfg = configStashRef.current.get(id);
+    if (!cfg) return;
+    configStashRef.current.delete(id);
+    spawnTerminal(id, cfg).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+  }, [notify]);
 
   // Pro 功能授权检查：未付费时弹出升级对话框
   const canUseFeature = useLicenseStore((s) => s.canUse);
@@ -152,7 +165,9 @@ export function TerminalPage() {
         ? `${result.ssh.username}@${result.ssh.host}`
         : `Terminal ${count}`;
 
-    spawnTerminal(id, config).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+    // 暂存配置，等 TerminalEmulator 的 onReady（监听器已注册）后再 spawn，
+    // 避免后端首屏输出早于前端监听而丢失。
+    configStashRef.current.set(id, config);
 
     if (result.connectionId && result.connectionType === 'ssh') {
       useConnectIntent.getState().addActiveConnection(result.connectionId);
@@ -274,7 +289,8 @@ export function TerminalPage() {
           password: tab.ssh.password,
         },
       };
-      spawnTerminal(newId, config).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+      // 暂存配置，等新 TerminalEmulator 的 onReady 后再 spawn（同 handleConnect 的时序修复）。
+      configStashRef.current.set(newId, config);
       setTabs((prev) =>
         prev.map((t) => (t.id === tab.id ? { ...t, id: newId, disconnected: false } : t)),
       );
@@ -714,6 +730,7 @@ export function TerminalPage() {
               sessionId={tab.id}
               onExit={handleExit}
               onTitleChange={handleTitleChange}
+              onReady={handleSpawnReady}
               onFindResultsChange={(resultIndex, resultCount) => {
                 setFindResultCount({ resultIndex, resultCount });
               }}
