@@ -214,6 +214,9 @@ export function RemoteDesktopPage() {
       setStep('config');
       return;
     }
+    // 后端 session 已确认存在，通知 emulator 把首屏尺寸同步到 PTY
+    // （在此之前 resizeTerminal 会返回 "session not found" 弹框）。
+    terminalRef.current?.syncBackendSize();
     if (sessionId === setupTerminalIdRef.current) {
       // 等 SSH banner 结束后再检测 VNC 状态（保持原逻辑时序）
       await new Promise(r => setTimeout(r, 1500));

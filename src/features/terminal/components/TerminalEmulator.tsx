@@ -30,6 +30,10 @@ export interface TerminalEmulatorHandle {
   scrollToBottom: () => void;
   clearSearchDecorations: () => void;
   hasSelection: () => boolean;
+  /** Called by the parent after the backend session is confirmed spawned.
+   *  Performs the first backend PTY resize (which must not happen before the
+   *  session exists, otherwise resizeTerminal returns "session not found"). */
+  syncBackendSize: () => void;
 }
 
 interface TerminalEmulatorProps {
@@ -181,6 +185,30 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       hasSelection: () => {
         return terminalRef.current?.hasSelection() ?? false;
       },
+      syncBackendSize: () => {
+        const term = terminalRef.current;
+        const fit = fitAddonRef.current;
+        const container = containerRef.current;
+        if (!term || !fit || !container || !term.element) return;
+        // Mark ready as soon as the parent confirms the backend session is alive.
+        // Subsequent fit/resize calls are now safe to hit the backend.
+        sessionReadyRef.current = true;
+        const internal = term as any;
+        const rendererReady = !!(
+          internal._renderer?.value?.dimensions ||
+          internal._core?._renderService?._renderer?.value?.dimensions ||
+          internal._core?.viewport
+        );
+        if (!rendererReady) return;
+        const rect = container.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        try {
+          fit.fit();
+        } catch (err) {
+          console.warn('TerminalEmulator: syncBackendSize fit() failed', err);
+        }
+        resizeTerminal(sessionId, term.rows, term.cols).catch((e) => notify(localizeBackendError(e)));
+      },
     }), []);
 
     const handleResize = useCallback(() => {
@@ -217,6 +245,10 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
     }, [visible]);
 
     const isDisposedRef = useRef(false);
+    // True only after the parent has confirmed the backend PTY session exists.
+    // All backend calls (resize/write) must be gated on this to avoid hitting a
+    // not-yet-spawned session (which returns "session not found" and pops a toast).
+    const sessionReadyRef = useRef(false);
 
     useEffect(() => {
       if (!containerRef.current) return;
@@ -380,7 +412,9 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         if (rect.width === 0 || rect.height === 0) return;
         try {
           fit.fit();
-          resizeTerminal(sessionId, term.rows, term.cols).catch((e) => notify(localizeBackendError(e)));
+          if (sessionReadyRef.current) {
+            resizeTerminal(sessionId, term.rows, term.cols).catch((e) => notify(localizeBackendError(e)));
+          }
         } catch (err) {
           console.warn('TerminalEmulator: initial fit() failed', err);
         }
@@ -438,6 +472,10 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       }).catch((e) => notify(localizeBackendError(e)));
 
       terminal.onData((data) => {
+        // PTY not spawned yet — drop input silently (writing would hit a missing
+        // session and pop "session not found"). Once sessionReadyRef is set the
+        // parent has confirmed the backend session is alive.
+        if (!sessionReadyRef.current) return;
         const bytes = textEncoderRef.current.encode(data);
         writeToTerminal(sessionId, Array.from(bytes)).catch((e) => notify(localizeBackendError(e)));
 
@@ -488,6 +526,7 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       });
 
       resizeOffRef.current = terminal.onResize(({ cols, rows }) => {
+        if (!sessionReadyRef.current) return;
         resizeTerminal(sessionId, rows, cols).catch((e) => notify(localizeBackendError(e)));
       });
 
@@ -661,7 +700,9 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
                 fit.fit();
                 const cols = term.cols;
                 const rows = term.rows;
-                resizeTerminal(sessionId, rows, cols).catch((e) => notify(localizeBackendError(e)));
+                if (sessionReadyRef.current) {
+                  resizeTerminal(sessionId, rows, cols).catch((e) => notify(localizeBackendError(e)));
+                }
                 // Ensure terminal regains focus when becoming visible
                 term.focus();
               } catch (err) {

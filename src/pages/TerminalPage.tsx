@@ -103,11 +103,20 @@ export function TerminalPage() {
 
   // 由 TerminalEmulator 的 onReady 触发：监听器已就绪，此时再真正启动后端 PTY。
   // config 来自 handleConnect/handleReconnect 暂存在 configStashRef 中的值。
-  const handleSpawnReady = useCallback((id: string) => {
+  // spawn 成功后再让 emulator 把首屏尺寸同步到后端 PTY（此时 session 才存在，
+  // 否则 resizeTerminal 会返回 "session not found" 弹框）。
+  const handleSpawnReady = useCallback(async (id: string) => {
     const cfg = configStashRef.current.get(id);
     if (!cfg) return;
     configStashRef.current.delete(id);
-    spawnTerminal(id, cfg).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+    try {
+      await spawnTerminal(id, cfg);
+    } catch (e) {
+      console.error(e);
+      notify(localizeBackendError(e));
+      return;
+    }
+    terminalRefs.current.get(id)?.syncBackendSize();
   }, [notify]);
 
   // Pro 功能授权检查：未付费时弹出升级对话框
