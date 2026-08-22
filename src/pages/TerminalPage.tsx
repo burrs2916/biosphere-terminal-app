@@ -65,6 +65,11 @@ export function TerminalPage() {
   const [findResultCount, setFindResultCount] = useState<{ resultIndex: number; resultCount: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ mouseX: number; mouseY: number; hasSelection: boolean } | null>(null);
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
+  // Session ids whose backend PTY has been confirmed spawned (set inside
+  // handleSpawnReady after spawnTerminal resolves). The cwd poll below must
+  // NOT run before this — getTerminalCwd on a not-yet-spawned session returns
+  // "session not found" and pops a toast on first connection.
+  const [spawnedIds, setSpawnedIds] = useState<Set<string>>(new Set());
   const tabsRef = useRef<Tab[]>([]);
   const navigate = useNavigate();
   const terminalRefs = useRef<Map<string, TerminalEmulatorHandle>>(new Map());
@@ -84,16 +89,23 @@ export function TerminalPage() {
       setActiveCwd(null);
       return;
     }
-    const interval = setInterval(() => {
+    // Don't poll cwd until the backend session is actually spawned (otherwise
+    // getTerminalCwd hits a missing session and pops "session not found").
+    // Also skip when the session is in a disconnected/closed state.
+    if (!spawnedIds.has(activeTab.id) || activeTab.disconnected) {
+      // Re-run once the session becomes ready (spawnedIds changes) or the tab
+      // is reconnected; until then there is nothing valid to poll.
+      return;
+    }
+    const fetchCwd = () => {
       getTerminalCwd(activeTab.id).then((cwd) => {
         if (cwd) setActiveCwd(cwd);
-      }).catch((e) => notify(localizeBackendError(e)));
-    }, 5000);
-    getTerminalCwd(activeTab.id).then((cwd) => {
-      if (cwd) setActiveCwd(cwd);
-    }).catch((e) => notify(localizeBackendError(e)));
+      }).catch(() => { /* cwd is cosmetic (status bar only); never toast */ });
+    };
+    const interval = setInterval(fetchCwd, 5000);
+    fetchCwd();
     return () => clearInterval(interval);
-  }, [tabs]);
+  }, [tabs, spawnedIds, notify]);
 
   const getActiveTerminal = useCallback((): TerminalEmulatorHandle | undefined => {
     const activeTab = tabsRef.current.find((t) => t.isActive);
@@ -117,6 +129,13 @@ export function TerminalPage() {
       return;
     }
     terminalRefs.current.get(id)?.syncBackendSize();
+    // Mark this session as spawned so the cwd poll (which is gated on
+    // spawnedIds) starts only after the backend session actually exists.
+    setSpawnedIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
   }, [notify]);
 
   // Pro 功能授权检查：未付费时弹出升级对话框
