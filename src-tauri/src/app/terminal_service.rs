@@ -254,38 +254,189 @@ impl TerminalService {
 
     pub fn get_cwd(&self, session_id: &str) -> Result<Option<String>> {
         let sessions = self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?;
-        let state = sessions
-            .get(session_id)
-            .ok_or_else(|| crate::core::error::Error::Terminal("session not found".into()))?;
+        // cwd is only consumed by the cosmetic status-bar path and command-history
+        // tagging. A missing session is NOT an error worth surfacing: it races with
+        // spawn on first connect / tab switch / Enter / paste and would otherwise
+        // pop a spurious "Terminal error: session not found" even though the
+        // terminal works fine. Return None instead of erroring.
+        let state = match sessions.get(session_id) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
 
         if let Some(pid) = state.pty.lock().ok().and_then(|p| p.process_id()) {
-            let cwd_path = std::path::PathBuf::from(format!("/proc/{}/cwd", pid));
-            if cwd_path.exists() {
-                return Ok(std::fs::read_link(cwd_path)
-                    .ok()
-                    .map(|p| p.to_string_lossy().to_string()));
-            }
-            let lsof = std::process::Command::new("lsof")
-                .args(["-Ffn", "-p", &pid.to_string()])
-                .output();
-            if let Ok(output) = lsof {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let mut found_cwd: Option<String> = None;
-                let mut current_fd: Option<String> = None;
-                for line in stdout.lines() {
-                    let line = line.trim();
-                    if line.starts_with('f') {
-                        current_fd = Some(line[1..].to_string());
-                    } else if line.starts_with('n') && current_fd.as_deref() == Some("cwd") {
-                        found_cwd = Some(line[1..].to_string());
-                        break;
-                    }
-                }
-                if let Some(cwd) = found_cwd {
-                    return Ok(Some(cwd));
-                }
-            }
+            return Ok(Self::resolve_process_cwd(pid));
         }
         Ok(None)
+    }
+
+    /// Resolve the PTY child process's current working directory by PID.
+    ///
+    /// Implementations are platform-specific (see the two `cfg` variants
+    /// below); the public `get_cwd` just dispatches here. Every failure path
+    /// returns `None` so a missing cwd never surfaces as an error — it is only
+    /// used for the cosmetic status-bar path display.
+    #[cfg(target_os = "windows")]
+    fn resolve_process_cwd(pid: u32) -> Option<String> {
+        use std::os::raw::c_void;
+
+        // Minimal PEB / RTL_USER_PROCESS_PARAMETERS layouts for x64. The app
+        // ships 64-bit Windows binaries; these offsets are stable across
+        // Win8.1/Win10/Win11. (ProcessParameters is at PEB+0x20, CurrentDirectory
+        // is at RTL_USER_PROCESS_PARAMETERS+0x38.)
+        #[repr(C)]
+        struct Curdir {
+            handle: *mut c_void,
+            dos_path: *mut u16,
+            length: u32,
+        }
+        #[repr(C)]
+        struct ProcessBasicInformation {
+            exit_status: i32,
+            peb_base: *mut c_void,
+            affinity: usize,
+            base_priority: i32,
+            unique_pid: usize,
+            inherited_pid: usize,
+        }
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> *mut c_void;
+            fn CloseHandle(h: *mut c_void) -> i32;
+            fn ReadProcessMemory(
+                hProcess: *mut c_void,
+                lpBaseAddress: *const c_void,
+                lpBuffer: *mut c_void,
+                nSize: usize,
+                lpNumberOfBytesRead: *mut usize,
+            ) -> i32;
+            fn GetFinalPathNameByHandleW(hFile: *mut c_void, lpszFilePath: *mut u16, cchFilePath: u32, dwFlags: u32) -> u32;
+        }
+        #[link(name = "ntdll")]
+        extern "system" {
+            fn NtQueryInformationProcess(
+                hProcess: *mut c_void,
+                infoClass: u32,
+                pInfo: *mut c_void,
+                infoLen: u32,
+                pReturnLen: *mut u32,
+            ) -> i32;
+        }
+
+        const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+        const PROCESS_VM_READ: u32 = 0x0010;
+        const PROCESS_BASIC_INFORMATION_CLASS: u32 = 0;
+        const FILE_NAME_NORMALIZED: u32 = 0;
+
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+            if handle.is_null() {
+                return None;
+            }
+            let mut pbi = ProcessBasicInformation {
+                exit_status: 0,
+                peb_base: std::ptr::null_mut(),
+                affinity: 0,
+                base_priority: 0,
+                unique_pid: 0,
+                inherited_pid: 0,
+            };
+            let mut ret: u32 = 0;
+            if NtQueryInformationProcess(
+                handle,
+                PROCESS_BASIC_INFORMATION_CLASS,
+                &mut pbi as *mut _ as *mut c_void,
+                std::mem::size_of::<ProcessBasicInformation>() as u32,
+                &mut ret,
+            ) != 0
+            {
+                CloseHandle(handle);
+                return None;
+            }
+            let peb = pbi.peb_base;
+            if peb.is_null() {
+                CloseHandle(handle);
+                return None;
+            }
+            // Read ProcessParameters pointer (PEB + 0x20).
+            let mut params: *mut c_void = std::ptr::null_mut();
+            let mut bytes = 0usize;
+            if ReadProcessMemory(
+                handle,
+                (peb as usize + 0x20) as *const c_void,
+                &mut params as *mut _ as *mut c_void,
+                std::mem::size_of::<*mut c_void>(),
+                &mut bytes,
+            ) == 0
+                || params.is_null()
+            {
+                CloseHandle(handle);
+                return None;
+            }
+            // Read CURDIR (RTL_USER_PROCESS_PARAMETERS + 0x38).
+            let mut curdir = Curdir {
+                handle: std::ptr::null_mut(),
+                dos_path: std::ptr::null_mut(),
+                length: 0,
+            };
+            if ReadProcessMemory(
+                handle,
+                (params as usize + 0x38) as *const c_void,
+                &mut curdir as *mut _ as *mut c_void,
+                std::mem::size_of::<Curdir>(),
+                &mut bytes,
+            ) == 0
+                || curdir.handle.is_null()
+            {
+                CloseHandle(handle);
+                return None;
+            }
+            let mut buf = [0u16; 1024];
+            let len = GetFinalPathNameByHandleW(curdir.handle, buf.as_mut_ptr(), buf.len() as u32, FILE_NAME_NORMALIZED);
+            CloseHandle(handle);
+            if len == 0 || (len as usize) >= buf.len() {
+                return None;
+            }
+            let path = String::from_utf16_lossy(&buf[..len as usize]);
+            // GetFinalPathNameByHandleW returns a \\?\ verbatim-path prefix; strip it.
+            let stripped = path.strip_prefix("\\\\?\\").unwrap_or(&path);
+            if stripped.is_empty() {
+                None
+            } else {
+                Some(stripped.to_string())
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn resolve_process_cwd(pid: u32) -> Option<String> {
+        let cwd_path = std::path::PathBuf::from(format!("/proc/{}/cwd", pid));
+        if cwd_path.exists() {
+            return std::fs::read_link(cwd_path)
+                .ok()
+                .map(|p| p.to_string_lossy().to_string());
+        }
+        let lsof = std::process::Command::new("lsof")
+            .args(["-Ffn", "-p", &pid.to_string()])
+            .output();
+        if let Ok(output) = lsof {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut found_cwd: Option<String> = None;
+            let mut current_fd: Option<String> = None;
+            for line in stdout.lines() {
+                let line = line.trim();
+                if line.starts_with('f') {
+                    current_fd = Some(line[1..].to_string());
+                } else if line.starts_with('n') && current_fd.as_deref() == Some("cwd") {
+                    found_cwd = Some(line[1..].to_string());
+                    break;
+                }
+            }
+            if let Some(cwd) = found_cwd {
+                return Some(cwd);
+            }
+        }
+        None
     }
 }

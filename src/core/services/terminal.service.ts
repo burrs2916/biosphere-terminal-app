@@ -18,5 +18,13 @@ export async function resizeTerminal(sessionId: string, rows: number, cols: numb
 }
 
 export async function getTerminalCwd(sessionId: string): Promise<string | null> {
-  return invoke('get_terminal_cwd', { sessionId });
+  // cwd is cosmetic (status bar + command-history tagging). Never let a lookup
+  // race / transient backend error reject — callers use `.then()` without a
+  // catch and an unhandled rejection would otherwise surface as a spurious
+  // "Terminal error: session not found" popup even though the terminal works.
+  try {
+    return await invoke<string | null>('get_terminal_cwd', { sessionId });
+  } catch {
+    return null;
+  }
 }
