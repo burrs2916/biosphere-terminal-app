@@ -117,6 +117,14 @@ impl Pty {
             args.push(format!("ConnectTimeout={}", secs));
         }
 
+        // 交互式会话同样需要 SSH keepalive：用 vim/nano 编辑文件时连接长时间
+        // 无业务流量，易被 NAT/防火墙/SSH 服务端超时掐断，退出编辑器后表现为
+        // "终端已断开"。与 SFTP ControlMaster / VNC 隧道保持一致的取值。
+        args.push("-o".to_string());
+        args.push("ServerAliveInterval=20".to_string());
+        args.push("-o".to_string());
+        args.push("ServerAliveCountMax=6".to_string());
+
         if x11_forwarding {
             args.push("-X".to_string());
         }

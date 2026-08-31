@@ -162,7 +162,22 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         searchAddonRef.current?.findPrevious(query, options);
       },
       clearBuffer: () => {
-        terminalRef.current?.clear();
+        const term = terminalRef.current;
+        if (!term) return;
+        try {
+          term.clear();
+          // Force a full-screen repaint after clear() so the WebGL/DOM renderer
+          // does not get stuck on a black/desynced scroll area (renderer race that
+          // otherwise "bricks" the terminal view after clearing the buffer).
+          term.refresh(0, term.rows - 1);
+        } catch {
+          // Recovery path: a bare repaint is enough to bring the view back.
+          try {
+            term.refresh(0, term.rows - 1);
+          } catch {
+            /* noop */
+          }
+        }
       },
       focus: () => {
         terminalRef.current?.focus();
@@ -553,16 +568,38 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         }
       };
 
-      listen<{ session_id: string; data: string }>('terminal-output', (event) => {
+      // Harden the "all listeners registered" gate against a HUNG listen() promise.
+      // The first terminal in a fresh process can sometimes have a Tauri event
+      // listener registration that never resolves (neither resolve nor reject). The
+      // old code only caught reject, so a hung listener deadlocked fireReadyOnce at
+      // <3 and the backend PTY was never spawned — the "first remote tab sometimes
+      // won't connect, opening a second one works" bug. Now each listener counts
+      // exactly once via resolve, reject, OR a 300ms timeout.
+      const registerListener = (event: string, handler: (event: any) => void) => {
+        let counted = false;
+        const countOnce = () => {
+          if (!counted) {
+            counted = true;
+            fireReadyOnce();
+          }
+        };
+        listen(event, handler as any)
+          .then((unlisten) => {
+            unlisteners.push(unlisten);
+            countOnce();
+          })
+          .catch(() => countOnce());
+        // 悬挂兜底：listen 永不 resolve 时，最多 300ms 后必计数，保证 onReady 触发
+        setTimeout(countOnce, 300);
+      };
+
+      registerListener('terminal-output', (event) => {
         if (event.payload.session_id === sessionId) {
           terminal.write(event.payload.data);
         }
-      }).then((unlisten) => {
-        unlisteners.push(unlisten);
-        fireReadyOnce();
-      }).catch(() => fireReadyOnce());
+      });
 
-      listen<{ session_id: string; exit_code: number | null }>('terminal-closed', (event) => {
+      registerListener('terminal-closed', (event) => {
         if (event.payload.session_id === sessionId) {
           // 不记录 exit_code：terminal-closed 是 shell 进程退出码，不是单条命令的退出码
           // 单条命令的 exit_code 需要 shell integration 才能可靠获取
@@ -577,19 +614,13 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
           terminal.write(`\r\n\x1b[90m${t('output.process_exited')}\x1b[0m\r\n`);
           onExit?.(sessionId);
         }
-      }).then((unlisten) => {
-        unlisteners.push(unlisten);
-        fireReadyOnce();
-      }).catch(() => fireReadyOnce());
+      });
 
-      listen<{ session_id: string; error: string }>('terminal-error', (event) => {
+      registerListener('terminal-error', (event) => {
         if (event.payload.session_id === sessionId) {
           terminal.write(`\r\n\x1b[31m${t('output.error', { error: event.payload.error })}\x1b[0m\r\n`);
         }
-      }).then((unlisten) => {
-        unlisteners.push(unlisten);
-        fireReadyOnce();
-      }).catch(() => fireReadyOnce());
+      });
 
       const resizeObserver = new ResizeObserver(() => {
         handleResize();
