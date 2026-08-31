@@ -682,10 +682,8 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
                             sx={{
                               fontFamily: 'monospace',
                               fontSize: '0.8rem',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                              maxWidth: 220,
+                              whiteSpace: 'pre-wrap',
+                              wordBreak: 'break-all',
                             }}
                           >
                             {group.label}
@@ -1042,9 +1040,9 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
       <Dialog open={deleteEntryConfirm !== null} onClose={() => setDeleteEntryConfirm(null)} maxWidth="xs" fullWidth>
         <DialogTitle>{t('history.delete_entry_confirm_title')}</DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: 'pre-line' }}>
+          <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
             {t('history.delete_entry_confirm_message', {
-              command: deleteEntryConfirm?.command?.slice(0, 60) || '',
+              command: deleteEntryConfirm?.command || '',
             })}
           </Typography>
         </DialogContent>

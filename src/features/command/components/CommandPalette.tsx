@@ -232,7 +232,7 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
                       </Box>
                     }
                     slotProps={{
-                      primary: { variant: 'body2', sx: { fontFamily: 'monospace' } },
+                      primary: { variant: 'body2', sx: { fontFamily: 'monospace', whiteSpace: 'pre-wrap', wordBreak: 'break-all' } },
                     }}
                   />
                 </ListItemButton>
