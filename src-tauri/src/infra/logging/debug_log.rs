@@ -224,6 +224,34 @@ pub fn rd_frontend(level: &str, run_id: &str, phase: &str, event: &str, detail: 
     structured(RD_SCOPE, level, "fe", run_id, phase, event, detail);
 }
 
+/// Scope tag for the Terminal / SSH connection diagnostics trace.
+///
+/// Windows-only terminal failures (ConPTY hangs, `ssh` not found, a PTY that
+/// dies right after spawn) are invisible in the `tracing` pipeline because the
+/// interesting events happen in `spawn_blocking` worker threads. This scope
+/// gives the terminal path its own greppable tag in the same `debug.log`.
+pub const TERM_SCOPE: &str = "term";
+
+/// Backend-side entry of the Terminal diagnostics trace.
+pub fn term(level: &str, phase: &str, event: &str, detail: &str) {
+    structured(TERM_SCOPE, level, "be", "-", phase, event, detail);
+}
+
+/// Frontend-side entry of the Terminal diagnostics trace
+/// (bridged through the `append_terminal_log` command).
+pub fn term_frontend(level: &str, phase: &str, event: &str, detail: &str) {
+    structured(TERM_SCOPE, level, "fe", "-", phase, event, detail);
+}
+
+/// Scope tag for webview-level diagnostics (uncaught errors, unhandled
+/// rejections, CSP violations) bridged from the frontend.
+pub const WEBVIEW_SCOPE: &str = "webview";
+
+/// Frontend-side entry of the webview diagnostics trace.
+pub fn webview_frontend(level: &str, phase: &str, detail: &str) {
+    structured(WEBVIEW_SCOPE, level, "fe", "-", phase, "log", detail);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

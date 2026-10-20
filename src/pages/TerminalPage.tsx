@@ -31,6 +31,7 @@ import type { PtyConfig } from '../proto';
 import { openNotesReferenceWindow, openAiCopilotWindow, openRemoteDesktopWindow, openSftpWindow } from '../core/services/window.service';
 import { useConnectIntent } from '../features/terminal/connectIntent';
 import { localizeBackendError } from '../core/backendError';
+import { termTimed } from '../core/terminalLog';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '../engine';
 import { useNotify } from '../core/notification';
@@ -73,6 +74,23 @@ export function TerminalPage() {
   const tabsRef = useRef<Tab[]>([]);
   const navigate = useNavigate();
   const terminalRefs = useRef<Map<string, TerminalEmulatorHandle>>(new Map());
+  // Per-tab ref callbacks, cached so their identity is stable across renders.
+  // An inline `ref={...}` arrow would be a new function on every render, which
+  // makes React detach/reattach the ref on every commit and defeats
+  // `React.memo` on the emulator (a new callback identity is a changed prop).
+  const refCallbacksRef = useRef<Map<string, (handle: TerminalEmulatorHandle | null) => void>>(new Map());
+  const getRefCallback = useCallback((tabId: string) => {
+    const cache = refCallbacksRef.current;
+    let cb = cache.get(tabId);
+    if (!cb) {
+      cb = (handle: TerminalEmulatorHandle | null) => {
+        if (handle) terminalRefs.current.set(tabId, handle);
+        else terminalRefs.current.delete(tabId);
+      };
+      cache.set(tabId, cb);
+    }
+    return cb;
+  }, []);
   // 临时存放「待启动的会话配置」：spawnTerminal 不再在 handleConnect/handleReconnect
   // 里直接调用，而是等到对应 TerminalEmulator 的 onReady（即 Tauri 事件监听已注册）
   // 之后再触发。这样后端首屏输出永远不会早于前端监听器发出，根除「首连丢首屏」竞态。
@@ -83,29 +101,43 @@ export function TerminalPage() {
   const confirmBeforeClose = useSettingsStore((s) => s.settings.confirmBeforeClose);
   const notify = useNotify().notify;
 
+  // Only the fields the cwd poll actually depends on. Depending on the whole
+  // `tabs` array meant every title change (the shell rewrites the title on
+  // every prompt) tore down and restarted the poll — which fired an immediate
+  // `get_terminal_cwd` IPC. On Windows that call is an OpenProcess plus two
+  // ReadProcessMemory calls against the target's PEB, so it is far from free.
+  const activeTabId = tabs.find((t) => t.isActive)?.id ?? null;
+  const activeTabDisconnected = tabs.find((t) => t.isActive)?.disconnected ?? false;
+  // Last directory pushed into `activeCwd`. A poll that returns the same
+  // directory must not trigger a React re-render of the whole page.
+  const lastCwdRef = useRef<string | null>(null);
+
   useEffect(() => {
-    const activeTab = tabsRef.current.find((t) => t.isActive);
-    if (!activeTab) {
+    if (!activeTabId) {
+      lastCwdRef.current = null;
       setActiveCwd(null);
       return;
     }
     // Don't poll cwd until the backend session is actually spawned (otherwise
     // getTerminalCwd hits a missing session and pops "session not found").
     // Also skip when the session is in a disconnected/closed state.
-    if (!spawnedIds.has(activeTab.id) || activeTab.disconnected) {
+    if (!spawnedIds.has(activeTabId) || activeTabDisconnected) {
       // Re-run once the session becomes ready (spawnedIds changes) or the tab
       // is reconnected; until then there is nothing valid to poll.
       return;
     }
     const fetchCwd = () => {
-      getTerminalCwd(activeTab.id).then((cwd) => {
-        if (cwd) setActiveCwd(cwd);
+      getTerminalCwd(activeTabId).then((cwd) => {
+        if (cwd && cwd !== lastCwdRef.current) {
+          lastCwdRef.current = cwd;
+          setActiveCwd(cwd);
+        }
       }).catch(() => { /* cwd is cosmetic (status bar only); never toast */ });
     };
     const interval = setInterval(fetchCwd, 5000);
     fetchCwd();
     return () => clearInterval(interval);
-  }, [tabs, spawnedIds, notify]);
+  }, [activeTabId, activeTabDisconnected, spawnedIds]);
 
   const getActiveTerminal = useCallback((): TerminalEmulatorHandle | undefined => {
     const activeTab = tabsRef.current.find((t) => t.isActive);
@@ -121,8 +153,17 @@ export function TerminalPage() {
     const cfg = configStashRef.current.get(id);
     if (!cfg) return;
     configStashRef.current.delete(id);
+    // Logged on the frontend side as well: on Windows the backend can answer
+    // "the PTY is up" while the window is already unresponsive, so the gap
+    // between "invoke sent" and "invoke resolved" is the measurement that
+    // matters.
     try {
-      await spawnTerminal(id, cfg);
+      await termTimed(
+        'spawn',
+        'spawnTerminal',
+        () => spawnTerminal(id, cfg),
+        { sessionId: id, connType: cfg.connection_type ?? 'local' },
+      );
     } catch (e) {
       console.error(e);
       notify(localizeBackendError(e));
@@ -389,9 +430,20 @@ export function TerminalPage() {
   }, [getActiveTerminal]);
 
   const handleTitleChange = useCallback((sessionId: string, title: string) => {
-    setTabs((prev) =>
-      prev.map((t) => (t.id === sessionId ? { ...t, title } : t)),
-    );
+    setTabs((prev) => {
+      // Bail out when the title is unchanged: rebuilding the array would
+      // re-render the whole page (and every terminal tab) for nothing. The
+      // shell rewrites the title on every prompt, so this runs often.
+      const current = prev.find((t) => t.id === sessionId);
+      if (!current || current.title === title) return prev;
+      return prev.map((t) => (t.id === sessionId ? { ...t, title } : t));
+    });
+  }, []);
+
+  // Stable identity so the terminal tabs (React.memo) are not re-rendered
+  // when the find bar reports a new result count.
+  const handleFindResultsChange = useCallback((resultIndex: number, resultCount: number) => {
+    setFindResultCount({ resultIndex, resultCount });
   }, []);
 
   const handleCopy = useCallback(() => {
@@ -751,17 +803,12 @@ export function TerminalPage() {
             }}
           >
             <TerminalEmulator
-              ref={(handle) => {
-                if (handle) terminalRefs.current.set(tab.id, handle);
-                else terminalRefs.current.delete(tab.id);
-              }}
+              ref={getRefCallback(tab.id)}
               sessionId={tab.id}
               onExit={handleExit}
               onTitleChange={handleTitleChange}
               onReady={handleSpawnReady}
-              onFindResultsChange={(resultIndex, resultCount) => {
-                setFindResultCount({ resultIndex, resultCount });
-              }}
+              onFindResultsChange={handleFindResultsChange}
               visible={tab.isActive}
               profileId={tab.profileId}
             />

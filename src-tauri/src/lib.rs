@@ -756,6 +756,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::terminal::resize_terminal,
             interface::commands::terminal::relay_execute_command,
             interface::commands::terminal::get_terminal_cwd,
+            interface::commands::terminal::append_terminal_log,
             interface::commands::session::list_sessions,
             interface::commands::session::create_session,
             interface::commands::session::delete_session,

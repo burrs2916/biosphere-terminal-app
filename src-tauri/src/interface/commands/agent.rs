@@ -1175,6 +1175,19 @@ pub async fn stop_agent(
 
 #[tauri::command]
 pub fn write_frontend_log(level: String, tag: String, message: String) {
+    // Mirror into `debug.log` as well: the `tracing` pipeline writes
+    // `biosphere.log`, which users never attach to a bug report. `debug.log`
+    // is the file the support workflow asks for, so an uncaught webview error
+    // must land there too — it is the single most useful clue when the whole
+    // app dies ("自动退出/崩溃") with no backend-side error.
+    let normalized = match level.as_str() {
+        "error" => "ERROR",
+        "warn" => "WARN",
+        "debug" => "DEBUG",
+        _ => "INFO",
+    };
+    crate::infra::logging::debug_log::webview_frontend(normalized, &tag, &message);
+
     match level.as_str() {
         "error" => tracing::error!("[Frontend:{}] {}", tag, message),
         "warn" => tracing::warn!("[Frontend:{}] {}", tag, message),

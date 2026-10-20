@@ -2,6 +2,7 @@
 //!
 //! Targets macOS (parity baseline) and modern Windows 10/11.
 
+use crate::infra::logging::debug_log;
 use std::path::PathBuf;
 
 /// Return the default interactive shell to spawn for the local terminal.
@@ -37,21 +38,53 @@ pub fn resolve_ssh_binary() -> Result<String, String> {
     let exe = if cfg!(target_os = "windows") { "ssh.exe" } else { "ssh" };
 
     if let Some(p) = find_executable(exe) {
-        return Ok(p.to_string_lossy().into_owned());
+        let resolved = p.to_string_lossy().into_owned();
+        debug_log::term(
+            "DEBUG",
+            "ssh-resolve",
+            "path-hit",
+            &format!("ssh_bin={}", resolved),
+        );
+        return Ok(resolved);
     }
 
+    // Windows-only fallbacks. When the app is launched by double-click (not from a
+    // developer shell) the inherited PATH often omits the OpenSSH / Git dirs, so
+    // `find_executable` above fails even though ssh is installed. Probe the
+    // well-known install locations directly. `SysNative` is the 64-bit view of
+    // System32 for a 32-bit host process, so it also covers the WOW64 redirect
+    // case where `C:\Windows\System32\OpenSSH` would resolve to SysWOW64 (missing).
     #[cfg(target_os = "windows")]
     {
-        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-        let candidate = std::path::Path::new(&system_root)
-            .join("System32")
-            .join("OpenSSH")
-            .join("ssh.exe");
-        if candidate.exists() {
-            return Ok(candidate.to_string_lossy().into_owned());
+        let system_root =
+            std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let known: [&str; 5] = [
+            &format!("{}\\System32\\OpenSSH\\ssh.exe", system_root),
+            &format!("{}\\SysNative\\OpenSSH\\ssh.exe", system_root),
+            r"C:\Program Files\OpenSSH-Win64\ssh.exe",
+            r"C:\Program Files\Git\usr\bin\ssh.exe",
+            r"C:\Program Files (x86)\Git\usr\bin\ssh.exe",
+        ];
+        for candidate in known {
+            let p = std::path::Path::new(candidate);
+            if p.is_file() {
+                debug_log::term(
+                    "DEBUG",
+                    "ssh-resolve",
+                    "known-path-hit",
+                    &format!("ssh_bin={}", candidate),
+                );
+                return Ok(candidate.to_string());
+            }
         }
     }
 
+    debug_log::term(
+        "ERROR",
+        "ssh-resolve",
+        "not-found",
+        "ssh not found on PATH or known locations",
+    );
     Err(ssh_missing_hint())
 }
 
@@ -78,21 +111,47 @@ pub fn resolve_sftp_binary() -> Result<String, String> {
     let exe = if cfg!(target_os = "windows") { "sftp.exe" } else { "sftp" };
 
     if let Some(p) = find_executable(exe) {
-        return Ok(p.to_string_lossy().into_owned());
+        let resolved = p.to_string_lossy().into_owned();
+        debug_log::term(
+            "DEBUG",
+            "sftp-resolve",
+            "path-hit",
+            &format!("sftp_bin={}", resolved),
+        );
+        return Ok(resolved);
     }
 
     #[cfg(target_os = "windows")]
     {
-        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-        let candidate = std::path::Path::new(&system_root)
-            .join("System32")
-            .join("OpenSSH")
-            .join("sftp.exe");
-        if candidate.exists() {
-            return Ok(candidate.to_string_lossy().into_owned());
+        let system_root =
+            std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let known: [&str; 5] = [
+            &format!("{}\\System32\\OpenSSH\\sftp.exe", system_root),
+            &format!("{}\\SysNative\\OpenSSH\\sftp.exe", system_root),
+            r"C:\Program Files\OpenSSH-Win64\sftp.exe",
+            r"C:\Program Files\Git\usr\bin\sftp.exe",
+            r"C:\Program Files (x86)\Git\usr\bin\sftp.exe",
+        ];
+        for candidate in known {
+            let p = std::path::Path::new(candidate);
+            if p.is_file() {
+                debug_log::term(
+                    "DEBUG",
+                    "sftp-resolve",
+                    "known-path-hit",
+                    &format!("sftp_bin={}", candidate),
+                );
+                return Ok(candidate.to_string());
+            }
         }
     }
 
+    debug_log::term(
+        "ERROR",
+        "sftp-resolve",
+        "not-found",
+        "sftp not found on PATH or known locations",
+    );
     Err(sftp_missing_hint())
 }
 

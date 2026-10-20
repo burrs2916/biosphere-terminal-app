@@ -32,6 +32,7 @@ import { VncViewer } from '../features/terminal/components/VncViewer';
 import { createRemoteDesktop, closeRemoteDesktop, setupRemoteDesktop, type RemoteDesktopSession } from '../core/services/remote-desktop.service';
 import type { SshConnectionInfo } from '../proto/connection';
 import { spawnTerminal, killTerminal } from '../core/services/terminal.service';
+import { termTimed } from '../core/terminalLog';
 import { localizeBackendError } from '../core/backendError';
 import { useNotify } from '../core/notification';
 import { TerminalEmulator } from '../features/terminal';
@@ -112,6 +113,10 @@ export function RemoteDesktopPage() {
     private_key_path: authMethod === 'private_key' ? privateKeyPath : undefined,
     password: authMethod === 'password' ? password : undefined,
   }), [host, port, username, authMethod, privateKeyPath, password]);
+
+  // Stable no-op: an inline arrow here would change identity on every render
+  // and defeat the `React.memo` on TerminalEmulator.
+  const ignoreTitleChange = useCallback(() => {}, []);
 
   // 检测 VNC 状态
   const checkVncStatus = useCallback(async () => {
@@ -208,7 +213,12 @@ export function RemoteDesktopPage() {
     if (!config) return;
     delete pendingSpawnRef.current[sessionId];
     try {
-      await spawnTerminal(sessionId, config);
+      await termTimed(
+        'spawn',
+        'spawnTerminal',
+        () => spawnTerminal(sessionId, config),
+        { sessionId, connType: config.connection_type ?? 'local', page: 'remote-desktop' },
+      );
     } catch (err: any) {
       notify(localizeBackendError(err) || t('connection_failed'));
       setStep('config');
@@ -367,7 +377,7 @@ export function RemoteDesktopPage() {
             <TerminalEmulator
               ref={terminalRef}
               sessionId={x11TerminalIdRef.current}
-              onTitleChange={() => {}}
+              onTitleChange={ignoreTitleChange}
               onReady={handleSpawnReady}
             />
           )}
@@ -406,7 +416,7 @@ export function RemoteDesktopPage() {
                 <TerminalEmulator
                   ref={terminalRef}
                   sessionId={setupTerminalIdRef.current}
-                  onTitleChange={() => {}}
+                  onTitleChange={ignoreTitleChange}
                   onReady={handleSpawnReady}
                 />
               )}

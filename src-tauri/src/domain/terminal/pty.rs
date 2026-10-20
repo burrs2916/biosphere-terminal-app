@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::core::error::Result;
+use crate::infra::logging::debug_log;
 use crate::core::types::{PtyConfig, SshConnectionInfo};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
@@ -15,6 +16,21 @@ pub struct Pty {
 impl Pty {
     pub fn spawn(config: &PtyConfig) -> Result<Self> {
         let pty_system = native_pty_system();
+        let conn_type = config.connection_type.as_deref().unwrap_or("local");
+        let shell = config
+            .shell
+            .clone()
+            .filter(|s| !s.trim().is_empty() && shell_exists(s))
+            .unwrap_or_else(crate::core::platform::default_shell);
+        debug_log::term(
+            "DEBUG",
+            "pty",
+            "spawn-begin",
+            &format!(
+                "conn_type={} shell={} rows={} cols={}",
+                conn_type, shell, config.rows, config.cols
+            ),
+        );
 
         let pair = pty_system
             .openpty(PtySize {
@@ -23,7 +39,11 @@ impl Pty {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| crate::core::error::Error::Terminal(format!("openpty failed: {}", e)))?;
+            .map_err(|e| {
+                let msg = format!("openpty failed: {}", e);
+                debug_log::term("ERROR", "pty", "openpty-failed", &msg);
+                crate::core::error::Error::Terminal(msg)
+            })?;
 
         let cmd = Self::build_command(config)
             .map_err(|e| crate::core::error::Error::Terminal(e))?;
@@ -31,7 +51,17 @@ impl Pty {
         let child = pair
             .slave
             .spawn_command(cmd)
-            .map_err(|e| crate::core::error::Error::Terminal(format!("spawn failed: {}", e)))?;
+            .map_err(|e| {
+                let msg = format!("spawn failed: {}", e);
+                debug_log::term(
+                    "ERROR",
+                    "pty",
+                    "spawn-command-failed",
+                    &format!("shell={} err={}", shell, msg),
+                );
+                crate::core::error::Error::Terminal(msg)
+            })?;
+        debug_log::term("DEBUG", "pty", "spawn-ok", &format!("conn_type={}", conn_type));
 
         drop(pair.slave);
 
@@ -103,6 +133,7 @@ impl Pty {
         connect_timeout: Option<u64>,
     ) -> std::result::Result<CommandBuilder, String> {
         let ssh_bin = crate::core::platform::resolve_ssh_binary()?;
+        debug_log::term("DEBUG", "pty", "ssh-bin", &format!("ssh_bin={}", ssh_bin));
 
         let mut args: Vec<String> = Vec::new();
 

@@ -1,5 +1,6 @@
 use crate::app::connection_service::ConnectionService;
 use crate::core::types::{ConnectionConfig, SshConnectionInfo};
+use crate::infra::logging::debug_log;
 use crate::infra::storage::database::Database;
 use tauri::State;
 use std::sync::Arc;
@@ -51,8 +52,17 @@ pub fn set_rd_install_flavor(
     ConnectionService::set_rd_install_flavor(&db, &connection_id, &flavor).map_err(|e| e.to_string())
 }
 
+/// Test an SSH connection.
+///
+/// This command waits on a channel with a 15s budget, and on Windows the
+/// password branch additionally drives a ConPTY session. Tauri runs
+/// *synchronous* commands on the main (event-loop) thread, so a blocking wait
+/// here froze the whole app for up to 15 seconds — the window showed "not
+/// responding" exactly when the user clicked "测试连接". The blocking wait
+/// therefore runs on a worker thread via `spawn_blocking`; the UI thread stays
+/// responsive and the frontend keeps showing a spinner.
 #[tauri::command]
-pub fn test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
+pub async fn test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
     tracing::info!(
         "[TEST-CONN] test_connection ENTER auth_method={:?} host={} port={} user={}",
         ssh.auth_method, ssh.host, ssh.port, ssh.username
@@ -71,21 +81,50 @@ pub fn test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
         let _ = tx.send(result);
     });
     let start = Instant::now();
-    match rx.recv_timeout(Duration::from_secs(15)) {
-        Ok(r) => {
+    match tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(15))).await {
+        Ok(Ok(r)) => {
             tracing::info!(
                 "[TEST-CONN] test_connection RETURN (inner ok={}) elapsed={:?}",
                 r.is_ok(),
                 start.elapsed()
             );
+            debug_log::term(
+                if r.is_ok() { "INFO" } else { "ERROR" },
+                "conn",
+                "result",
+                &format!(
+                    "ok={} elapsed={:?} err={:?}",
+                    r.is_ok(),
+                    start.elapsed(),
+                    r.as_ref().err()
+                ),
+            );
             r
         }
-        Err(_) => {
+        Ok(Err(_)) => {
             tracing::warn!(
                 "[TEST-CONN] test_connection HARD-TIMEOUT elapsed={:?} -> returning timeout error (frontend must NOT freeze)",
                 start.elapsed()
             );
+            debug_log::term(
+                "ERROR",
+                "conn",
+                "result-timeout",
+                &format!("elapsed={:?} timeoutMs=15000", start.elapsed()),
+            );
             Err("测试连接超时（主机不可达或网络不通），请检查网络后重试".to_string())
+        }
+        Err(e) => {
+            // The blocking worker itself panicked — surface it instead of
+            // leaving the invoke pending forever.
+            tracing::error!("[TEST-CONN] test_connection wait task failed: {}", e);
+            debug_log::term(
+                "ERROR",
+                "conn",
+                "result-task-error",
+                &format!("err={}", e),
+            );
+            Err(format!("测试连接任务异常: {}", e))
         }
     }
 }
@@ -94,6 +133,15 @@ fn run_test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
     tracing::info!(
         "[TEST-CONN] run_test_connection ENTER auth_method={:?}",
         ssh.auth_method
+    );
+    debug_log::term(
+        "INFO",
+        "conn",
+        "enter",
+        &format!(
+            "auth_method={:?} host={} port={} user={}",
+            ssh.auth_method, ssh.host, ssh.port, ssh.username
+        ),
     );
     // 密钥模式：BatchMode=yes 跑一次真实握手+认证（零外部依赖，仅系统自带 ssh）
     if ssh.auth_method == "private_key" {
@@ -118,6 +166,12 @@ fn run_test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
 
         let ssh_bin = crate::core::platform::resolve_ssh_binary()
             .map_err(|e| format!("无法定位 ssh 程序: {}", e))?;
+        debug_log::term(
+            "DEBUG",
+            "conn",
+            "key-mode-ssh-bin",
+            &format!("ssh_bin={}", ssh_bin),
+        );
         return match run_command_with_timeout(&ssh_bin, &args, Duration::from_secs(8)) {
             Ok(true) => Ok(format!(
                 "✓ SSH 密钥认证成功：{}@{}:{}",
@@ -135,6 +189,12 @@ fn run_test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
     // （sshpass 的零依赖实现，仅系统 ssh + portable-pty，跨平台零额外安装）
     if ssh.auth_method == "password" {
         tracing::info!("[TEST-CONN] branch=password (has_pw={})", ssh.password.is_some());
+        debug_log::term(
+            "DEBUG",
+            "conn",
+            "branch-password",
+            &format!("has_pw={}", ssh.password.is_some()),
+        );
         return match &ssh.password {
             Some(pw) => match test_ssh_password(&ssh, pw, false) {
                 Ok(true) => Ok(format!(
@@ -169,9 +229,21 @@ fn test_ssh_password(
         Ok(p) => Arc::new(p),
         Err(e) => {
             tracing::error!("[TEST-CONN] test_ssh_password: spawn_ssh_command_session FAILED: {}", e);
+            debug_log::term(
+                "ERROR",
+                "conn",
+                "password-spawn-failed",
+                &format!("err={}", e),
+            );
             return Err(format!("无法建立测试会话: {}", e));
         }
     };
+    debug_log::term(
+        "DEBUG",
+        "conn",
+        "password-pty-spawned",
+        "pty spawned ok, waiting for prompt",
+    );
     tracing::info!("[TEST-CONN] test_ssh_password: pty spawned ok, getting reader/writer");
     let reader = pty.reader();
     let writer = pty.writer_clone();
@@ -261,6 +333,12 @@ fn test_ssh_password(
                                 let _ = w.write_all(&bytes);
                                 let _ = w.flush();
                             }
+                            debug_log::term(
+                                "DEBUG",
+                                "conn",
+                                "password-prompt-detected",
+                                "password prompt matched, feeding password",
+                            );
                             filled = true;
                             trailing.clear();
                         }
@@ -332,6 +410,12 @@ fn run_command_with_timeout(
         .stdin(Stdio::null())
         .spawn()
         .map_err(|e| format!("无法启动进程 {}: {}", bin, e))?;
+    debug_log::term(
+        "DEBUG",
+        "conn",
+        "key-mode-spawned",
+        &format!("bin={} timeoutMs=8000", bin),
+    );
 
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
@@ -344,6 +428,12 @@ fn run_command_with_timeout(
                 "[TEST-CONN] run_command_with_timeout: {} exited success={}",
                 bin,
                 status.success()
+            );
+            debug_log::term(
+                "DEBUG",
+                "conn",
+                "key-mode-exited",
+                &format!("bin={} success={}", bin, status.success()),
             );
             Ok(status.success())
         }
@@ -379,6 +469,12 @@ fn tcp_only_test(ssh: &SshConnectionInfo) -> Result<String, String> {
     match rx.recv_timeout(Duration::from_secs(6)) {
         Ok(Ok(())) => {
             tracing::info!("[TEST-CONN] tcp_only_test: port reachable (no identity verification)");
+            debug_log::term(
+                "INFO",
+                "conn",
+                "tcp-reachable",
+                &format!("host={} port={} note=no-auth", ssh.host, ssh.port),
+            );
             Err(format!(
                 "端口 {}:{} 可达，但未提供密码，无法验证身份。请在连接配置中填写密码，或改用密钥登录。",
                 ssh.host, ssh.port

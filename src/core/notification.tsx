@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
 import Snackbar from '@mui/material/Snackbar';
 import Alert from '@mui/material/Alert';
 
@@ -37,8 +37,14 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     setState((s) => ({ ...s, open: false }));
   }, []);
 
+  // The context value must be referentially stable. An inline `{{ notify }}`
+  // creates a new object on every provider render, which makes React mark
+  // every `useNotify()` consumer as changed — 18 components across the app
+  // re-render each time a toast is shown or dismissed.
+  const value = useMemo<NotificationContextValue>(() => ({ notify }), [notify]);
+
   return (
-    <NotificationContext.Provider value={{ notify }}>
+    <NotificationContext.Provider value={value}>
       {children}
       <Snackbar
         open={state.open}

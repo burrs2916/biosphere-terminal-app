@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState, forwardRef, useImperativeHandle } from 'react';
+import { useEffect, useRef, useCallback, useState, useMemo, memo, forwardRef, useImperativeHandle } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -14,6 +14,7 @@ import { getDefaultProfile } from '../../../core/services/profile.service';
 import { useSettingsStore, getThemeAppearance } from '../../../engine';
 import { useNotify } from '../../../core/notification';
 import { localizeBackendError } from '../../../core/backendError';
+import { termLog, renderFields } from '../../../core/terminalLog';
 import { useTranslation } from 'react-i18next';
 import type { AppearanceConfig } from '../../../proto';
 import '@xterm/xterm/css/xterm.css';
@@ -77,8 +78,19 @@ function buildTheme(appearance: ReturnType<typeof getThemeAppearance>) {
   };
 }
 
-export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmulatorProps>(
-  function TerminalEmulator({ sessionId, onExit, onTitleChange, onFindResultsChange, onReady, visible = true, profileId }, ref) {
+// `React.memo` on the emulator: the xterm instance, its addons and its event
+// listeners live entirely in refs and effects, so a re-render with unchanged
+// props is pure overhead. Without this, every parent state change (a tab
+// switch, a cwd poll, a find-bar result) re-rendered every open terminal.
+//
+// The parent must pass stable callback identities — `onFindResultsChange`
+// and the `ref` callback are the two that used to be inline arrows.
+export const TerminalEmulator = memo(
+  forwardRef<TerminalEmulatorHandle, TerminalEmulatorProps>(
+    function TerminalEmulator(
+      { sessionId, onExit, onTitleChange, onFindResultsChange, onReady, visible = true, profileId },
+      ref,
+    ) {
     const { t } = useTranslation('terminal');
     const containerRef = useRef<HTMLDivElement>(null);
     const terminalRef = useRef<Terminal | null>(null);
@@ -142,17 +154,31 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
       }
     }, [profileId]);
 
+    // 关键性能点：`appearance` 必须是**稳定引用**。
+    //
+    // 之前的写法每次渲染都 spread 出一个新对象，导致下面那个
+    // `useEffect(..., [appearance])` 每次渲染都重跑 —— 而该 effect 会重新赋值
+    // `terminal.options.theme / fontSize / fontFamily / lineHeight`，xterm 收到
+    // 这些变更后会**全量重新测量字符尺寸并重绘整个缓冲区**。
+    //
+    // 触发链：shell 每次改标题 → handleTitleChange → setTabs → TerminalPage
+    // 重渲染 → 所有 TerminalEmulator 重渲染 → xterm 全量重绘。
+    // 在 Windows 上这条链会把"敲一个命令"变成肉眼可见的卡顿。
     const baseAppearance = getThemeAppearance(themeMode);
-    const appearance = profileAppearance
-      ? {
-          ...baseAppearance,
-          ...profileAppearance,
-          colors: baseAppearance.colors,
-          selectionBackground: baseAppearance.selectionBackground,
-          selectionForeground: baseAppearance.selectionForeground,
-          cursorColor: baseAppearance.cursorColor,
-        }
-      : baseAppearance;
+    const appearance = useMemo(() => {
+      if (!profileAppearance) return baseAppearance;
+      return {
+        ...baseAppearance,
+        ...profileAppearance,
+        colors: baseAppearance.colors,
+        selectionBackground: baseAppearance.selectionBackground,
+        selectionForeground: baseAppearance.selectionForeground,
+        cursorColor: baseAppearance.cursorColor,
+      };
+    }, [baseAppearance, profileAppearance]);
+
+    // 同样需要稳定引用：theme 对象每次新建会让 xterm 认为"配色变了"而重绘。
+    const theme = useMemo(() => buildTheme(appearance), [appearance]);
 
     useImperativeHandle(ref, () => ({
       findNext: (query: string, options?: { regex?: boolean; wholeWord?: boolean; caseSensitive?: boolean }) => {
@@ -264,6 +290,11 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
     // All backend calls (resize/write) must be gated on this to avoid hitting a
     // not-yet-spawned session (which returns "session not found" and pops a toast).
     const sessionReadyRef = useRef(false);
+    // Output-volume metering, used to detect a runaway output flood that can
+    // stall the renderer on Windows. Reset every second when reported.
+    const outputBytesRef = useRef(0);
+    const outputChunksRef = useRef(0);
+    const outputWindowStartRef = useRef(Date.now());
 
     useEffect(() => {
       if (!containerRef.current) return;
@@ -333,14 +364,24 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
           try {
             const webglAddon = new WebglAddon();
             webglAddon.onContextLoss(() => {
+              // A lost WebGL context is the classic Windows "the app went
+              // white / stopped repainting" symptom: the GPU process died or
+              // the driver reset. Record it so a report can tell a renderer
+              // crash apart from a backend hang.
+              termLog('WARN', 'renderer', 'webgl.context-lost', renderFields({ sessionId }));
               try { webglAddon.dispose(); } catch { /* noop */ }
             });
             terminal.loadAddon(webglAddon);
+            termLog('DEBUG', 'renderer', 'webgl.loaded', renderFields({ sessionId }));
           } catch (err) {
+            termLog('WARN', 'renderer', 'webgl.unavailable', renderFields({ sessionId, error: String(err) }));
             console.warn('TerminalEmulator: WebGL renderer unavailable, falling back to canvas', err);
           }
+        } else {
+          termLog('DEBUG', 'renderer', 'canvas.selected', renderFields({ sessionId }));
         }
       } catch (err) {
+        termLog('ERROR', 'renderer', 'terminal.open.failed', renderFields({ sessionId, error: String(err) }));
         console.error('TerminalEmulator: terminal.open() failed', err);
       }
 
@@ -595,12 +636,47 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
 
       registerListener('terminal-output', (event) => {
         if (event.payload.session_id === sessionId) {
+          // Track output volume: a runaway command (e.g. `cat` on a huge file)
+          // floods the renderer with chunks and is a documented cause of the
+          // window "freezing" on Windows. Report the rate so a report can
+          // confirm or rule this out. Throttled to one line per second so the
+          // log itself cannot become the new bottleneck.
+          const now = Date.now();
+          outputBytesRef.current += event.payload.data.length;
+          outputChunksRef.current += 1;
+          if (now - outputWindowStartRef.current >= 1000) {
+            const bytes = outputBytesRef.current;
+            const chunks = outputChunksRef.current;
+            const elapsed = now - outputWindowStartRef.current;
+            if (bytes > 256 * 1024) {
+              termLog(
+                'WARN',
+                'output',
+                'output.flood',
+                renderFields({
+                  sessionId,
+                  bytesPerSec: Math.round((bytes / elapsed) * 1000),
+                  chunksPerSec: Math.round((chunks / elapsed) * 1000),
+                  windowMs: elapsed,
+                }),
+              );
+            }
+            outputBytesRef.current = 0;
+            outputChunksRef.current = 0;
+            outputWindowStartRef.current = now;
+          }
           terminal.write(event.payload.data);
         }
       });
 
       registerListener('terminal-closed', (event) => {
         if (event.payload.session_id === sessionId) {
+          termLog(
+            'INFO',
+            'lifecycle',
+            'terminal.closed',
+            renderFields({ sessionId, exitCode: event.payload.exit_code }),
+          );
           // 不记录 exit_code：terminal-closed 是 shell 进程退出码，不是单条命令的退出码
           // 单条命令的 exit_code 需要 shell integration 才能可靠获取
           if (event.payload.exit_code != null && event.payload.exit_code !== 0 && lastCommandRef.current) {
@@ -618,6 +694,12 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
 
       registerListener('terminal-error', (event) => {
         if (event.payload.session_id === sessionId) {
+          termLog(
+            'ERROR',
+            'lifecycle',
+            'terminal.error',
+            renderFields({ sessionId, error: event.payload.error }),
+          );
           terminal.write(`\r\n\x1b[31m${t('output.error', { error: event.payload.error })}\x1b[0m\r\n`);
         }
       });
@@ -659,13 +741,16 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
 
     useEffect(() => {
       if (!terminalRef.current) return;
-      terminalRef.current.options.theme = buildTheme(appearance);
+      // `theme` 是 memo 化的稳定引用，这里只在配色真正变化时才会重新赋值。
+      // 重新赋值 xterm 的 options.theme / fontSize 会触发全量重绘，所以这个
+      // effect 的依赖稳定性直接决定了终端的流畅度。
+      terminalRef.current.options.theme = theme;
       terminalRef.current.options.cursorBlink = appearance.cursorBlink;
       terminalRef.current.options.cursorStyle = appearance.cursorStyle;
       terminalRef.current.options.fontSize = appearance.fontSize;
       terminalRef.current.options.fontFamily = appearance.fontFamily;
       terminalRef.current.options.lineHeight = appearance.lineHeight;
-    }, [appearance]);
+    }, [appearance, theme]);
 
     useEffect(() => {
       if (terminalRef.current) {
@@ -757,5 +842,6 @@ export const TerminalEmulator = forwardRef<TerminalEmulatorHandle, TerminalEmula
         }}
       />
     );
-  },
+    },
+  ),
 );
