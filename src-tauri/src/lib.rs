@@ -851,6 +851,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::remote_desktop::append_remote_desktop_log,
             interface::commands::remote_desktop::diagnose_vnc_error,
             interface::commands::sftp::sftp_list,
+            interface::commands::sftp::sftp_list_many,
             interface::commands::sftp::sftp_upload,
             interface::commands::sftp::sftp_download,
             interface::commands::sftp::sftp_remove,

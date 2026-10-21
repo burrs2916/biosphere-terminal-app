@@ -21,6 +21,7 @@
 //!   parse and forward to the UI.
 
 use crate::core::types::SshConnectionInfo;
+use crate::infra::logging::debug_log;
 use crate::domain::terminal::pty::Pty;
 use crate::domain::terminal::pty_expect::{
     classify_pending_prompt, AnsiFilter, AuthAction, AuthResponder, PendingPrompt,
@@ -1330,7 +1331,11 @@ impl SftpService {
             }
             let cached = lock(&self.sessions).remove(key);
             let (mut session, reused) = match cached {
-                Some(s) if s.is_alive() => (s, true),
+                // An idle session can have been dropped by the far side
+                // (server ClientAlive*, firewall NAT timeout) without the
+                // pty noticing — `is_alive` only sees a dead child. Respawn
+                // instead of handing a dead socket to the next command.
+                Some(s) if s.is_alive() && s.last_used.elapsed() < SESSION_IDLE_TIMEOUT => (s, true),
                 Some(s) => {
                     s.close();
                     (InteractiveSession::spawn(ssh)?, false)
@@ -1585,12 +1590,24 @@ impl InteractiveSession {
             "StrictHostKeyChecking=accept-new".to_string(),
             "-o".to_string(),
             "ConnectTimeout=15".to_string(),
+            // 禁用 GSSAPI（Kerberos/SSPI）：Windows OpenSSH 默认把 gssapi-with-mic
+            // 排最前，非域环境无 KDC 时该握手会卡 ~10s 才失败，叠加 VirtualBox
+            // host-only 的慢连接，容易顶爆下面的 SESSION_HANDSHAKE_TIMEOUT → 假失败。
+            // key / password 模式都安全（与终端/测试连接路径一致）。
+            "-o".to_string(),
+            "GSSAPIAuthentication=no".to_string(),
             // One shot only: a rejected password must fail fast instead of
             // re-prompting into a pty nobody is watching.
             "-o".to_string(),
             "NumberOfPasswordPrompts=1".to_string(),
         ];
         keepalive_args(&mut args);
+        // 密码模式直奔 password 认证，跳过 pubkey/gssapi 探针（gssapi 已禁用，
+        // 这里进一步省掉无谓的 pubkey 探测）。密钥模式**不能**加，否则会跳过密钥。
+        if ssh.auth_method == "password" {
+            args.push("-o".to_string());
+            args.push("PreferredAuthentications=password".to_string());
+        }
         if ssh.port != 22 {
             args.push("-P".to_string());
             args.push(ssh.port.to_string());
@@ -1645,9 +1662,19 @@ impl InteractiveSession {
             None
         };
 
+        debug_log::term(
+            "DEBUG",
+            "sftp",
+            "sftp-handshake",
+            &format!(
+                "host={} port={} user={} auth={}",
+                ssh.host, ssh.port, ssh.username, ssh.auth_method
+            ),
+        );
         match session.pump(pw.as_deref(), None, SESSION_HANDSHAKE_TIMEOUT) {
             Ok(_) => {
                 tracing::info!("[SFTP] interactive session ready ({}@{})", ssh.username, ssh.host);
+                debug_log::term("INFO", "sftp", "sftp-session-ready", "interactive sftp session authenticated");
                 return Ok(session);
             }
             Err(_) => {
@@ -1655,9 +1682,13 @@ impl InteractiveSession {
                 let exited = !session.is_alive();
                 let diag = session.diag.clone();
                 let _ = session.pty.kill();
-                tracing::error!(
-                    "[SFTP] interactive session failed: {}",
-                    diag.replace(['\n', '\r'], " ")
+                let diag_oneline = diag.replace(['\n', '\r'], " ");
+                tracing::error!("[SFTP] interactive session failed: {}", diag_oneline);
+                debug_log::term(
+                    "ERROR",
+                    "sftp",
+                    "sftp-session-failed",
+                    &format!("exited={} diag={}", exited, diag_oneline),
                 );
                 // 远程重装系统后 host key 变更：清掉旧 key 并重连一次（与终端连接一致）。
                 if attempt == 0 && crate::core::platform::is_host_key_error(&diag) {
@@ -1770,6 +1801,12 @@ impl InteractiveSession {
                                 self.write_raw(&format!("{}\n", pw))?;
                                 answered = true;
                                 self.pending.clear();
+                                debug_log::term(
+                                    "DEBUG",
+                                    "sftp",
+                                    "sftp-prompt-detected",
+                                    "password prompt matched, feeding password",
+                                );
                             }
                             _ => {
                                 self.auth_error =

@@ -1,5 +1,6 @@
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
+import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
 import { useSearchParams } from 'react-router-dom';
@@ -21,18 +22,26 @@ export function SftpPage() {
   const password = searchParams.get('password') || '';
 
   const { canUse } = useFeatureGate('sftp');
+
+  // Memoised: a fresh object every render would invalidate every callback
+  // derived from it downstream (`listDir`/`listManyDir` in the tree), and the
+  // tree's batch-fetch effect keys on `listMany` — so each re-render would
+  // re-run the cascade effect and re-issue directory listings.
+  const ssh = useMemo<SshConnectionInfo>(
+    () => ({
+      host,
+      port: parseInt(port) || 22,
+      username,
+      auth_method: authMethod as 'none' | 'password' | 'private_key',
+      private_key_path: authMethod === 'private_key' ? keyPath : undefined,
+      password: authMethod === 'password' ? password : undefined,
+    }),
+    [host, port, username, authMethod, keyPath, password],
+  );
+
   if (!canUse) {
     return <LockedScreen feature="sftp" />;
   }
-
-  const ssh: SshConnectionInfo = {
-    host,
-    port: parseInt(port) || 22,
-    username,
-    auth_method: authMethod as 'none' | 'password' | 'private_key',
-    private_key_path: authMethod === 'private_key' ? keyPath : undefined,
-    password: authMethod === 'password' ? password : undefined,
-  };
 
   const textColor = isDark ? '#c9d1d9' : '#24292f';
 
