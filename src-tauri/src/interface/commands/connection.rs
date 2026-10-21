@@ -11,6 +11,14 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::sync::mpsc;
 
+/// 喂密码前的预算：ssh 自带 `ConnectTimeout=10` 已让真不可达的主机快速以非零
+/// 退出（正确报错，不挂死）；此预算只兜底「连上了但握手/密钥协商迟迟不给密码
+/// 提示」的极端慢主机。给足 30s 避免误杀。
+const PRE_PROMPT_BUDGET_SECS: u64 = 30;
+/// 喂完密码后重启的认证完成预算：ssh 收到密码后做 PAM/执行远端命令通常 1–3s，
+/// 给 15s 足量余量，绝不再因「提示出现太晚」被 12s 硬超时误杀。
+const AUTH_COMPLETE_BUDGET_SECS: u64 = 15;
+
 #[tauri::command]
 pub fn list_connections(db: State<'_, Arc<Database>>) -> Result<Vec<ConnectionConfig>, String> {
     ConnectionService::list_connections(&db).map_err(|e| e.to_string())
@@ -275,11 +283,27 @@ fn test_ssh_password(
     let un_tx_feeder = un_tx.clone();
     drop(hk_tx);
     drop(un_tx);
+    // 喂密码时刻（feeder 写入 / 监控线程读取）：用于喂密码后重启认证完成计时，
+    // 使慢主机（提示出现晚）不再被固定 12s 硬超时误杀。
+    let password_fed_at = Arc::new(std::sync::Mutex::new(None::<Instant>));
+    let password_fed_at_monitor = password_fed_at.clone();
     thread::spawn(move || {
         let start = Instant::now();
-        let overall = Duration::from_secs(12);
         let mut code: Option<i32> = None;
-        while start.elapsed() < overall {
+        loop {
+            // 分阶段预算：喂密码前给足（ssh 自带 ConnectTimeout=10 让真不可达主机
+            // 快速非零退出）；喂密码后重启 AUTH_COMPLETE_BUDGET_SECS 认证完成计时。
+            let fed = password_fed_at_monitor
+                .lock()
+                .map(|g| *g)
+                .unwrap_or(None);
+            let deadline = match fed {
+                Some(t) => t + Duration::from_secs(AUTH_COMPLETE_BUDGET_SECS),
+                None => start + Duration::from_secs(PRE_PROMPT_BUDGET_SECS),
+            };
+            if Instant::now() >= deadline {
+                break;
+            }
             match pty_wait.try_wait() {
                 Ok(Some(c)) => {
                     code = Some(c);
@@ -297,8 +321,8 @@ fn test_ssh_password(
         if code.is_none() {
             let _ = pty_wait.kill();
             tracing::warn!(
-                "[TEST-CONN] test_ssh_password: try_wait loop ended without exit ({}s) -> killed, treat as timeout",
-                overall.as_secs()
+                "[TEST-CONN] test_ssh_password: try_wait loop ended without exit after {:?} -> killed, treat as timeout",
+                start.elapsed()
             );
         } else {
             tracing::info!(
@@ -313,6 +337,7 @@ fn test_ssh_password(
     // responder 用 Arc<Mutex> 共享：主线程在失败路径上要读它的脱敏会话记录。
     let responder = Arc::new(std::sync::Mutex::new(AuthResponder::new(Some(pw_owned.clone()))));
     let responder_feeder = responder.clone();
+    let password_fed_at_feeder = password_fed_at.clone();
     tracing::info!("[TEST-CONN] test_ssh_password: spawning feeder thread");
     let feeder = thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -320,7 +345,9 @@ fn test_ssh_password(
             Ok(g) => g,
             Err(_) => return,
         };
-        let deadline = Instant::now() + Duration::from_secs(8);
+        // 宽松上限：监控线程会在分阶段预算到点时 kill ssh，pty 读端随即 EOF 退出；
+        // 这里不提前死线，避免慢提示（出现在 >8s）时 feeder 已退出、根本不喂密码。
+        let deadline = Instant::now() + Duration::from_secs(45);
         let mut hk_sent = false;
         while Instant::now() < deadline {
             match guard.read(&mut buf) {
@@ -340,6 +367,11 @@ fn test_ssh_password(
                             if let Ok(mut w) = writer.lock() {
                                 let _ = w.write_all(&bytes);
                                 let _ = w.flush();
+                            }
+                            // 记录喂密码时刻：监控线程据此把超时预算重启为
+                            // AUTH_COMPLETE_BUDGET_SECS，避免慢提示被误杀。
+                            if let Ok(mut f) = password_fed_at_feeder.lock() {
+                                *f = Some(Instant::now());
                             }
                             debug_log::term(
                                 "DEBUG",
@@ -392,7 +424,9 @@ fn test_ssh_password(
     };
 
     let mut result: std::result::Result<bool, String>;
-    let outer_deadline = Instant::now() + Duration::from_secs(13);
+    // 外层安全上限：真实超时由监控线程的分阶段预算触发（pre-prompt 30s /
+    // 喂密码后 15s），这里只是兜底，防止任何路径意外卡死前端 invoke。
+    let outer_deadline = Instant::now() + Duration::from_secs(45);
     loop {
         // 二次验证码 / 加密私钥口令：200ms 轮询内即可给出明确错误。
         if let Ok(msg) = un_rx.try_recv() {
@@ -437,14 +471,22 @@ fn test_ssh_password(
             }
             Ok(None) => {
                 let _ = pty.kill();
+                let fed = password_fed_at.lock().map(|g| g.is_some()).unwrap_or(false);
                 debug_log::term(
                     "ERROR",
                     "conn",
                     "auth-timeout",
-                    &format!("diag={}", diag_snapshot()),
+                    &format!("diag={} password_fed={}", diag_snapshot(), fed),
                 );
-                tracing::warn!("[TEST-CONN] test_ssh_password: process still running after 12s -> killed as connection/auth timeout");
-                result = Err("SSH 连接超时（主机不可达、网络不通，或认证长时间无响应）".to_string());
+                // 按阶段区分：喂过密码仍卡 → 认证无响应；未喂密码 → 主机不可达/握手过慢。
+                // 绝不把两者混成一个误导性的「主机不可达」。
+                let msg = if fed {
+                    "SSH 认证超时（已收到密码但长时间无响应，可能触发二次验证或服务器繁忙）"
+                        .to_string()
+                } else {
+                    "SSH 连接超时（主机不可达、网络不通，或 SSH 握手/密钥协商过慢）".to_string()
+                };
+                result = Err(msg);
                 break;
             }
             Err(_) => {

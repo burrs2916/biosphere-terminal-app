@@ -140,6 +140,14 @@ impl Pty {
         args.push("-o".to_string());
         args.push("StrictHostKeyChecking=accept-new".to_string());
 
+        // 禁用 GSSAPI（Kerberos/SSPI）认证探针：Windows 自带 OpenSSH 默认把
+        // gssapi-with-mic 排在 PreferredAuthentications 最前，非域环境无 KDC 时
+        // 这次握手会卡 ~10s 才失败、才回退到 password 提示。这会让密码提示延迟
+        // 出现、触发测试连接的硬超时 → 假「连接超时」。禁用后直奔 password，与
+        // PuTTY/MobaXterm 等行为一致。覆盖测试连接 / 交互终端 / SFTP 全部路径。
+        args.push("-o".to_string());
+        args.push("GSSAPIAuthentication=no".to_string());
+
         // 仅测试会话（密码模式）传入 connect_timeout：给 ssh 设 TCP 连接超时，
         // 避免主机不可达时 ssh 一直重试 SYN 导致测试线程卡死。
         // ssh 用非阻塞 connect + select 实现 ConnectTimeout，跨平台可靠（区别于 std 的不可靠 connect_timeout）。
@@ -204,6 +212,12 @@ impl Pty {
         cmd.args(&[
             "-o".to_string(),
             "NumberOfPasswordPrompts=1".to_string(),
+        ]);
+        // 密码模式测试：直接指定 password 认证，跳过 pubkey/gssapi 探针，
+        // 提示立即出现（与 GSSAPIAuthentication=no 配合消除 ~10s 延迟）。
+        cmd.args(&[
+            "-o".to_string(),
+            "PreferredAuthentications=password".to_string(),
         ]);
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -274,6 +288,12 @@ impl Pty {
             "ServerAliveCountMax=6".to_string(),
         ];
         cmd.args(&master_args);
+        // 密码模式 master：直奔 password 认证，跳过 pubkey/gssapi 探针
+        // （与测试连接路径一致，消除 Windows 上 ~10s 的 gssapi 握手延迟）。
+        cmd.args(&[
+            "-o".to_string(),
+            "PreferredAuthentications=password".to_string(),
+        ]);
 
         let pty_system = native_pty_system();
         let pair = pty_system
