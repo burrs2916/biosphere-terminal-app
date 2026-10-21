@@ -196,8 +196,15 @@ impl Pty {
         ssh: &SshConnectionInfo,
         remote_command: &str,
     ) -> Result<Self> {
-        let cmd = Self::build_ssh_command(ssh, false, Some(remote_command), Some(10))
+        let mut cmd = Self::build_ssh_command(ssh, false, Some(remote_command), Some(10))
             .map_err(|e| crate::core::error::Error::Terminal(e))?;
+        // One prompt only: a wrong password must fail fast (non-zero exit ->
+        // "认证失败") instead of re-prompting up to 3 times into a pty whose
+        // expect loop answers exactly once. Mirrors sftp's spawn.
+        cmd.args(&[
+            "-o".to_string(),
+            "NumberOfPasswordPrompts=1".to_string(),
+        ]);
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -422,26 +429,6 @@ impl Pty {
 
 /// 判断一段终端输出是否处于 SSH/sftp 密码提示，locale 无关。
 ///
-/// OpenSSH 会把密码提示本地化为客户端语言：中文系统下是
-/// "user@host 的密码："（全角冒号结尾），英文系统下是 "user@host's password: "。
-/// 各处自动喂密码逻辑（交互式连接 / 测试连接 / SFTP / 远程桌面）统一走这里，
-/// 避免只匹配英文导致中文 locale 漏检、密码不喂、认证失败。
-///
-/// `trailing` 传未小写的滚动输出窗口即可；函数内部自行 lower。
-pub fn is_password_prompt(trailing: &str) -> bool {
-    let lower = trailing.to_lowercase();
-    // 英文提示：password / passphrase（含 OpenSSH 兼容的 "password: " 尾空格变体）
-    let english = lower.ends_with("password:")
-        || lower.ends_with("password: ")
-        || lower.ends_with("passphrase:")
-        || lower.ends_with("passphrase for key:")
-        || (lower.contains("password:") && trailing.trim_end().ends_with(':'));
-    // 中文提示："user@host 的密码：" —— 要求全角冒号结尾，避免 motd/banner
-    // 里恰好出现"密码"字样时误触发。
-    let chinese = lower.contains("密码") && trailing.trim_end().ends_with('：');
-    english || chinese
-}
-
 /// Returns true if `shell` is a runnable command for the current platform.
 ///
 /// - If `shell` contains a path separator, we require the file to exist.

@@ -40,15 +40,23 @@ export async function testConnection(ssh: SshConnectionInfo, timeoutMs = 20000):
     });
   // 客户端兜底超时：即便后端因异常迟迟不返回（理论上不会再发生），
   // 弹框也能在 timeoutMs 后恢复，避免“测试链接卡死、按钮永久禁用”。
-  const timeoutPromise = new Promise<string>((_, reject) =>
-    setTimeout(
+  // 注意：invoke 一旦返回（成功或失败）必须清掉这个定时器 —— 否则 race
+  // 已 settle 之后它仍然触发，在 debug.log 里留一条误导性的 test.timeout
+  // ERROR（真实错误早已返回，用户看到的是重复/错误的超时记录）。
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<string>((_, reject) => {
+    timeoutId = setTimeout(
       () => {
         console.warn('[TEST-CONN][frontend] CLIENT-TIMEOUT fired in', Date.now() - t0, 'ms');
         termLog('ERROR', 'conn', 'test.timeout', renderFields({ elapsedMs: Date.now() - t0, timeoutMs }));
         reject(i18n.t('connection.connection_timeout', { ns: 'terminal' }));
       },
       timeoutMs,
-    ),
-  );
-  return Promise.race([invokePromise, timeoutPromise]);
+    );
+  });
+  try {
+    return await Promise.race([invokePromise, timeoutPromise]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
 }

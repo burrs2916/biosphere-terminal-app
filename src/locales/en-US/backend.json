@@ -12,6 +12,8 @@
     "tcp_no_sshpass": "Port is reachable, but no password was provided so identity could not be verified. Fill in the password in the connection config, or switch to key-based login.",
     "ssh_key_auth_failed": "SSH key authentication failed (wrong key, host unreachable, or connection refused).",
     "ssh_password_auth_failed": "SSH password authentication failed (wrong password or host unreachable).",
+    "ssh_2fa_required": "The server requires a two-factor verification code, which this app does not support. Sign in manually from a terminal, or disable 2FA on the server.",
+    "ssh_key_encrypted": "The private key is passphrase-protected. Use an unencrypted key, or add the key to the SSH agent with ssh-add first.",
     "ssh_host_key_changed": "SSH host key verification failed (the remote host key changed, the system was likely reinstalled). Run `ssh-keygen -R <host>` in your local terminal to remove the old key and retry, or confirm this change is trusted.",
     "ssh_key_auth_success": "✓ SSH key authentication succeeded.",
     "ssh_password_auth_success": "✓ SSH password authentication succeeded."

@@ -2,6 +2,7 @@ use crate::core::error::{Error, Result};
 use crate::infra::logging::debug_log;
 use crate::core::types::PtyConfig;
 use crate::domain::terminal::pty::Pty;
+use crate::domain::terminal::pty_expect::{AuthAction, AuthResponder};
 use crate::interface::events::terminal_events;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -154,7 +155,11 @@ impl TerminalService {
             // 重连时换新 pty 的 reader/writer，故为可变绑定
             let mut reader = reader;
             let mut writer = writer;
-            let mut trailing = String::with_capacity(256);
+            // 自动喂密码 / host key 确认的 expect 状态机（共享模块）：
+            // 先过滤 ANSI 转义序列再做提示分类。Windows ConPTY（conhost）会
+            // 往输出流里插 VT 序列，在裸流上匹配 "password:" 会漏检 —— 密码
+            // 喂不进去，终端就干坐在密码提示上。
+            let mut responder = AuthResponder::new(password.clone());
             let mut password_filled = false;
             // host key 变更检测用独立缓冲：报错文本可能跨 chunk
             let mut hostkey_buf = String::with_capacity(1024);
@@ -245,24 +250,55 @@ impl TerminalService {
                                 }
                             }
 
-                            if !password_filled {
-                                if let Some(ref pwd) = password {
-                                    trailing.push_str(&output);
-                                    if trailing.len() > 256 {
-                                        trailing = trailing[trailing.len() - 256..].to_string();
+                            // 仅在有保存密码的 SSH 会话上跑 expect：本地终端
+                            // （无密码）完全不碰这条路径，保持零额外开销。
+                            // 喂入口令 / 应答 host key 确认后同样不再运行。
+                            if !password_filled && password.is_some() {
+                                match responder.push(&output) {
+                                    AuthAction::FeedPassword => {
+                                        if let Some(ref pwd) = password {
+                                            let pw_bytes = format!("{}\n", pwd);
+                                            if let Ok(mut w) = writer.lock() {
+                                                let _ = w.write_all(pw_bytes.as_bytes());
+                                                let _ = w.flush();
+                                            }
+                                            password_filled = true;
+                                            // 出现密码提示说明 host key 校验已通过，无需再扫。
+                                            hostkey_scan_done = true;
+                                            tracing::info!("[terminal] Detected password prompt for session {}, auto-filling...", sid);
+                                            debug_log::term(
+                                                "DEBUG",
+                                                "reader",
+                                                "password-prompt-detected",
+                                                &format!("session={} action=auto-fill", sid),
+                                            );
+                                        }
                                     }
-                                    if crate::domain::terminal::pty::is_password_prompt(&trailing) {
-                                        tracing::info!("[terminal] Detected password prompt for session {}, auto-filling...", sid);
-                                        let pw_bytes = format!("{}\n", pwd);
+                                    AuthAction::AnswerHostKeyYes => {
+                                        // 首连确认：与 StrictHostKeyChecking=accept-new
+                                        // 语义一致的自动接受（只接受全新 key）。
                                         if let Ok(mut w) = writer.lock() {
-                                            let _ = w.write_all(pw_bytes.as_bytes());
+                                            let _ = w.write_all(b"yes\n");
                                             let _ = w.flush();
                                         }
-                                        password_filled = true;
-                                        trailing.clear();
-                                        // 出现密码提示说明 host key 校验已通过，无需再扫。
-                                        hostkey_scan_done = true;
+                                        debug_log::term(
+                                            "DEBUG",
+                                            "reader",
+                                            "hostkey-yes-answered",
+                                            &format!("session={}", sid),
+                                        );
                                     }
+                                    AuthAction::Unsatisfiable(msg) => {
+                                        // 交互式会话不主动失败：提示就摆在用户眼前，
+                                        // 验证码/口令用户可以自己输。仅记录便于排查。
+                                        debug_log::term(
+                                            "WARN",
+                                            "reader",
+                                            "auth-unsatisfiable",
+                                            &format!("session={} msg={}", sid, msg),
+                                        );
+                                    }
+                                    AuthAction::Idle => {}
                                 }
                             }
 
@@ -306,7 +342,7 @@ impl TerminalService {
                                     }
                                 }
                                 // 重连后清状态，重新等密码提示
-                                trailing.clear();
+                                responder = AuthResponder::new(password.clone());
                                 hostkey_buf.clear();
                                 password_filled = false;
                                 break; // 跳出内层循环，继续外层读新 pty

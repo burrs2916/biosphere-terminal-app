@@ -218,12 +218,25 @@ fn run_test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
 
 /// 用 pty + expect 实现 sshpass 等效逻辑：起 `ssh user@host true` 会话，
 /// 监控 pty 输出，匹配到密码提示时自动把密码写回。零外部依赖（仅系统 ssh + portable-pty）。
+///
+/// 提示识别走共享模块 [`crate::domain::terminal::pty_expect`]：
+/// - ANSI 转义序列先过滤再匹配 —— Windows ConPTY（conhost）会往输出流里插
+///   VT 序列，裸流上做 `ends_with("password:")` 会漏检，密码喂不进去，
+///   ssh 干坐在提示上直到超时，用户看到的就是假的「连接超时」。
+/// - host key 首连确认 `(yes/no/[fingerprint])?` 自动回 yes（与 accept-new
+///   语义一致：只对全新 key 自动接受，key 变更仍然拒绝并走下方重试）。
+/// - 二次验证码 / 加密私钥口令等无法满足的提示立即返回明确错误，不再耗到
+///   超时才给一个误导性的「主机不可达」。
+/// - 会话记录（脱敏）写入 debug.log，失败时可直接看到 ssh 到底说了什么。
+///
 /// `retried` 为 true 表示已因 host key 变更自动清理并重试过一次。
 fn test_ssh_password(
     ssh: &SshConnectionInfo,
     pw: &str,
     retried: bool,
 ) -> std::result::Result<bool, String> {
+    use crate::domain::terminal::pty_expect::{AuthAction, AuthResponder};
+
     tracing::info!("[TEST-CONN] test_ssh_password: spawning pty ssh session...");
     let pty = match crate::domain::terminal::pty::Pty::spawn_ssh_command_session(ssh, "true") {
         Ok(p) => Arc::new(p),
@@ -255,8 +268,13 @@ fn test_ssh_password(
     let pty_wait = pty.clone();
     let (tx, rx) = mpsc::channel();
     let (hk_tx, hk_rx) = mpsc::channel::<bool>();
+    // feeder 遇到「无法满足的提示」（二次验证码 / 加密私钥口令）时立即上报，
+    // 主线程不必等 ssh 在提示上干坐到超时。
+    let (un_tx, un_rx) = mpsc::channel::<&'static str>();
     let hk_tx_feeder = hk_tx.clone();
+    let un_tx_feeder = un_tx.clone();
     drop(hk_tx);
+    drop(un_tx);
     thread::spawn(move || {
         let start = Instant::now();
         let overall = Duration::from_secs(12);
@@ -291,43 +309,33 @@ fn test_ssh_password(
         let _ = tx.send(code);
     });
 
-    // 监控输出并自动喂密码的线程
+    // 监控输出并自动喂密码的线程 —— 全部决策来自共享 AuthResponder。
+    // responder 用 Arc<Mutex> 共享：主线程在失败路径上要读它的脱敏会话记录。
+    let responder = Arc::new(std::sync::Mutex::new(AuthResponder::new(Some(pw_owned.clone()))));
+    let responder_feeder = responder.clone();
     tracing::info!("[TEST-CONN] test_ssh_password: spawning feeder thread");
     let feeder = thread::spawn(move || {
         let mut buf = [0u8; 4096];
-        let mut trailing = String::with_capacity(256);
-        let mut hostkey_buf = String::with_capacity(1024);
-        let mut filled = false;
         let mut guard = match reader.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
         let deadline = Instant::now() + Duration::from_secs(8);
+        let mut hk_sent = false;
         while Instant::now() < deadline {
             match guard.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     let output = String::from_utf8_lossy(&buf[..n]).to_string();
-                    // 累积全部输出用于 host key 变更检测（host key 报错发生在握手阶段、
-                    // 不弹密码提示，若只靠 trailing 256 字可能被截断，故用独立缓冲）。
-                    hostkey_buf.push_str(&output);
-                    if hostkey_buf.len() > 4096 {
-                        hostkey_buf = hostkey_buf[hostkey_buf.len() - 4096..].to_string();
-                    }
-                    let hk_lower = hostkey_buf.to_lowercase();
-                    if hk_lower.contains("host key verification failed")
-                        || hk_lower.contains("remote host identification has changed")
-                    {
-                        let _ = hk_tx_feeder.send(true);
-                        break;
-                    }
-                    if !filled {
-                        trailing.push_str(&output);
-                        if trailing.len() > 256 {
-                            trailing = trailing[trailing.len() - 256..].to_string();
-                        }
-                        let needs = crate::domain::terminal::pty::is_password_prompt(&trailing);
-                        if needs {
+                    let (action, hk_changed) = {
+                        let mut r = match responder_feeder.lock() {
+                            Ok(g) => g,
+                            Err(_) => return,
+                        };
+                        (r.push(&output), r.host_key_changed())
+                    };
+                    match action {
+                        AuthAction::FeedPassword => {
                             let bytes = format!("{}\n", pw_owned).into_bytes();
                             if let Ok(mut w) = writer.lock() {
                                 let _ = w.write_all(&bytes);
@@ -339,44 +347,134 @@ fn test_ssh_password(
                                 "password-prompt-detected",
                                 "password prompt matched, feeding password",
                             );
-                            filled = true;
-                            trailing.clear();
                         }
+                        AuthAction::AnswerHostKeyYes => {
+                            // 首连确认：accept-new 语义下的自动接受，与 SFTP 路径一致。
+                            if let Ok(mut w) = writer.lock() {
+                                let _ = w.write_all(b"yes\n");
+                                let _ = w.flush();
+                            }
+                            debug_log::term(
+                                "DEBUG",
+                                "conn",
+                                "hostkey-yes-answered",
+                                "first-connect host key confirmation answered yes",
+                            );
+                        }
+                        AuthAction::Unsatisfiable(msg) => {
+                            debug_log::term("ERROR", "conn", "auth-unsatisfiable", msg);
+                            let _ = un_tx_feeder.send(msg);
+                            break;
+                        }
+                        AuthAction::Idle => {}
+                    }
+                    if hk_changed && !hk_sent {
+                        // host key 变更：ssh 在握手阶段直接报错退出，不会弹密码提示。
+                        // 立即通知主线程清旧 key 重试，不等 EOF。
+                        let _ = hk_tx_feeder.send(true);
+                        hk_sent = true;
+                        break;
                     }
                 }
                 Err(_) => break,
             }
         }
-        // 兜底：未检测到 host key 变更，通知主线程（false 不影响退出码判断）。
-        let _ = hk_tx_feeder.send(false);
+        if !hk_sent {
+            let _ = hk_tx_feeder.send(false);
+        }
     });
 
-    let mut result = match rx.recv_timeout(Duration::from_secs(13)) {
-        Ok(Some(0)) => {
-            tracing::info!("[TEST-CONN] test_ssh_password: auth OK (exit 0)");
-            Ok(true)
-        }
-        Ok(Some(code)) => {
-            tracing::info!("[TEST-CONN] test_ssh_password: auth FAILED (exit {})", code);
-            Ok(false)
-        }
-        Ok(None) => {
-            let _ = pty.kill();
-            tracing::warn!("[TEST-CONN] test_ssh_password: process still running after 12s -> killed as connection/auth timeout");
-            Err("SSH 连接超时（主机不可达、网络不通，或认证长时间无响应）".to_string())
-        }
-        Err(_) => {
-            let _ = pty.kill();
-            tracing::warn!("[TEST-CONN] test_ssh_password: recv_timeout(13s) hit -> 认证超时");
-            Err("SSH 认证超时（握手/网络过慢，或密码提示未出现）".to_string())
-        }
+    let diag_snapshot = || {
+        responder
+            .lock()
+            .map(|r| r.diag())
+            .unwrap_or_else(|_| "(responder lock poisoned)".to_string())
     };
+
+    let mut result: std::result::Result<bool, String>;
+    let outer_deadline = Instant::now() + Duration::from_secs(13);
+    loop {
+        // 二次验证码 / 加密私钥口令：200ms 轮询内即可给出明确错误。
+        if let Ok(msg) = un_rx.try_recv() {
+            let _ = pty.kill();
+            debug_log::term(
+                "ERROR",
+                "conn",
+                "auth-unsatisfiable-final",
+                &format!("msg={} diag={}", msg, diag_snapshot()),
+            );
+            result = Err(format!("✗ {}", msg));
+            break;
+        }
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(Some(0)) => {
+                tracing::info!("[TEST-CONN] test_ssh_password: auth OK (exit 0)");
+                let auto_accepted = responder
+                    .lock()
+                    .map(|r| r.host_key_answered())
+                    .unwrap_or(false);
+                if auto_accepted {
+                    debug_log::term(
+                        "INFO",
+                        "conn",
+                        "hostkey-auto-accepted",
+                        "first-connect host key auto-accepted (accept-new semantics)",
+                    );
+                }
+                result = Ok(true);
+                break;
+            }
+            Ok(Some(code)) => {
+                tracing::info!("[TEST-CONN] test_ssh_password: auth FAILED (exit {})", code);
+                debug_log::term(
+                    "DEBUG",
+                    "conn",
+                    "auth-exit",
+                    &format!("code={} diag={}", code, diag_snapshot()),
+                );
+                result = Ok(false);
+                break;
+            }
+            Ok(None) => {
+                let _ = pty.kill();
+                debug_log::term(
+                    "ERROR",
+                    "conn",
+                    "auth-timeout",
+                    &format!("diag={}", diag_snapshot()),
+                );
+                tracing::warn!("[TEST-CONN] test_ssh_password: process still running after 12s -> killed as connection/auth timeout");
+                result = Err("SSH 连接超时（主机不可达、网络不通，或认证长时间无响应）".to_string());
+                break;
+            }
+            Err(_) => {
+                if Instant::now() >= outer_deadline {
+                    let _ = pty.kill();
+                    debug_log::term(
+                        "ERROR",
+                        "conn",
+                        "auth-timeout-outer",
+                        &format!("diag={}", diag_snapshot()),
+                    );
+                    tracing::warn!("[TEST-CONN] test_ssh_password: recv_timeout(13s) hit -> 认证超时");
+                    result = Err("SSH 认证超时（握手/网络过慢，或密码提示未出现）".to_string());
+                    break;
+                }
+            }
+        }
+    }
     // host key 变更优先于退出码判断：ssh 在握手阶段直接报错退出，不会弹密码提示，
     // 否则会被误判为「密码不正确或主机不可达」，误导用户（典型场景：云服务器重置系统后 host key 变了）。
-    if let Ok(true) = hk_rx.try_recv() {
+    // 仅失败路径等待 feeder 的结论（成功路径不可能有 host key 错误），最多 300ms。
+    let hk_changed = match &result {
+        Ok(true) => false,
+        _ => hk_rx.recv_timeout(Duration::from_millis(300)).unwrap_or(false),
+    };
+    if hk_changed {
         if !retried {
             // 自动清除旧 key 并整体重试一次（等价于用户手动 ssh-keygen -R 后重连）
             let _ = crate::core::platform::clear_known_host(&ssh.host, ssh.port);
+            drop(feeder);
             return test_ssh_password(ssh, pw, true);
         }
         result = Err(format!(

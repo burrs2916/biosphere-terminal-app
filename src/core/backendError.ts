@@ -42,6 +42,12 @@ const RULES: BackendErrorRule[] = [
   // 仅前缀「SSH 认证失败」稳定，故用宽松前缀匹配（不会误中「SSH 密码认证失败」）。
   { re: /^✗ SSH 认证失败/, key: 'connection.ssh_key_auth_failed' },
   { re: /^✗ SSH 密码认证失败/, key: 'connection.ssh_password_auth_failed' },
+  // 测试连接 / SFTP：服务器要求二次验证码（verification code）。
+  // 两个来源的前缀不同（测试路径带「✗ 」、SFTP 路径带「SSH 连接建立失败：」），
+  // 故不做行首锚定，匹配稳定正文即可。
+  { re: /服务器要求二次验证码/, key: 'connection.ssh_2fa_required' },
+  // 测试连接 / SFTP：私钥已加密需要口令。同上，双来源通用。
+  { re: /私钥已加密，需要口令/, key: 'connection.ssh_key_encrypted' },
   // 测试连接：host key 变更（云服务器重置系统后最常见）。专属可操作报错，
   // 避免被误判为「密码不正确或主机不可达」，误导用户。
   { re: /^✗ SSH 主机密钥校验失败/, key: 'connection.ssh_host_key_changed' },

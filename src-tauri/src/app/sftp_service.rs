@@ -22,6 +22,9 @@
 
 use crate::core::types::SshConnectionInfo;
 use crate::domain::terminal::pty::Pty;
+use crate::domain::terminal::pty_expect::{
+    classify_pending_prompt, AnsiFilter, AuthAction, AuthResponder, PendingPrompt,
+};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -280,50 +283,6 @@ struct PooledMaster {
 ///
 /// Windows ConPTY re-renders everything through a virtual screen buffer and
 /// sprinkles cursor sequences into the stream; libedit does the same on Unix.
-/// Escape sequences can be split across reads, so the state has to survive
-/// between chunks.
-#[derive(Default)]
-struct AnsiFilter {
-    state: u8,
-}
-
-impl AnsiFilter {
-    fn push(&mut self, input: &str, out: &mut String) {
-        for c in input.chars() {
-            match self.state {
-                // normal
-                0 => match c {
-                    '\u{1b}' => self.state = 1,
-                    '\u{7}' | '\u{0}' => {}
-                    _ => out.push(c),
-                },
-                // ESC seen
-                1 => match c {
-                    '[' => self.state = 2,
-                    ']' => self.state = 3,
-                    '(' | ')' | '#' | '%' => self.state = 5,
-                    _ => self.state = 0,
-                },
-                // CSI: consume until the final byte
-                2 => {
-                    if ('\u{40}'..='\u{7e}').contains(&c) {
-                        self.state = 0;
-                    }
-                }
-                // OSC: terminated by BEL or ST (ESC \)
-                3 => match c {
-                    '\u{7}' => self.state = 0,
-                    '\u{1b}' => self.state = 4,
-                    _ => {}
-                },
-                4 => self.state = 0,
-                // charset designator: swallow exactly one byte
-                _ => self.state = 0,
-            }
-        }
-    }
-}
-
 /// A pooled interactive `sftp` session driven over a pty.
 struct InteractiveSession {
     pty: Arc<Pty>,
@@ -1465,11 +1424,18 @@ impl SftpService {
         let diag_feeder = diag.clone();
         let prompt_without_password = Arc::new(AtomicBool::new(false));
         let prompt_flag = prompt_without_password.clone();
+        // feeder 遇到「无法满足的提示」（二次验证码 / 加密私钥口令）时立即上报，
+        // 主循环不必干等 MASTER_READY_TIMEOUT 才失败。
+        let (blocked_tx, blocked_rx) = channel::<&'static str>();
 
         thread::spawn(move || {
             let mut buf = [0u8; 4096];
-            let mut trailing = String::with_capacity(256);
-            let mut answered = false;
+            // 共享 expect 状态机：ANSI 过滤 + 提示四分类 + host key yes/no 自动应答。
+            let mut responder = AuthResponder::new(if has_password {
+                Some(password.clone())
+            } else {
+                None
+            });
             let mut guard = match reader.lock() {
                 Ok(g) => g,
                 Err(_) => return,
@@ -1486,26 +1452,36 @@ impl SftpService {
                                 *d = d[d.len() - 1536..].to_string();
                             }
                         }
-                        if answered {
+                        if responder.password_fed() {
                             continue;
                         }
-                        trailing.push_str(&chunk);
-                        if trailing.len() > 256 {
-                            trailing = trailing[trailing.len() - 256..].to_string();
-                        }
-                        let wants_password = crate::domain::terminal::pty::is_password_prompt(&trailing);
-                        if wants_password {
-                            if !has_password {
-                                prompt_flag.store(true, Ordering::Relaxed);
+                        match responder.push(&chunk) {
+                            AuthAction::FeedPassword => {
+                                let bytes = format!("{}\n", password).into_bytes();
+                                if let Ok(mut w) = writer.lock() {
+                                    let _ = w.write_all(&bytes);
+                                    let _ = w.flush();
+                                }
+                            }
+                            AuthAction::AnswerHostKeyYes => {
+                                // 首连确认：与 accept-new 语义一致的自动接受。
+                                if let Ok(mut w) = writer.lock() {
+                                    let _ = w.write_all(b"yes\n");
+                                    let _ = w.flush();
+                                }
+                            }
+                            AuthAction::Unsatisfiable(msg) => {
+                                let _ = blocked_tx.send(msg);
                                 break;
                             }
-                            let bytes = format!("{}\n", password).into_bytes();
-                            if let Ok(mut w) = writer.lock() {
-                                let _ = w.write_all(&bytes);
-                                let _ = w.flush();
+                            AuthAction::Idle => {
+                                // 密码提示出现过但没有密码可喂：保留原语义，
+                                // 主循环据此给出「未保存密码」错误。
+                                if responder.password_prompt_seen() && !has_password {
+                                    prompt_flag.store(true, Ordering::Relaxed);
+                                    break;
+                                }
                             }
-                            answered = true;
-                            trailing.clear();
                         }
                     }
                     Err(_) => break,
@@ -1522,6 +1498,11 @@ impl SftpService {
             }
             if prompt_without_password.load(Ordering::Relaxed) {
                 break;
+            }
+            if let Ok(msg) = blocked_rx.try_recv() {
+                let _ = pty.kill();
+                let _ = std::fs::remove_file(&control_path);
+                return Err(format!("SSH 连接建立失败：{}", msg));
             }
             match pty.try_wait() {
                 Ok(Some(_)) => {
@@ -1585,42 +1566,10 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     }
 }
 
-enum PendingPrompt {
-    Password,
-    Passphrase,
-    Verification,
-    HostKey,
-}
-
 /// Recognise the interactive `sftp>` prompt. It is printed without a trailing
 /// newline, so it always sits alone in the pending buffer.
 fn is_sftp_prompt(pending: &str) -> bool {
     pending.trim_end() == "sftp>"
-}
-
-fn classify_pending_prompt(pending: &str) -> Option<PendingPrompt> {
-    let low = pending.trim_end().to_lowercase();
-    if low.is_empty() {
-        return None;
-    }
-    if low.ends_with("password:") || (low.contains("密码") && low.ends_with('：')) {
-        return Some(PendingPrompt::Password);
-    }
-    if low.ends_with(':') && (low.contains("passphrase for key") || low.contains("enter passphrase"))
-    {
-        return Some(PendingPrompt::Passphrase);
-    }
-    if low.ends_with(':')
-        && (low.contains("verification code")
-            || low.contains("one-time password")
-            || low.contains("otp:"))
-    {
-        return Some(PendingPrompt::Verification);
-    }
-    if low.ends_with('?') && (low.contains("(yes/no") || low.contains("fingerprint)")) {
-        return Some(PendingPrompt::HostKey);
-    }
-    None
 }
 
 impl InteractiveSession {
@@ -2331,6 +2280,12 @@ fn classify_master_failure(diag: &str, child_exited: bool, prompt_no_password: b
     }
     if low.contains("permission denied") {
         return "密码或密钥认证被拒绝（凭据不正确，或服务器禁用了该登录方式）".to_string();
+    }
+    if low.contains("verification code") || low.contains("one-time password") {
+        return "服务器要求二次验证码，暂不支持该登录方式".to_string();
+    }
+    if low.contains("passphrase for key") || low.contains("enter passphrase") {
+        return "私钥已加密，需要口令（请改用未加密的密钥或先 ssh-add 到代理）".to_string();
     }
     if low.contains("too long")
         || low.contains("unix_listener")
