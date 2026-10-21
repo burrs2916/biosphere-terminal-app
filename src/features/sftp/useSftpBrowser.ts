@@ -6,6 +6,7 @@ import {
   onSftpProgress,
   sftpCancel,
   sftpChmod,
+  sftpCreateFile,
   sftpDisconnect,
   sftpDownload,
   sftpList,
@@ -40,8 +41,34 @@ import {
 const DOWNLOAD_DIR_KEY = 'sftp.downloadDir';
 const SHOW_HIDDEN_KEY = 'sftp.showHidden';
 const SORT_KEY = 'sftp.sort';
+const FAVORITES_KEY = 'sftp.favorites';
 /** Three or four octal digits — the only thing `chmod` accepts. */
 const OCTAL_MODE = /^[0-7]{3,4}$/;
+
+/** One pinned directory. Host-scoped so different servers never mix lists. */
+interface FavoriteDir {
+  host: string;
+  user: string;
+  path: string;
+}
+
+function readFavorites(): FavoriteDir[] {
+  try {
+    const raw = readPref(FAVORITES_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (x): x is FavoriteDir =>
+        !!x &&
+        typeof x === 'object' &&
+        typeof (x as FavoriteDir).host === 'string' &&
+        typeof (x as FavoriteDir).user === 'string' &&
+        typeof (x as FavoriteDir).path === 'string',
+    );
+  } catch {
+    return [];
+  }
+}
 
 /**
  * True only when the local OpenSSH client is missing.
@@ -53,6 +80,41 @@ const OCTAL_MODE = /^[0-7]{3,4}$/;
 export function isSftpMissingError(e: unknown): boolean {
   const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : JSON.stringify(e);
   return /无法定位 sftp 程序|SFTP client .{0,24}not found|OpenSSH\.Client/i.test(msg);
+}
+
+/** Why a connect/listing attempt failed, in terms a user can act on. */
+export type SftpErrorCategory = 'unreachable' | 'auth' | 'timeout' | 'hostkey' | 'unknown';
+/** Where the session is on its way from "window opened" to "browsing files". */
+export type SftpConnState = 'connecting' | 'ready' | 'failed';
+
+/**
+ * Bucket a backend failure into one of a few actionable categories. The raw
+ * backend message stays user-visible; this only picks the icon, the heading
+ * and the suggested fix shown around it. Order matters: "SSH 连接建立失败：
+ * Connection timed out" is a host problem, not a clock problem, so the
+ * unreachable patterns are tested before the timeout ones.
+ */
+export function classifySftpError(msg: string): SftpErrorCategory {
+  if (/主机密钥|host key/i.test(msg)) return 'hostkey';
+  if (/密码|认证|Permission denied|publickey/i.test(msg)) return 'auth';
+  if (/连接建立失败|refused|无法解析|No route|网络|resolve/i.test(msg)) return 'unreachable';
+  if (/无响应|超时|timed? ?out/i.test(msg)) return 'timeout';
+  return 'unknown';
+}
+
+/**
+ * Connection-class failures worth one automatic retry. Permanent rejections
+ * (auth, host key) must not pay a second full connect just to hear the same
+ * answer — those settle immediately and show the failure card.
+ */
+function isTransientFailure(msg: string): boolean {
+  const cat = classifySftpError(msg);
+  return cat === 'unreachable' || cat === 'timeout' || cat === 'unknown';
+}
+
+/** True for the backend's "you asked me to stop" answer, in either language. */
+function isCancellation(msg: string): boolean {
+  return /取消|cancel/i.test(msg);
 }
 
 /** Names that would silently target the wrong node if we passed them through. */
@@ -87,11 +149,6 @@ type RetryPayload =
 interface QueuedTransfer {
   id: string;
   run: () => Promise<void>;
-}
-
-/** True for the backend's "you asked me to stop" answer, in either language. */
-function isCancellation(msg: string): boolean {
-  return /取消|cancel/i.test(msg);
 }
 
 /**
@@ -136,6 +193,15 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
   const [error, setError] = useState<string | null>(null);
   const [sftpMissing, setSftpMissing] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Connection feedback: the window opens into "connecting" and only a
+  // successful first listing promotes it to "ready". Without this the user
+  // stares at a bare skeleton with no idea whether anything is happening.
+  const [connState, setConnState] = useState<SftpConnState>('connecting');
+  const [connErrorCategory, setConnErrorCategory] = useState<SftpErrorCategory | null>(null);
+  /** Wall-clock start of the current connecting phase, for the elapsed counter. */
+  const [connectingSince, setConnectingSince] = useState<number | null>(Date.now());
+  /** True once any listing has succeeded — later failures are mid-session. */
+  const everReadyRef = useRef(false);
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [focused, setFocused] = useState<string | null>(null);
@@ -148,6 +214,9 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
   const [renameValue, setRenameValue] = useState('');
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  const [newFileOpen, setNewFileOpen] = useState(false);
+  const [newFileName, setNewFileName] = useState('');
+  const [favorites, setFavorites] = useState<FavoriteDir[]>(readFavorites);
   const [confirm, setConfirm] = useState<ConfirmState>(null);
   const [chmodTargets, setChmodTargets] = useState<SftpEntry[] | null>(null);
   const [chmodValue, setChmodValue] = useState('644');
@@ -166,6 +235,8 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
   const anchorRef = useRef<number>(-1);
   /** Replay data per transfer id, dropped as soon as the row is dismissed. */
   const retryRef = useRef<Map<string, RetryPayload>>(new Map());
+  /** Transfer ids that already burned their one automatic retry. */
+  const autoRetriedRef = useRef<Set<string>>(new Set());
   const histRef = useRef<{ stack: string[]; idx: number }>({ stack: [], idx: -1 });
   /** Transfers waiting for the single slot, in the order the user asked for them. */
   const queueRef = useRef<QueuedTransfer[]>([]);
@@ -194,6 +265,13 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
   /** Fetch a directory. `record` is false when replaying the history stack. */
   const load = useCallback(
     async (target: string, record = true) => {
+      // The very first listing (or a retry of it) IS the connection attempt;
+      // later listings are ordinary navigation over a working session.
+      const firstAttempt = !everReadyRef.current;
+      if (firstAttempt) {
+        setConnState('connecting');
+        setConnectingSince(Date.now());
+      }
       setLoading(true);
       setError(null);
       setSftpMissing(false);
@@ -206,10 +284,23 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
         // so this is the one chance to learn where "home" actually is.
         if (target === '.' && res.path.startsWith('/')) setHomePath(res.path);
         if (record) pushHistory(res.path);
+        everReadyRef.current = true;
+        setConnState('ready');
+        setConnectingSince(null);
         return true;
       } catch (e) {
+        const msg = localizeBackendError(e);
         if (isSftpMissingError(e)) setSftpMissing(true);
-        else setError(localizeBackendError(e));
+        else setError(msg);
+        const cat = classifySftpError(msg);
+        setConnErrorCategory(cat);
+        // A first-attempt failure is always a connection failure. Afterwards,
+        // only connection-class errors demote the session — a denied directory
+        // is not the same as a dropped link.
+        if (firstAttempt || cat !== 'unknown') {
+          setConnState('failed');
+          setConnectingSince(null);
+        }
         return false;
       } finally {
         setLoading(false);
@@ -217,6 +308,17 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     },
     [pushHistory],
   );
+
+  /**
+   * A retry is a fresh connection attempt, not a refresh: clear the session
+   * memory so the connecting banner comes back and the failure card goes away.
+   */
+  const retryConnection = useCallback(() => {
+    everReadyRef.current = false;
+    setConnErrorCategory(null);
+    setError(null);
+    void load('.', true);
+  }, [load]);
 
   const resetViewState = useCallback(() => {
     setSelected(new Set());
@@ -410,6 +512,85 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     return cancelled ? '' : msg;
   }, []);
 
+  /**
+   * One attempt of a transfer, plus exactly one automatic retry: a dropped
+   * link on a slow connection is common enough that making the user click
+   * retry every time is friction. Cancellations and permanent failures (auth,
+   * host key) settle immediately; the retried row visibly returns to queued.
+   * Each id only ever retries once — a second failure is information, not a
+   * hint to loop.
+   */
+  const attemptTransfer = useCallback(
+    async (id: string, work: () => Promise<void>) => {
+      // `startedAt` is reset here rather than at queue time so the elapsed
+      // time reflects the transfer, not the wait.
+      setTransfers((prev) =>
+        prev.map((x) =>
+          x.id === id
+            ? { ...x, status: 'running', queuePos: undefined, startedAt: Date.now() }
+            : x,
+        ),
+      );
+      try {
+        await work();
+      } catch (e) {
+        const raw = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);
+        if (!isCancellation(raw) && isTransientFailure(raw) && !autoRetriedRef.current.has(id)) {
+          autoRetriedRef.current.add(id);
+          setTransfers((prev) =>
+            prev.map((x) =>
+              x.id === id
+                ? {
+                    ...x,
+                    status: 'queued',
+                    percent: 0,
+                    error: undefined,
+                    rate: undefined,
+                    eta: undefined,
+                  }
+                : x,
+            ),
+          );
+          // Re-enter the wait line; the pump picks it up once the current
+          // slot frees (this closure's `finally` in `pump`).
+          queueRef.current.push({ id, run: () => attemptTransfer(id, work) });
+          pumpRef.current();
+          return;
+        }
+        const msg = settleTransfer(id, e);
+        if (msg) notify(msg, 'error');
+      }
+    },
+    [notify, settleTransfer],
+  );
+
+  const runUploadOnce = useCallback(
+    async (
+      id: string,
+      paths: string[],
+      dir: string,
+      remoteNames: string[] | undefined,
+      count: number,
+      resume: boolean,
+    ) => {
+      await attemptTransfer(id, async () => {
+        await sftpUpload(sshRef.current, paths, dir, id, remoteNames, resume);
+        setTransfers((prev) =>
+          prev.map((x) =>
+            x.id === id ? { ...x, status: 'done', percent: 100, queuePos: undefined } : x,
+          ),
+        );
+        notify(
+          count === 1 ? t('uploaded', { name: basename(paths[0]) }) : t('uploaded_count', { count }),
+        );
+        // Refresh whatever the user is looking at: either the destination
+        // itself, or the parent whose folder row just grew.
+        await load(pathRef.current, false);
+      });
+    },
+    [attemptTransfer, t, notify, load],
+  );
+
   const runUpload = useCallback(
     (
       paths: string[],
@@ -432,39 +613,9 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
         retryable: true,
         resuming: resume,
       });
-      enqueueTransfer(id, async () => {
-        // `startedAt` is reset here rather than at queue time so the elapsed
-        // time reflects the transfer, not the wait.
-        setTransfers((prev) =>
-          prev.map((x) =>
-            x.id === id
-              ? { ...x, status: 'running', queuePos: undefined, startedAt: Date.now() }
-              : x,
-          ),
-        );
-        try {
-          await sftpUpload(sshRef.current, paths, dir, id, remoteNames, resume);
-          setTransfers((prev) =>
-            prev.map((x) =>
-              x.id === id ? { ...x, status: 'done', percent: 100, queuePos: undefined } : x,
-            ),
-          );
-          notify(
-            count === 1
-              ? t('uploaded', { name: basename(paths[0]) })
-              : t('uploaded_count', { count }),
-          );
-          // Refresh whatever the user is looking at: either the destination
-          // itself, or the parent whose folder row just grew.
-          await load(pathRef.current, false);
-        } catch (e) {
-          // A cancel the user asked for is not news; the row already says so.
-          const msg = settleTransfer(id, e);
-          if (msg) notify(msg, 'error');
-        }
-      });
+      enqueueTransfer(id, async () => runUploadOnce(id, paths, dir, remoteNames, count, resume));
     },
-    [t, notify, load, openTransferRow, enqueueTransfer, settleTransfer],
+    [t, notify, load, openTransferRow, enqueueTransfer, runUploadOnce],
   );
 
   /**
@@ -576,15 +727,8 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
         retryable: true,
         resuming: resume,
       });
-      enqueueTransfer(id, async () => {
-        setTransfers((prev) =>
-          prev.map((x) =>
-            x.id === id
-              ? { ...x, status: 'running', queuePos: undefined, startedAt: Date.now() }
-              : x,
-          ),
-        );
-        try {
+      enqueueTransfer(id, async () =>
+        attemptTransfer(id, async () => {
           await sftpDownload(sshRef.current, items, dir, id, resume);
           setTransfers((prev) =>
             prev.map((x) =>
@@ -592,13 +736,10 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
             ),
           );
           notify(t('downloaded_to', { count, dir }));
-        } catch (e) {
-          const msg = settleTransfer(id, e);
-          if (msg) notify(msg, 'error');
-        }
-      });
+        }),
+      );
     },
-    [t, notify, openTransferRow, enqueueTransfer, settleTransfer],
+    [t, notify, openTransferRow, enqueueTransfer, attemptTransfer],
   );
 
   /**
@@ -656,6 +797,9 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     (id: string, resume = false) => {
       const payload = retryRef.current.get(id);
       if (!payload) return;
+      // A manual retry earns a fresh automatic retry — the user has already
+      // judged the situation worth another attempt.
+      autoRetriedRef.current.delete(id);
       if (payload.kind === 'upload') {
         // Deliberately bypasses the overwrite prompt: a retry after a partial
         // upload would collide with its own leftovers every single time. The
@@ -803,6 +947,76 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
       setBusy(false);
     }
   }, [newFolderName, t, notify, load]);
+
+  // ---- favorites -----------------------------------------------------------
+
+  /** Only this connection's pins — different servers never share a list. */
+  const connFavorites = useMemo(
+    () => favorites.filter((f) => f.host === ssh.host && f.user === ssh.username),
+    [favorites, ssh.host, ssh.username],
+  );
+
+  const isFavorite = useMemo(
+    () => connFavorites.some((f) => f.path === path),
+    [connFavorites, path],
+  );
+
+  /** Pin or unpin the directory currently on screen. */
+  const toggleFavorite = useCallback(() => {
+    setFavorites((prev) => {
+      const me = {
+        host: sshRef.current.host,
+        user: sshRef.current.username,
+        path: pathRef.current,
+      };
+      const same = (f: FavoriteDir) =>
+        f.host === me.host && f.user === me.user && f.path === me.path;
+      const next = prev.some(same) ? prev.filter((f) => !same(f)) : [...prev, me];
+      writePref(FAVORITES_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const removeFavorite = useCallback((target: string) => {
+    setFavorites((prev) => {
+      const me = sshRef.current;
+      const next = prev.filter(
+        (f) => !(f.host === me.host && f.user === me.username && f.path === target),
+      );
+      writePref(FAVORITES_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  // ---- new empty file ------------------------------------------------------
+
+  const submitNewFile = useCallback(async () => {
+    const name = newFileName.trim();
+    if (!name) return;
+    if (invalidName(name)) {
+      notify(t('invalid_name'), 'error');
+      return;
+    }
+    if (entriesRef.current.some((e) => e.name === name)) {
+      notify(t('name_taken', { name }), 'error');
+      return;
+    }
+    const base = pathRef.current;
+    try {
+      setBusy(true);
+      await sftpCreateFile(sshRef.current, joinRemote(base, name));
+      notify(t('file_created'));
+      setNewFileOpen(false);
+      setNewFileName('');
+      setSelected(new Set([name]));
+      setFocused(name);
+      await load(base, false);
+    } catch (e) {
+      notify(localizeBackendError(e), 'error');
+    } finally {
+      setBusy(false);
+    }
+  }, [newFileName, t, notify, load]);
 
   const startChmod = useCallback((list: SftpEntry[]) => {
     if (list.length === 0) return;
@@ -1030,6 +1244,9 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     busy,
     error,
     sftpMissing,
+    connState,
+    connErrorCategory,
+    connectingSince,
     transfers,
     history,
     // dialogs
@@ -1037,15 +1254,24 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     renameValue,
     newFolderOpen,
     newFolderName,
+    newFileOpen,
+    newFileName,
     confirm,
     chmodTargets,
     chmodValue,
     batchRename,
+    // favorites
+    favorites: connFavorites,
+    isFavorite,
+    toggleFavorite,
+    removeFavorite,
     // setters used by the view
     setSearch,
     setRenameValue,
     setNewFolderName,
     setNewFolderOpen,
+    setNewFileName,
+    setNewFileOpen,
     setRenaming,
     setConfirm,
     setChmodTargets,
@@ -1054,6 +1280,7 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     // actions
     navigate,
     refresh,
+    retryConnection,
     goBack,
     goForward,
     openEntry,
@@ -1069,6 +1296,7 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     startRename,
     submitRename,
     submitNewFolder,
+    submitNewFile,
     startChmod,
     submitChmod,
     startBatchRename,

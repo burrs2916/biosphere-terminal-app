@@ -17,6 +17,38 @@ let initialized = false;
  */
 const FLUSH_GRACE_MS = 2500;
 
+/**
+ * Close vetoes registered by features that must not die silently — an active
+ * SFTP transfer, for instance. Each guard returns true while it wants the
+ * close attempt blocked. Cheap to call, must stay synchronous.
+ */
+type CloseGuard = () => boolean;
+const closeGuards = new Map<string, CloseGuard>();
+
+/** Called in the UI layer when a close attempt was vetoed, to raise a dialog. */
+type CloseBlockedListener = (guardIds: string[]) => void;
+const closeBlockedListeners = new Set<CloseBlockedListener>();
+
+/**
+ * Register a veto over window close. While `shouldBlock()` returns true the
+ * close handler refuses to destroy the window and notifies the UI instead —
+ * the user then decides through a confirm dialog. Returns the unregister fn.
+ */
+export function registerWindowCloseGuard(id: string, shouldBlock: CloseGuard): () => void {
+  closeGuards.set(id, shouldBlock);
+  return () => {
+    closeGuards.delete(id);
+  };
+}
+
+/** Subscribe to "close was blocked" events. Returns the unsubscribe fn. */
+export function onCloseBlocked(listener: CloseBlockedListener): () => void {
+  closeBlockedListeners.add(listener);
+  return () => {
+    closeBlockedListeners.delete(listener);
+  };
+}
+
 /** Resolve 'ok' when `p` settles (either way) and 'timeout' after `ms`. */
 function raceTimeout(p: Promise<unknown>, ms: number): Promise<'ok' | 'timeout'> {
   return new Promise((resolve) => {
@@ -53,6 +85,31 @@ export async function initWindowCloseFlush(): Promise<void> {
     const win = getCurrentWindow();
     const unlisten = await win.onCloseRequested(async (event) => {
       event.preventDefault();
+      // Guards veto first: a running transfer must not be killed by an
+      // accidental close — surface a confirm dialog instead of destroying.
+      const blocking: string[] = [];
+      for (const [id, shouldBlock] of closeGuards) {
+        try {
+          if (shouldBlock()) blocking.push(id);
+        } catch {
+          // A throwing guard must never trap the user inside the window.
+        }
+      }
+      if (blocking.length > 0) {
+        void writeFrontendLog(
+          'warn',
+          'window-close',
+          `close-blocked | guards=${blocking.join(',')}`,
+        ).catch(() => {});
+        for (const listener of closeBlockedListeners) {
+          try {
+            listener(blocking);
+          } catch {
+            // Same principle: a broken dialog must not break the veto.
+          }
+        }
+        return;
+      }
       const started = Date.now();
       let outcome: 'ok' | 'timeout' | 'error' = 'ok';
       // Always close the window, even if the flush throws or hangs — we own

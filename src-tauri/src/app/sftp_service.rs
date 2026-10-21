@@ -9,10 +9,13 @@
 //!   proven path as `connection.rs::test_ssh_password`).
 //! - Win32-OpenSSH has no ControlMaster support (there is no Unix domain
 //!   socket multiplexing), and `sftp -b` implies `BatchMode=yes`, which makes
-//!   password authentication impossible. Windows therefore drives a *pooled
-//!   interactive* `sftp` session over a pty: the password prompt is answered
-//!   once, then commands are typed and synchronised on the `sftp>` prompt.
-//!   The same path is the fallback whenever a ControlMaster cannot be built.
+//!   password authentication impossible. Windows therefore runs every batch
+//!   through a *one-shot* `sftp` session over a pty: the password prompt is
+//!   answered once, the whole batch plus `bye` is written in one go, and the
+//!   transcript is read to EOF. No prompt matching after auth — ConPTY
+//!   repaints make `sftp>` synchronisation unreliable (the reason the older
+//!   pooled interactive session failed in the field). The same path is the
+//!   fallback whenever a ControlMaster cannot be built.
 //! - Directory listings are produced by the *local* sftp client
 //!   (`ls -lan`, numeric view) instead of the server supplied `longname`,
 //!   which makes the column layout identical for Linux, BSD, Solaris,
@@ -23,16 +26,14 @@
 use crate::core::types::SshConnectionInfo;
 use crate::infra::logging::debug_log;
 use crate::domain::terminal::pty::Pty;
-use crate::domain::terminal::pty_expect::{
-    classify_pending_prompt, AnsiFilter, AuthAction, AuthResponder, PendingPrompt,
-};
+use crate::domain::terminal::pty_expect::{AnsiFilter, AuthAction, AuthResponder};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -41,10 +42,20 @@ use std::time::{Duration, Instant};
 const MASTER_IDLE_TTL: Duration = Duration::from_secs(240);
 /// How long we wait for the control socket to show up after spawning a master.
 const MASTER_READY_TIMEOUT: Duration = Duration::from_secs(15);
-/// How long an interactive session may stay silent before we call it stuck.
-const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
-/// How long the initial banner/password exchange may take.
-const SESSION_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(25);
+/// How long the one-shot sftp session may stay silent while authenticating
+/// (banner + password prompt must show up, or the child must exit) before we
+/// call the attempt stuck.
+const SFTP_AUTH_IDLE: Duration = Duration::from_secs(45);
+/// Silence budget for a meta batch (list / rename / chmod / …) — a listing
+/// streams continuously, so silence means the connection is dead.
+const SFTP_META_IDLE: Duration = Duration::from_secs(30);
+/// Silence budget while a transfer runs. Progress ticks reset it constantly;
+/// the headroom is for the quiet window between `put` and the first tick.
+const SFTP_XFER_IDLE: Duration = Duration::from_secs(120);
+/// Wall-clock cap for one meta batch, covering the connect + auth + run.
+const SFTP_META_OVERALL: Duration = Duration::from_secs(150);
+/// Wall-clock cap for one transfer batch.
+const SFTP_XFER_OVERALL: Duration = Duration::from_secs(2 * 60 * 60);
 /// Message returned when the user aborted a transfer on purpose.
 pub const CANCELLED_MESSAGE: &str = "传输已取消";
 
@@ -284,24 +295,8 @@ struct PooledMaster {
 ///
 /// Windows ConPTY re-renders everything through a virtual screen buffer and
 /// sprinkles cursor sequences into the stream; libedit does the same on Unix.
-/// A pooled interactive `sftp` session driven over a pty.
-struct InteractiveSession {
-    pty: Arc<Pty>,
-    rx: Receiver<Vec<u8>>,
-    ansi: AnsiFilter,
-    /// Bytes seen since the last line break — also where the `sftp>` prompt and
-    /// the password prompt show up (neither ends with a newline).
-    pending: String,
-    /// Rolling tail of the raw conversation, used to explain handshake errors.
-    diag: String,
-    /// Set when an auth prompt appeared that we cannot satisfy.
-    auth_error: Option<String>,
-    last_used: Instant,
-}
-
 pub struct SftpService {
     masters: Mutex<HashMap<String, PooledMaster>>,
-    sessions: Mutex<HashMap<String, InteractiveSession>>,
     lane_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Every transfer the service has accepted and not yet finished, claimed
     /// *before* anything can block. A transfer spends real time queued behind
@@ -340,7 +335,6 @@ impl SftpService {
     pub fn new() -> Self {
         SftpService {
             masters: Mutex::new(HashMap::new()),
-            sessions: Mutex::new(HashMap::new()),
             lane_locks: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashSet::new()),
             running: Mutex::new(HashMap::new()),
@@ -592,7 +586,12 @@ impl SftpService {
                 let mut batch: Vec<String> = vec![cd_command(&dir)];
                 batch.extend(plan.mkdirs);
                 batch.extend(plan.puts);
-                return self.exec_upload_auto_chmod(ssh, &dir, &batch, progress);
+                // Sizes were already cross-checked file by file while planning
+                // the resume; a second probe here would double the transcript
+                // for files the planner has already vouched for.
+                return self
+                    .exec_upload_auto_chmod(ssh, &dir, &batch, progress)
+                    .map(|_| ());
             }
             // No usable plan (nothing landed yet, tree too large, listing
             // unreadable): fall through to a full send, which merges into
@@ -609,6 +608,13 @@ impl SftpService {
         if let Some(ctx) = progress {
             ctx.set_totals(totals.0, totals.1);
         }
+        // Post-transfer size verification. The `ls -lan` probes ride in the
+        // SAME batch — with the one-shot session design they cost zero extra
+        // connects — so a silently truncated upload is caught instead of
+        // reported as success. Recursive sends are skipped (a directory's
+        // listing is not a size), and the probe count is capped so a 10k-file
+        // drop does not double its transcript.
+        let mut verify: Vec<(String, u64)> = Vec::new();
         for (i, local) in local_paths.iter().enumerate() {
             let p = Path::new(local);
             let name = p
@@ -638,26 +644,35 @@ impl SftpService {
                 sftp_quote(&source),
                 sftp_quote(&dest_name)
             ));
+            if !recursive && verify.len() < UPLOAD_VERIFY_CAP {
+                if let Ok(meta) = std::fs::metadata(local) {
+                    verify.push((dest_name.clone(), meta.len()));
+                    batch.push(format!("ls -lan {}", sftp_quote(&dest_name)));
+                }
+            }
         }
-        self.exec_upload_auto_chmod(ssh, &dir, &batch, progress)
+        let out = self.exec_upload_auto_chmod(ssh, &dir, &batch, progress)?;
+        verify_upload_sizes(&out, &verify)?;
+        Ok(())
     }
 
     /// 执行上传 batch；失败且为权限类错误时，自动给目标目录加属主写+执行位
     /// 并重试一次。目录不属于当前用户（如根目录 `/`）或文件系统只读时无法
-    /// 自动赋予，返回引导性错误。
+    /// 自动赋予，返回引导性错误。成功时返回整个 batch 的输出转写，供调用方
+    /// 做上传后尺寸校验（`ls -lan` 探针在同一批里）。
     fn exec_upload_auto_chmod(
         &self,
         ssh: &SshConnectionInfo,
         dir: &str,
         batch: &[String],
         progress: Option<&ProgressCtx>,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         match self.exec(ssh, LANE_XFER, batch, progress) {
-            Ok(_) => Ok(()),
+            Ok(out) => Ok(out),
             Err(e) if is_permission_error(&e) => match self.ensure_dir_writable(ssh, dir) {
                 Ok(true) => {
                     tracing::info!("[SFTP] 已自动为目标目录添加写权限，重试上传: {}", dir);
-                    self.exec(ssh, LANE_XFER, batch, progress).map(|_| ())
+                    self.exec(ssh, LANE_XFER, batch, progress)
                 }
                 Ok(false) => Err(format!(
                     "目标目录无写权限，且无法自动赋予（目录不属于当前用户或文件系统只读）：{}。\
@@ -781,6 +796,26 @@ impl SftpService {
         self.exec(ssh, LANE_META, &batch, None).map(|_| ())
     }
 
+    /// Create an empty file at `path` on the remote.
+    ///
+    /// Implemented as `put <empty temp file>`: portable across every
+    /// sftp-server (no shell involved, no `touch` dependency), and it goes
+    /// through the same one-shot session as every other meta command. The
+    /// frontend is responsible for the existence check, exactly as it is for
+    /// `mkdir`.
+    pub fn create_file(&self, ssh: &SshConnectionInfo, remote_path: &str) -> Result<(), String> {
+        if remote_path.trim().is_empty() {
+            return Err("目标路径为空".to_string());
+        }
+        let temp = std::env::temp_dir().join(format!("biosphere-empty-{}.tmp", std::process::id()));
+        std::fs::write(&temp, b"").map_err(|e| format!("写本地临时文件失败: {}", e))?;
+        let temp_str = normalize_local_path(&temp.to_string_lossy());
+        let batch = vec![format!("put {} {}", sftp_quote(&temp_str), sftp_quote(remote_path))];
+        let result = self.exec(ssh, LANE_META, &batch, None).map(|_| ());
+        let _ = std::fs::remove_file(&temp);
+        result
+    }
+
     /// Apply a POSIX permission mode to remote paths.
     ///
     /// `mode` is an octal string ("755", "0644"). Windows servers answer
@@ -808,44 +843,25 @@ impl SftpService {
     /// window closes) so no stray `ssh -M -N` process is left behind.
     pub fn disconnect(&self, ssh: &SshConnectionInfo) {
         let prefix = format!("{}@{}:{}", ssh.username, ssh.host, ssh.port);
-        {
-            let mut map = lock(&self.masters);
-            let keys: Vec<String> = map
-                .keys()
-                .filter(|k| k.starts_with(&prefix))
-                .cloned()
-                .collect();
-            for k in keys {
-                if let Some(m) = map.remove(&k) {
-                    shutdown_master(&m, ssh);
-                }
-            }
-        }
-        let mut sessions = lock(&self.sessions);
-        let keys: Vec<String> = sessions
+        let mut map = lock(&self.masters);
+        let keys: Vec<String> = map
             .keys()
             .filter(|k| k.starts_with(&prefix))
             .cloned()
             .collect();
         for k in keys {
-            if let Some(s) = sessions.remove(&k) {
-                s.close();
+            if let Some(m) = map.remove(&k) {
+                shutdown_master(&m, ssh);
             }
         }
     }
 
-    /// Drop every pooled master/session regardless of connection (app shutdown).
+    /// Drop every pooled master regardless of connection (app shutdown).
     pub fn shutdown_all(&self) {
-        {
-            let mut map = lock(&self.masters);
-            for (_, m) in map.drain() {
-                let _ = m.pty.kill();
-                let _ = std::fs::remove_file(&m.control_path);
-            }
-        }
-        let mut sessions = lock(&self.sessions);
-        for (_, s) in sessions.drain() {
-            s.close();
+        let mut map = lock(&self.masters);
+        for (_, m) in map.drain() {
+            let _ = m.pty.kill();
+            let _ = std::fs::remove_file(&m.control_path);
         }
     }
 
@@ -1120,29 +1136,16 @@ impl SftpService {
     }
 
     fn reap_idle(&self) {
-        {
-            let mut map = lock(&self.masters);
-            let stale: Vec<String> = map
-                .iter()
-                .filter(|(_, m)| m.last_used.elapsed() > MASTER_IDLE_TTL)
-                .map(|(k, _)| k.clone())
-                .collect();
-            for k in stale {
-                if let Some(m) = map.remove(&k) {
-                    let _ = m.pty.kill();
-                    let _ = std::fs::remove_file(&m.control_path);
-                }
-            }
-        }
-        let mut sessions = lock(&self.sessions);
-        let stale: Vec<String> = sessions
+        let mut map = lock(&self.masters);
+        let stale: Vec<String> = map
             .iter()
-            .filter(|(_, s)| s.last_used.elapsed() > MASTER_IDLE_TTL)
+            .filter(|(_, m)| m.last_used.elapsed() > MASTER_IDLE_TTL)
             .map(|(k, _)| k.clone())
             .collect();
         for k in stale {
-            if let Some(s) = sessions.remove(&k) {
-                s.close();
+            if let Some(m) = map.remove(&k) {
+                let _ = m.pty.kill();
+                let _ = std::fs::remove_file(&m.control_path);
             }
         }
     }
@@ -1198,10 +1201,10 @@ impl SftpService {
         }
         self.reap_idle();
 
-        // Windows (and any host without control-socket multiplexing) types the
-        // commands into a live sftp session instead.
+        // Windows (and any host without control-socket multiplexing) runs the
+        // batch through a fresh one-shot sftp session instead.
         if !supports_multiplexing() {
-            return self.exec_interactive(ssh, &key, batch, progress);
+            return self.run_batch_over_pty(ssh, &sftp_bin, batch, progress);
         }
 
         // `sftp -b <file>` implies BatchMode, and BatchMode switches the
@@ -1262,8 +1265,8 @@ impl SftpService {
                     // to fall back to the interactive session. Key/agent auth
                     // can still talk to the host directly.
                     if ssh.auth_method == "password" {
-                        tracing::warn!("[SFTP] control master unavailable, interactive mode: {}", e);
-                        break self.exec_interactive(ssh, &key, batch, progress);
+                        tracing::warn!("[SFTP] control master unavailable, one-shot batch mode: {}", e);
+                        break self.run_batch_over_pty(ssh, &sftp_bin, batch, progress);
                     }
                     tracing::warn!("[SFTP] control master unavailable, direct mode: {}", e);
                     break self.run_tracked(&sftp_bin, &base_args, progress);
@@ -1313,101 +1316,372 @@ impl SftpService {
         }
     }
 
-    // ---- interactive session lane (Windows / no multiplexing) ----
+    // ---- one-shot batch lane (Windows / no multiplexing) ----
 
-    fn exec_interactive(
+    /// Run one sftp batch on Windows by spawning a fresh `sftp`, answering the
+    /// password prompt once, feeding the whole batch plus `bye`, and reading
+    /// to EOF.
+    ///
+    /// This replaces the former *pooled interactive* session (type one
+    /// command, wait for the `sftp>` prompt, repeat). ConPTY re-renders the
+    /// console through its own screen buffer, so prompt lines can arrive
+    /// fragmented or duplicated by repaints: the handshake survived (a short,
+    /// banner-dominated stream) but command batches desynced — the field log
+    /// shows three successful authentications each followed by a command
+    /// phase that either sat silent for the full 90 s idle limit or died.
+    /// Matching prompts after auth is therefore gone entirely: the batch goes
+    /// out in one write and the verdict comes from the transcript. Both
+    /// halves are proven primitives — [`AuthResponder`] for the password
+    /// prompt (identical to `test_ssh_password`, which works on this exact
+    /// machine) and read-to-EOF (identical to `drive_transfer_pty`).
+    ///
+    /// The pool is gone with the prompt matching: every batch pays one full
+    /// connect, but a batch can no longer poison the next one, and a stalled
+    /// one is bounded by hard deadlines instead of a 90 s-per-command silence
+    /// that a five-command batch could stretch to minutes.
+    fn run_batch_over_pty(
         &self,
         ssh: &SshConnectionInfo,
-        key: &str,
+        sftp_bin: &str,
         batch: &[String],
         progress: Option<&ProgressCtx>,
     ) -> Result<String, String> {
-        let mut attempt = 0u8;
-        loop {
+        'attempt: for attempt in 0..=1 {
             // Spawning a session means a full password handshake; skip it
             // entirely when the transfer has already been called off.
             if self.cancel_requested(progress) {
                 return Err(CANCELLED_MESSAGE.to_string());
             }
-            let cached = lock(&self.sessions).remove(key);
-            let (mut session, reused) = match cached {
-                // An idle session can have been dropped by the far side
-                // (server ClientAlive*, firewall NAT timeout) without the
-                // pty noticing — `is_alive` only sees a dead child. Respawn
-                // instead of handing a dead socket to the next command.
-                Some(s) if s.is_alive() && s.last_used.elapsed() < SESSION_IDLE_TIMEOUT => (s, true),
-                Some(s) => {
-                    s.close();
-                    (InteractiveSession::spawn(ssh)?, false)
-                }
-                None => (InteractiveSession::spawn(ssh)?, false),
-            };
 
+            let mut args: Vec<String> = vec![
+                "-o".to_string(),
+                "StrictHostKeyChecking=accept-new".to_string(),
+                "-o".to_string(),
+                "ConnectTimeout=15".to_string(),
+                // 禁用 GSSAPI（Kerberos/SSPI）：Windows OpenSSH 默认把
+                // gssapi-with-mic 排最前，非域环境无 KDC 时该握手会卡 ~10s，
+                // 叠加 host-only 网段的慢连接会白白拖长每次批次（与终端/测试
+                // 连接路径一致）。key / password 模式都安全。
+                "-o".to_string(),
+                "GSSAPIAuthentication=no".to_string(),
+                // One shot only: a rejected password must fail fast instead of
+                // re-prompting into a pty nobody is watching.
+                "-o".to_string(),
+                "NumberOfPasswordPrompts=1".to_string(),
+            ];
+            keepalive_args(&mut args);
+            // 密码模式直奔 password 认证，跳过 pubkey 探针。密钥模式**不能**
+            // 加，否则会跳过密钥。
+            if ssh.auth_method == "password" {
+                args.push("-o".to_string());
+                args.push("PreferredAuthentications=password".to_string());
+            }
+            if ssh.port != 22 {
+                args.push("-P".to_string());
+                args.push(ssh.port.to_string());
+            }
+            if ssh.auth_method == "private_key" {
+                if let Some(key) = &ssh.private_key_path {
+                    args.push("-i".to_string());
+                    args.push(key.clone());
+                }
+            }
+            args.push(ssh_target(ssh));
+
+            // Wide pty: ConPTY re-flows anything past the window width, which
+            // would corrupt long file names in the listing.
+            let pty = Arc::new(spawn_sftp_pty(sftp_bin, &args, 500, &[("TERM", "dumb")])?);
             if let Some(ctx) = progress {
-                self.register_running(&ctx.transfer_id, session.pty.clone());
+                // Registered so `cancel` can kill the child mid-run; the
+                // caller's TransferSlot drops the entry when the operation
+                // unwinds.
+                self.register_running(&ctx.transfer_id, pty.clone());
             }
 
-            let mut collected = String::new();
-            let mut failure: Option<(String, bool)> = None; // (message, session_broken)
-            for cmd in batch {
-                if let Err(e) = session.send(cmd) {
-                    failure = Some((e, true));
-                    break;
-                }
-                match session.pump(None, progress, SESSION_IDLE_TIMEOUT) {
-                    Ok(text) => {
-                        // A leading `-` is the sftp convention for "this
-                        // command is allowed to fail". `sftp -b` honours it on
-                        // the batch lane; the interactive lane has to honour it
-                        // too, or an optional probe would abort the operation
-                        // it was only meant to enrich.
-                        let tolerant = cmd.trim_start().starts_with('-');
-                        if !tolerant {
-                            if let Some(err) = interactive_error(&text, cmd) {
-                                failure = Some((err, false));
+            let (tx, rx) = channel::<Vec<u8>>();
+            let reader = pty.reader();
+            thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                let mut guard = match reader.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                loop {
+                    match guard.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if tx.send(buf[..n].to_vec()).is_err() {
                                 break;
                             }
                         }
-                        collected.push_str(&text);
-                    }
-                    Err(e) => {
-                        failure = Some((e, true));
-                        break;
+                        Err(_) => break,
                     }
                 }
-            }
+            });
 
-            if let Some(ctx) = progress {
-                self.unregister_running(&ctx.transfer_id);
-            }
+            let password = if ssh.auth_method == "password" {
+                ssh.password.clone().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let mut auth =
+                AuthResponder::new(if password.is_empty() { None } else { Some(password.clone()) });
 
-            match failure {
-                None => {
-                    session.last_used = Instant::now();
-                    lock(&self.sessions).insert(key.to_string(), session);
-                    return Ok(collected);
-                }
-                Some((msg, broken)) => {
+            debug_log::term(
+                "DEBUG",
+                "sftp",
+                "sftp-batch-begin",
+                &format!(
+                    "host={} port={} user={} auth={} ncmds={}",
+                    ssh.host,
+                    ssh.port,
+                    ssh.username,
+                    ssh.auth_method,
+                    batch.len()
+                ),
+            );
+            let started = Instant::now();
+
+            // ---- phase A: get stdin ownership ----
+            //
+            // Password mode: wait for the prompt and feed it — nothing else.
+            // Once the password is out we do NOT wait for the `sftp>` prompt;
+            // the batch bytes simply wait in the pty input buffer until
+            // libedit reads them. Key mode: the client reads stdin as soon as
+            // it starts, so phase A is skipped entirely; an unsatisfiable
+            // passphrase/2FA prompt is recognised from the transcript below.
+            if !password.is_empty() {
+                let mut fed = false;
+                let mut last_output = Instant::now();
+                while !fed {
                     if self.cancel_requested(progress) {
-                        session.close();
+                        let _ = pty.kill();
                         return Err(CANCELLED_MESSAGE.to_string());
                     }
-                    if broken || !session.is_alive() {
-                        session.close();
-                        // A pooled session can die between two operations; one
-                        // silent reconnect keeps that invisible to the user.
-                        if reused && attempt == 0 && progress.is_none() {
-                            attempt += 1;
-                            continue;
+                    match rx.recv_timeout(Duration::from_millis(120)) {
+                        Ok(chunk) => {
+                            last_output = Instant::now();
+                            let text = String::from_utf8_lossy(&chunk);
+                            match auth.push(&text) {
+                                AuthAction::FeedPassword => {
+                                    fed = true;
+                                    debug_log::term(
+                                        "DEBUG",
+                                        "sftp",
+                                        "sftp-prompt-detected",
+                                        "password prompt matched, feeding password",
+                                    );
+                                    let _ = pty
+                                        .write(format!("{}\n", password).as_bytes());
+                                }
+                                AuthAction::AnswerHostKeyYes => {
+                                    let _ = pty.write(b"yes\n");
+                                }
+                                AuthAction::Unsatisfiable(msg) => {
+                                    let _ = pty.kill();
+                                    return Err(msg.to_string());
+                                }
+                                AuthAction::Idle => {}
+                            }
                         }
-                    } else {
-                        session.last_used = Instant::now();
-                        lock(&self.sessions).insert(key.to_string(), session);
+                        Err(RecvTimeoutError::Timeout) => {
+                            if last_output.elapsed() > SFTP_AUTH_IDLE {
+                                let _ = pty.kill();
+                                let code = pty.wait().unwrap_or(-1);
+                                let diag = auth.diag();
+                                debug_log::term(
+                                    "ERROR",
+                                    "sftp",
+                                    "sftp-batch-auth-stalled",
+                                    &format!("code={} diag={}", code, diag),
+                                );
+                                if auth.password_prompt_seen() && !auth.password_fed() {
+                                    return Err(
+                                        "服务器要求输入密码，但此连接未保存密码".to_string()
+                                    );
+                                }
+                                return Err(format!(
+                                    "SSH 连接建立失败：{}",
+                                    classify_master_failure(&diag, code != 0, false)
+                                ));
+                            }
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            // The child exited before authentication completed:
+                            // unreachable host, refused auth, changed host key.
+                            let code = pty.wait().unwrap_or(-1);
+                            let diag = auth.diag();
+                            debug_log::term(
+                                "ERROR",
+                                "sftp",
+                                "sftp-batch-auth-failed",
+                                &format!("code={} diag={}", code, diag),
+                            );
+                            if attempt == 0 && auth.host_key_changed() {
+                                let _ =
+                                    crate::core::platform::clear_known_host(&ssh.host, ssh.port);
+                                continue 'attempt; // retry once with a fresh session
+                            }
+                            return Err(format!(
+                                "SSH 连接建立失败：{}",
+                                classify_master_failure(&diag, code != 0, false)
+                            ));
+                        }
                     }
-                    return Err(msg);
                 }
             }
+
+            // ---- phase B: feed the whole batch, then read to EOF ----
+            let mut lines: Vec<String> = batch.to_vec();
+            lines.push("bye".to_string());
+            let writer_pty = pty.clone();
+            // Written from a thread so a full input pipe (a large batch the
+            // client has not started reading yet) can never stall the read
+            // loop below; the write unblocks when the child reads or dies.
+            let writer = thread::spawn(move || {
+                for cmd in &lines {
+                    if writer_pty.write(format!("{}\n", cmd).as_bytes()).is_err() {
+                        return;
+                    }
+                }
+            });
+
+            let (idle, overall) = if progress.is_some() {
+                (SFTP_XFER_IDLE, SFTP_XFER_OVERALL)
+            } else {
+                (SFTP_META_IDLE, SFTP_META_OVERALL)
+            };
+            let mut collected = String::new();
+            let mut pending = String::new();
+            let mut ansi = AnsiFilter::default();
+            let mut last_output = Instant::now();
+            let mut timed_out = false;
+            loop {
+                if self.cancel_requested(progress) {
+                    let _ = pty.kill();
+                    return Err(CANCELLED_MESSAGE.to_string());
+                }
+                match rx.recv_timeout(Duration::from_millis(120)) {
+                    Ok(chunk) => {
+                        last_output = Instant::now();
+                        let text = String::from_utf8_lossy(&chunk);
+                        // Keep the shared diag/host-key machinery fed for the
+                        // whole session (redacted; prompt classification is
+                        // inert once the password was fed). The returned
+                        // action is deliberately ignored here — command-phase
+                        // prompt handling is exactly what this lane no longer
+                        // does.
+                        let _ = auth.push(&text);
+                        let mut filtered = String::with_capacity(text.len());
+                        ansi.push(&text, &mut filtered);
+                        for ch in filtered.chars() {
+                            if ch == '\r' || ch == '\n' {
+                                let line = std::mem::take(&mut pending);
+                                let trimmed = line.trim_end();
+                                if trimmed.is_empty() {
+                                    continue;
+                                }
+                                if let Some(ctx) = progress {
+                                    if let Some(p) = parse_progress_line(trimmed) {
+                                        ctx.tick(&p.0, p.1, &p.2, &p.3, &p.4);
+                                        continue;
+                                    }
+                                }
+                                if collected.len() < 4_000_000 {
+                                    collected.push_str(trimmed);
+                                    collected.push('\n');
+                                }
+                            } else {
+                                pending.push(ch);
+                            }
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        if last_output.elapsed() > idle || started.elapsed() > overall {
+                            timed_out = true;
+                            let _ = pty.kill();
+                            break;
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break, // child exit → EOF
+                }
+            }
+
+            // The writer has finished by now (all lines written, or it errored
+            // out when the pty died) — joining keeps the thread accounted for
+            // without ever blocking meaningfully.
+            let _ = writer.join();
+
+            let code = pty.wait().unwrap_or(-1);
+            let diag = auth.diag();
+
+            if attempt == 0 && auth.host_key_changed() {
+                debug_log::term(
+                    "INFO",
+                    "sftp",
+                    "sftp-batch-hostkey",
+                    "host key changed; clearing known_hosts and retrying once",
+                );
+                let _ = crate::core::platform::clear_known_host(&ssh.host, ssh.port);
+                continue; // retry once with a fresh session
+            }
+
+            debug_log::term(
+                if timed_out || code != 0 { "ERROR" } else { "DEBUG" },
+                "sftp",
+                "sftp-batch-done",
+                &format!(
+                    "code={} elapsed_ms={} out_bytes={} diag={}",
+                    code,
+                    started.elapsed().as_millis(),
+                    collected.len(),
+                    diag
+                ),
+            );
+
+            if self.cancel_requested(progress) {
+                return Err(CANCELLED_MESSAGE.to_string());
+            }
+            if timed_out {
+                return Err(if progress.is_some() {
+                    "传输长时间无响应，已中断".to_string()
+                } else {
+                    "远端长时间无响应，操作已中断".to_string()
+                });
+            }
+
+            // The client does not abort on a failed command when reading from
+            // stdin (no `-b` semantics), so command-level errors are
+            // recognised from the transcript — the same scan the old
+            // per-command pumps ran, now over the whole batch. A leading `-`
+            // marks a command whose failure must not fail the batch (the
+            // listing probe); its output is the tail of the transcript, so
+            // everything from the echo of the first tolerant command on
+            // is exempt from the scan (`find`, not `rfind`: the probe's own
+            // error text repeats the command, and the echo always comes
+            // first). If the echo cannot be located, the whole transcript is
+            // scanned (conservative: a false failure costs a fallback round
+            // trip, never a wrong result).
+            let scan_upto = batch
+                .iter()
+                .position(|c| c.trim_start().starts_with('-'))
+                .and_then(|i| {
+                    let cmd = batch[i].trim_start();
+                    collected.find(cmd)
+                })
+                .unwrap_or(collected.len());
+            if let Some(err) = interactive_error(&collected[..scan_upto], "") {
+                return Err(err);
+            }
+            if code == 0 {
+                return Ok(collected);
+            }
+            if auth.password_prompt_seen() && !auth.password_fed() {
+                return Err("服务器要求输入密码，但此连接未保存密码".to_string());
+            }
+            return Err(friendly_sftp_error(&collected, &diag));
         }
+        Err("SSH 连接建立失败：未知错误".to_string())
     }
 
     /// Spawn `ssh -M -N user@host` through a pty (no `-f`: backgrounding
@@ -1561,292 +1835,13 @@ impl Drop for SftpService {
     }
 }
 
-// ---- interactive session ----
+// ---- shared helpers ----
 
 /// Poison-tolerant lock: a panicking worker must never brick the pool.
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     match m.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
-    }
-}
-
-/// Recognise the interactive `sftp>` prompt. It is printed without a trailing
-/// newline, so it always sits alone in the pending buffer.
-fn is_sftp_prompt(pending: &str) -> bool {
-    pending.trim_end() == "sftp>"
-}
-
-impl InteractiveSession {
-    /// Start `sftp` inside a pty and drive it up to the first prompt.
-    fn spawn(ssh: &SshConnectionInfo) -> Result<Self, String> {
-        let mut last_err = "SSH 连接建立失败：未知错误".to_string();
-        for attempt in 0..=1 {
-        let bin = crate::core::platform::resolve_sftp_binary()
-            .map_err(|e| format!("无法定位 sftp 程序: {}", e))?;
-
-        let mut args: Vec<String> = vec![
-            "-o".to_string(),
-            "StrictHostKeyChecking=accept-new".to_string(),
-            "-o".to_string(),
-            "ConnectTimeout=15".to_string(),
-            // 禁用 GSSAPI（Kerberos/SSPI）：Windows OpenSSH 默认把 gssapi-with-mic
-            // 排最前，非域环境无 KDC 时该握手会卡 ~10s 才失败，叠加 VirtualBox
-            // host-only 的慢连接，容易顶爆下面的 SESSION_HANDSHAKE_TIMEOUT → 假失败。
-            // key / password 模式都安全（与终端/测试连接路径一致）。
-            "-o".to_string(),
-            "GSSAPIAuthentication=no".to_string(),
-            // One shot only: a rejected password must fail fast instead of
-            // re-prompting into a pty nobody is watching.
-            "-o".to_string(),
-            "NumberOfPasswordPrompts=1".to_string(),
-        ];
-        keepalive_args(&mut args);
-        // 密码模式直奔 password 认证，跳过 pubkey/gssapi 探针（gssapi 已禁用，
-        // 这里进一步省掉无谓的 pubkey 探测）。密钥模式**不能**加，否则会跳过密钥。
-        if ssh.auth_method == "password" {
-            args.push("-o".to_string());
-            args.push("PreferredAuthentications=password".to_string());
-        }
-        if ssh.port != 22 {
-            args.push("-P".to_string());
-            args.push(ssh.port.to_string());
-        }
-        if ssh.auth_method == "private_key" {
-            if let Some(key) = &ssh.private_key_path {
-                args.push("-i".to_string());
-                args.push(key.clone());
-            }
-        }
-        args.push(ssh_target(ssh));
-
-        // Wide pty: ConPTY re-flows anything past the window width, which would
-        // corrupt long file names in the listing.
-        let pty = Arc::new(spawn_sftp_pty(&bin, &args, 500, &[("TERM", "dumb")])?);
-
-        let (tx, rx) = channel::<Vec<u8>>();
-        let reader = pty.reader();
-        thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            let mut guard = match reader.lock() {
-                Ok(g) => g,
-                Err(_) => return,
-            };
-            loop {
-                match guard.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if tx.send(buf[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        let mut session = InteractiveSession {
-            pty,
-            rx,
-            ansi: AnsiFilter::default(),
-            pending: String::new(),
-            diag: String::new(),
-            auth_error: None,
-            last_used: Instant::now(),
-        };
-
-        let password = ssh.password.clone().unwrap_or_default();
-        let pw = if ssh.auth_method == "password" && !password.is_empty() {
-            Some(password)
-        } else {
-            None
-        };
-
-        debug_log::term(
-            "DEBUG",
-            "sftp",
-            "sftp-handshake",
-            &format!(
-                "host={} port={} user={} auth={}",
-                ssh.host, ssh.port, ssh.username, ssh.auth_method
-            ),
-        );
-        match session.pump(pw.as_deref(), None, SESSION_HANDSHAKE_TIMEOUT) {
-            Ok(_) => {
-                tracing::info!("[SFTP] interactive session ready ({}@{})", ssh.username, ssh.host);
-                debug_log::term("INFO", "sftp", "sftp-session-ready", "interactive sftp session authenticated");
-                return Ok(session);
-            }
-            Err(_) => {
-                let specific = session.auth_error.take();
-                let exited = !session.is_alive();
-                let diag = session.diag.clone();
-                let _ = session.pty.kill();
-                let diag_oneline = diag.replace(['\n', '\r'], " ");
-                tracing::error!("[SFTP] interactive session failed: {}", diag_oneline);
-                debug_log::term(
-                    "ERROR",
-                    "sftp",
-                    "sftp-session-failed",
-                    &format!("exited={} diag={}", exited, diag_oneline),
-                );
-                // 远程重装系统后 host key 变更：清掉旧 key 并重连一次（与终端连接一致）。
-                if attempt == 0 && crate::core::platform::is_host_key_error(&diag) {
-                    let _ = crate::core::platform::clear_known_host(&ssh.host, ssh.port);
-                    tracing::info!("[SFTP] interactive host key changed; cleared known_hosts and retrying once");
-                    continue;
-                }
-                last_err = format!(
-                    "SSH 连接建立失败：{}",
-                    specific.unwrap_or_else(|| classify_master_failure(&diag, exited, false))
-                );
-                break;
-            }
-        }
-        }
-        Err(last_err)
-    }
-
-    fn is_alive(&self) -> bool {
-        matches!(self.pty.try_wait(), Ok(None))
-    }
-
-    fn close(self) {
-        let _ = self.pty.write(b"bye\n");
-        let _ = self.pty.kill();
-    }
-
-    fn write_raw(&self, s: &str) -> Result<(), String> {
-        self.pty
-            .write(s.as_bytes())
-            .map(|_| ())
-            .map_err(|e| format!("写入 sftp 会话失败: {}", e))
-    }
-
-    fn send(&mut self, cmd: &str) -> Result<(), String> {
-        self.pending.clear();
-        self.write_raw(&format!("{}\n", cmd))
-    }
-
-    fn note(&mut self, line: &str) {
-        self.diag.push_str(line);
-        self.diag.push('\n');
-        while self.diag.len() > 2048 {
-            match self.diag.find('\n') {
-                Some(i) => self.diag = self.diag[i + 1..].to_string(),
-                None => {
-                    self.diag.clear();
-                    break;
-                }
-            }
-        }
-    }
-
-    fn flush_line(&mut self, progress: Option<&ProgressCtx>, collected: &mut String) {
-        let line = std::mem::take(&mut self.pending);
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
-            return;
-        }
-        self.note(trimmed);
-        if let Some(ctx) = progress {
-            if let Some(p) = parse_progress_line(trimmed) {
-                ctx.tick(&p.0, p.1, &p.2, &p.3, &p.4);
-                return;
-            }
-        }
-        // 4 MB ceiling: enough for a directory with ~40k entries, small enough
-        // that a runaway remote cannot exhaust memory.
-        if collected.len() < 4_000_000 {
-            collected.push_str(trimmed);
-            collected.push('\n');
-        }
-    }
-
-    /// Read until the next `sftp>` prompt, answering auth prompts on the way
-    /// and forwarding progress ticks.
-    fn pump(
-        &mut self,
-        password: Option<&str>,
-        progress: Option<&ProgressCtx>,
-        idle: Duration,
-    ) -> Result<String, String> {
-        let mut collected = String::new();
-        let mut answered = false;
-        let mut last = Instant::now();
-        loop {
-            match self.rx.recv_timeout(Duration::from_millis(120)) {
-                Ok(chunk) => {
-                    last = Instant::now();
-                    let mut text = String::with_capacity(chunk.len());
-                    self.ansi.push(&String::from_utf8_lossy(&chunk), &mut text);
-                    for ch in text.chars() {
-                        if ch == '\r' || ch == '\n' {
-                            self.flush_line(progress, &mut collected);
-                        } else {
-                            self.pending.push(ch);
-                        }
-                    }
-
-                    if is_sftp_prompt(&self.pending) {
-                        self.pending.clear();
-                        return Ok(collected);
-                    }
-                    if answered {
-                        continue;
-                    }
-                    match classify_pending_prompt(&self.pending) {
-                        Some(PendingPrompt::Password) => match password {
-                            Some(pw) if !pw.is_empty() => {
-                                self.write_raw(&format!("{}\n", pw))?;
-                                answered = true;
-                                self.pending.clear();
-                                debug_log::term(
-                                    "DEBUG",
-                                    "sftp",
-                                    "sftp-prompt-detected",
-                                    "password prompt matched, feeding password",
-                                );
-                            }
-                            _ => {
-                                self.auth_error =
-                                    Some("服务器要求输入密码，但此连接未保存密码".to_string());
-                                return Err("需要密码".to_string());
-                            }
-                        },
-                        Some(PendingPrompt::Passphrase) => {
-                            self.auth_error = Some(
-                                "私钥已加密，需要口令（请改用未加密的密钥或先 ssh-add 到代理）"
-                                    .to_string(),
-                            );
-                            return Err("需要密钥口令".to_string());
-                        }
-                        Some(PendingPrompt::Verification) => {
-                            self.auth_error =
-                                Some("服务器要求二次验证码，文件传输暂不支持该登录方式".to_string());
-                            return Err("需要二次验证".to_string());
-                        }
-                        Some(PendingPrompt::HostKey) => {
-                            self.write_raw("yes\n")?;
-                            self.pending.clear();
-                        }
-                        None => {}
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if last.elapsed() > idle {
-                        return Err("远端长时间无响应，操作已中断".to_string());
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    self.flush_line(progress, &mut collected);
-                    if collected.trim().is_empty() {
-                        return Err("连接已断开".to_string());
-                    }
-                    return Err(friendly_sftp_error(&collected, ""));
-                }
-            }
-        }
     }
 }
 
@@ -2373,6 +2368,52 @@ fn is_connection_error(msg: &str) -> bool {
 fn is_permission_error(msg: &str) -> bool {
     let low = msg.to_lowercase();
     low.contains("permission denied") || low.contains("无写权限") || low.contains("权限不足")
+}
+
+/// 单次上传 batch 中带尺寸校验的文件数上限（见 `upload`）。
+const UPLOAD_VERIFY_CAP: usize = 20;
+
+/// 从 `ls -lan <file>` 输出行提取 (size, name)。行必须是普通文件
+/// （mode 以 `-` 开头），跳过目录、echo 行与进度行——它们要么不足 9 列，
+/// 要么 mode 不以 `-` 开头。名字取第 9 列起的全部余项（空格折叠），
+/// 含空格的文件名由此保持可匹配。
+fn ls_line_size_name(line: &str) -> Option<(u64, String)> {
+    let t = line.trim_start();
+    if !t.starts_with('-') {
+        return None;
+    }
+    let tokens: Vec<&str> = t.split_whitespace().collect();
+    if tokens.len() < 9 {
+        return None;
+    }
+    let size = tokens[4].parse::<u64>().ok()?;
+    Some((size, tokens[8..].join(" ")))
+}
+
+/// 上传后尺寸校验：把本地文件大小与同一 batch 里 `ls -lan` 探针返回的远端
+/// 大小逐个比对。转写里找不到的条目直接跳过——服务器对列表格式有分歧时，
+/// 不能把一次实际成功的上传判成失败；找到了但大小不一致才算截断。
+fn verify_upload_sizes(out: &str, expect: &[(String, u64)]) -> Result<(), String> {
+    for (name, want) in expect {
+        let mut found: Option<u64> = None;
+        for line in out.lines() {
+            if let Some((size, fname)) = ls_line_size_name(line) {
+                if fname == *name {
+                    found = Some(size);
+                    break;
+                }
+            }
+        }
+        if let Some(got) = found {
+            if got != *want {
+                return Err(format!(
+                    "上传后校验失败：{} 本地 {} 字节，远端 {} 字节，传输可能被截断，请重试。",
+                    name, want, got
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 把 ls 权限串（10 位，可带 ACL `+` / SELinux `.` 后缀）转八进制 mode。
@@ -3190,6 +3231,7 @@ fn format_epoch(ts: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::terminal::pty_expect::{classify_pending_prompt, PendingPrompt};
 
     #[test]
     fn parses_gnu_style_listing() {
@@ -3359,13 +3401,10 @@ drwx------ ? ubuntu ubuntu 4096 Aug  5 10:35 .ssh\n";
         let mut out2 = String::new();
         f2.push("\u{1b}]0;title\u{7}sftp> ", &mut out2);
         assert_eq!(out2, "sftp> ");
-        assert!(is_sftp_prompt(&out2));
     }
 
     #[test]
     fn detects_interactive_prompts() {
-        assert!(is_sftp_prompt("sftp> "));
-        assert!(!is_sftp_prompt("sftp> ls -lan"));
         assert!(matches!(
             classify_pending_prompt("root@10.0.0.1's password: "),
             Some(PendingPrompt::Password)
@@ -3463,6 +3502,46 @@ drwxr-xr-x ? ubuntu ubuntu 4096 Aug  5 09:00 .config\n";
         assert!(!msg.contains("drwx"), "listing row leaked into error: {}", msg);
         assert!(!msg.contains(".ssh"), "listing row leaked into error: {}", msg);
         assert!(msg.contains("SFTP 操作失败"));
+    }
+
+    #[test]
+    fn ls_line_size_name_parses_files_only() {
+        // Ordinary `ls -lan` output for a regular file.
+        let (size, name) = ls_line_size_name("-rw-r--r-- 1 ubuntu ubuntu 4096 Aug  5 10:35 report.pdf")
+            .expect("file line must parse");
+        assert_eq!(size, 4096);
+        assert_eq!(name, "report.pdf");
+        // Name with spaces: everything from column 9 on is the name.
+        let (_, name) = ls_line_size_name("-rw-r--r-- 1 root root 123 Dec  1 09:00 my file (1).txt")
+            .expect("spaced name must parse");
+        assert_eq!(name, "my file (1).txt");
+        // Directories, symlinks and short/echo lines never parse.
+        assert!(ls_line_size_name("drwxr-xr-x 2 ubuntu ubuntu 4096 Aug  5 10:35 docs").is_none());
+        assert!(ls_line_size_name("lrwxrwxrwx 1 ubuntu ubuntu 7 Aug  5 10:35 link").is_none());
+        assert!(ls_line_size_name("sftp> ls -lan \"report.pdf\"").is_none());
+        assert!(ls_line_size_name("100% 4096 0.0KB/s 00:00").is_none());
+        // Non-numeric size column is skipped rather than panicking.
+        assert!(ls_line_size_name("-rw-r--r-- 1 ? ubuntu ??? Aug  5 10:35 x").is_none());
+    }
+
+    #[test]
+    fn verify_upload_sizes_flags_truncation_and_tolerates_missing() {
+        let out = "sftp> put \"a.txt\" \"a.txt\"\n\
+Uploading a.txt to /home/ubuntu/a.txt\n\
+100% 12 0.0KB/s 00:00\n\
+sftp> ls -lan \"a.txt\"\n\
+-rw-r--r-- 1 ubuntu ubuntu 12 Aug  5 10:35 a.txt\n\
+-rw-r--r-- 1 ubuntu ubuntu 4096 Aug  5 10:35 b.txt\n";
+        // Matching sizes pass.
+        assert!(verify_upload_sizes(out, &[("a.txt".into(), 12)]).is_ok());
+        assert!(verify_upload_sizes(out, &[("b.txt".into(), 4096)]).is_ok());
+        // Truncated upload is caught.
+        let err = verify_upload_sizes(out, &[("b.txt".into(), 5000)])
+            .expect_err("size mismatch must fail");
+        assert!(err.contains("b.txt"));
+        assert!(err.contains("5000"));
+        // A file the transcript never mentions is skipped, not an error.
+        assert!(verify_upload_sizes(out, &[("ghost.txt".into(), 1)]).is_ok());
     }
 
     #[test]

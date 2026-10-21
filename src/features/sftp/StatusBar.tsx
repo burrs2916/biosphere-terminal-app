@@ -2,6 +2,9 @@ import Box from '@mui/material/Box';
 import Tooltip from '@mui/material/Tooltip';
 import { EyeSlashIcon, PlugsConnectedIcon } from '@phosphor-icons/react';
 
+/** Where the session is, mirrored in the corner dot's colour. */
+export type StatusBarStatus = 'connecting' | 'ready' | 'failed';
+
 interface StatusBarProps {
   isDark: boolean;
   hidden: number;
@@ -12,6 +15,9 @@ interface StatusBarProps {
   target: string;
   /** True when a search box or the hidden filter is holding rows back. */
   filtered: boolean;
+  status: StatusBarStatus;
+  /** Already interpolated by the caller so this component stays i18n-free. */
+  statusText: string;
   /** Already interpolated by the caller so this component stays i18n-free. */
   labels: {
     items: string;
@@ -33,12 +39,26 @@ export function StatusBar({
   selectedSize,
   target,
   filtered,
+  status,
+  statusText,
   labels,
 }: StatusBarProps) {
   const border = isDark ? 'rgba(240,246,252,0.10)' : 'rgba(27,31,36,0.12)';
   const bg = isDark ? 'rgba(110,118,129,0.06)' : 'rgba(175,184,193,0.10)';
   const subtle = isDark ? '#8B949E' : '#57606A';
   const strong = isDark ? '#C9D1D9' : '#24292F';
+  const statusColor =
+    status === 'ready'
+      ? isDark
+        ? '#3FB950'
+        : '#1A7F37'
+      : status === 'failed'
+        ? isDark
+          ? '#F85149'
+          : '#CF222E'
+        : isDark
+          ? '#D29922'
+          : '#9A6700';
 
   return (
     <Box
@@ -76,6 +96,28 @@ export function StatusBar({
       )}
 
       <Box sx={{ flex: 1, minWidth: 8 }} />
+
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
+        <Box
+          sx={{
+            width: 7,
+            height: 7,
+            borderRadius: '50%',
+            bgcolor: statusColor,
+            flexShrink: 0,
+            ...(status === 'connecting'
+              ? {
+                  '@keyframes sftpStatusPulse': {
+                    '0%, 100%': { opacity: 1 },
+                    '50%': { opacity: 0.25 },
+                  },
+                  animation: 'sftpStatusPulse 1.2s ease-in-out infinite',
+                }
+              : null),
+          }}
+        />
+        <Box component="span">{statusText}</Box>
+      </Box>
 
       <Tooltip title={target} enterDelay={400}>
         <Box

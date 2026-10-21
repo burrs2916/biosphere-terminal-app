@@ -1,11 +1,20 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Box from '@mui/material/Box';
 import Breadcrumbs from '@mui/material/Breadcrumbs';
 import IconButton from '@mui/material/IconButton';
 import InputBase from '@mui/material/InputBase';
 import Link from '@mui/material/Link';
+import ListItemText from '@mui/material/ListItemText';
+import Menu from '@mui/material/Menu';
+import MenuItem from '@mui/material/MenuItem';
 import Tooltip from '@mui/material/Tooltip';
-import { HouseIcon, PencilSimpleIcon } from '@phosphor-icons/react';
+import {
+  BookmarkSimpleIcon,
+  HouseIcon,
+  PencilSimpleIcon,
+  StarIcon,
+  TrashIcon,
+} from '@phosphor-icons/react';
 import { pathSegments } from './utils';
 
 interface PathBarProps {
@@ -13,17 +22,25 @@ interface PathBarProps {
   isDark: boolean;
   editing: boolean;
   draft: string;
+  /** Pinned directories for the current connection, most navigation-ready. */
+  favorites: string[];
+  isFavorite: boolean;
   labels: {
     home: string;
     root: string;
     edit: string;
     placeholder: string;
+    addFavorite: string;
+    removeFavorite: string;
+    favorites: string;
   };
   onNavigate: (target: string) => void;
   onDraftChange: (v: string) => void;
   onBeginEdit: () => void;
   onCancelEdit: () => void;
   onCommitEdit: () => void;
+  onToggleFavorite: () => void;
+  onRemoveFavorite: (path: string) => void;
 }
 
 /**
@@ -40,14 +57,19 @@ export function PathBar({
   isDark,
   editing,
   draft,
+  favorites,
+  isFavorite,
   labels,
   onNavigate,
   onDraftChange,
   onBeginEdit,
   onCancelEdit,
   onCommitEdit,
+  onToggleFavorite,
+  onRemoveFavorite,
 }: PathBarProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const [favAnchor, setFavAnchor] = useState<HTMLElement | null>(null);
   const border = isDark ? 'rgba(240,246,252,0.12)' : 'rgba(27,31,36,0.12)';
   const text = isDark ? '#C9D1D9' : '#24292F';
   const subtle = isDark ? '#8B949E' : '#57606A';
@@ -173,8 +195,77 @@ export function PathBar({
               <PencilSimpleIcon size={13} color={subtle} />
             </IconButton>
           </Tooltip>
+
+          {/* Pin / unpin the directory on screen. */}
+          <Tooltip title={isFavorite ? labels.removeFavorite : labels.addFavorite}>
+            <IconButton size="small" onClick={onToggleFavorite} sx={{ width: 22, height: 22 }}>
+              <StarIcon
+                size={13}
+                color={isFavorite ? '#e3b341' : subtle}
+                weight={isFavorite ? 'fill' : 'regular'}
+              />
+            </IconButton>
+          </Tooltip>
+
+          {favorites.length > 0 && (
+            <Tooltip title={labels.favorites}>
+              <IconButton
+                size="small"
+                onClick={(e) => setFavAnchor(e.currentTarget)}
+                sx={{ width: 22, height: 22 }}
+              >
+                <BookmarkSimpleIcon size={13} color={subtle} />
+              </IconButton>
+            </Tooltip>
+          )}
         </>
       )}
+
+      <Menu
+        open={!!favAnchor}
+        onClose={() => setFavAnchor(null)}
+        anchorEl={favAnchor}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+      >
+        {favorites.map((fav) => (
+          <MenuItem
+            key={fav}
+            dense
+            onClick={() => {
+              setFavAnchor(null);
+              onNavigate(fav);
+            }}
+          >
+            <ListItemText
+              slotProps={{
+                primary: {
+                  sx: {
+                    fontSize: 12.5,
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                    maxWidth: 300,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  },
+                },
+              }}
+            >
+              {fav}
+            </ListItemText>
+            <IconButton
+              size="small"
+              sx={{ width: 20, height: 20, ml: 1 }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onRemoveFavorite(fav);
+              }}
+            >
+              <TrashIcon size={12} color={subtle} />
+            </IconButton>
+          </MenuItem>
+        ))}
+      </Menu>
     </Box>
   );
 }

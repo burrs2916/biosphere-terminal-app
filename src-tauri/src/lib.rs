@@ -857,6 +857,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::sftp::sftp_remove,
             interface::commands::sftp::sftp_rename,
             interface::commands::sftp::sftp_mkdir,
+            interface::commands::sftp::sftp_create_file,
             interface::commands::sftp::sftp_chmod,
             interface::commands::sftp::sftp_cancel,
             interface::commands::sftp::sftp_disconnect,

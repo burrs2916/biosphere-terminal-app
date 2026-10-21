@@ -124,6 +124,14 @@ export async function sftpMkdir(ssh: SshConnectionInfo, remotePath: string): Pro
   return invoke('sftp_mkdir', { ssh, remotePath });
 }
 
+/** Create an empty file at `remotePath` (existence is checked by the UI). */
+export async function sftpCreateFile(
+  ssh: SshConnectionInfo,
+  remotePath: string,
+): Promise<void> {
+  return invoke('sftp_create_file', { ssh, remotePath });
+}
+
 /**
  * Apply an octal permission mode ("755") to remote paths.
  *

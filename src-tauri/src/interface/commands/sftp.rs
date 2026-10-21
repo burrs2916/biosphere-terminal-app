@@ -140,6 +140,17 @@ pub async fn sftp_mkdir(
     spawn_blocking_flatten!(svc.mkdir(&ssh, &remote_path))
 }
 
+/// Create an empty file at `path` on the remote (existence is checked by the UI).
+#[tauri::command]
+pub async fn sftp_create_file(
+    ssh: SshConnectionInfo,
+    remote_path: String,
+    service: State<'_, Arc<SftpService>>,
+) -> Result<(), String> {
+    let svc = service.inner().clone();
+    spawn_blocking_flatten!(svc.create_file(&ssh, &remote_path))
+}
+
 /// Apply an octal permission mode to remote paths. POSIX-only in practice;
 /// Windows servers reject the request and the error reaches the UI unchanged.
 #[tauri::command]

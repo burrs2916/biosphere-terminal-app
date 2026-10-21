@@ -9,12 +9,19 @@ import {
 } from 'react';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
+import CircularProgress from '@mui/material/CircularProgress';
+import Dialog from '@mui/material/Dialog';
+import DialogActions from '@mui/material/DialogActions';
+import DialogContent from '@mui/material/DialogContent';
+import DialogContentText from '@mui/material/DialogContentText';
+import DialogTitle from '@mui/material/DialogTitle';
 import LinearProgress from '@mui/material/LinearProgress';
 import ListItemIcon from '@mui/material/ListItemIcon';
 import ListItemText from '@mui/material/ListItemText';
 import Menu from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import Paper from '@mui/material/Paper';
+import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import useMediaQuery from '@mui/material/useMediaQuery';
 import { useTheme } from '@mui/material/styles';
@@ -26,13 +33,18 @@ import {
   DownloadIcon,
   EyeIcon,
   FileIcon,
+  FilePlusIcon,
   FolderIcon,
   FolderOpenIcon,
   FolderPlusIcon,
+  KeyIcon,
   LockKeyIcon,
   MagnifyingGlassIcon,
   PencilSimpleIcon,
+  PlugsIcon,
   SelectionAllIcon,
+  ShieldWarningIcon,
+  TimerIcon,
   TrashIcon,
   UploadIcon,
   WarningIcon,
@@ -41,6 +53,12 @@ import { sftpList, sftpListMany, type SftpEntry } from '../../core/services/sftp
 import type { SshConnectionInfo } from '../../proto/connection';
 import { useNotify } from '../../core/notification';
 import { copyText } from '../../core/services/clipboard.service';
+import type { SftpErrorCategory } from './useSftpBrowser';
+import {
+  onCloseBlocked,
+  registerWindowCloseGuard,
+} from '../notebook/utils/registerWindowCloseFlush';
+import { isActiveTransfer } from './TransferQueue';
 import { DirectoryTree } from './DirectoryTree';
 import { FileTable } from './FileTable';
 import { PathBar } from './PathBar';
@@ -55,6 +73,15 @@ const TREE_OPEN_KEY = 'sftp.treeOpen';
 const TREE_WIDTH_KEY = 'sftp.treeWidth';
 const TREE_MIN = 150;
 const TREE_MAX = 460;
+
+/** Icon + heading + suggested fix per failure category, keyed for i18n lookups. */
+const CONN_CATEGORY_KEYS: Record<SftpErrorCategory, { icon: typeof WarningIcon }> = {
+  unreachable: { icon: PlugsIcon },
+  auth: { icon: KeyIcon },
+  timeout: { icon: TimerIcon },
+  hostkey: { icon: ShieldWarningIcon },
+  unknown: { icon: WarningIcon },
+};
 
 /** Where a dragged batch would land, and the table row to highlight (if any). */
 interface DropTarget {
@@ -95,12 +122,42 @@ export function SftpManager({ ssh }: SftpManagerProps) {
   const modalOpen =
     !!s.renaming ||
     s.newFolderOpen ||
+    s.newFileOpen ||
     !!s.confirm ||
     !!s.chmodTargets ||
     !!s.batchRename ||
     !!rowMenu ||
     !!bgMenu ||
     editingPath;
+
+  // ---- connection feedback -------------------------------------------------
+  // Seconds since the current connecting phase began, ticking once a second
+  // so the banner can answer "is it stuck or still working?" on slow links.
+  const [connectElapsed, setConnectElapsed] = useState(0);
+  useEffect(() => {
+    if (s.connState !== 'connecting' || s.connectingSince == null) return;
+    const since = s.connectingSince;
+    const tick = () => setConnectElapsed(Math.round((Date.now() - since) / 1000));
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [s.connState, s.connectingSince]);
+
+  // ---- close guard ---------------------------------------------------------
+  // While anything is queued or running, veto the window close and surface a
+  // confirm dialog instead — closing mid-transfer would kill it silently.
+  const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
+  const hasActiveTransfer = s.transfers.some(isActiveTransfer);
+  useEffect(() => {
+    if (!hasActiveTransfer) return undefined;
+    return registerWindowCloseGuard('sftp-transfers', () => true);
+  }, [hasActiveTransfer]);
+  useEffect(() => onCloseBlocked(() => setCloseConfirmOpen(true)), []);
+
+  const confirmCloseAnyway = useCallback(() => {
+    setCloseConfirmOpen(false);
+    void getCurrentWebviewWindow().destroy();
+  }, []);
 
   useEffect(() => {
     containerRef.current?.focus();
@@ -491,17 +548,24 @@ export function SftpManager({ ssh }: SftpManagerProps) {
             isDark={isDark}
             editing={editingPath}
             draft={pathDraft}
+            favorites={s.favorites.map((f) => f.path)}
+            isFavorite={s.isFavorite}
             labels={{
               home: t('home'),
               root: t('root'),
               edit: t('edit_path'),
               placeholder: t('path_placeholder'),
+              addFavorite: t('add_favorite'),
+              removeFavorite: t('remove_favorite'),
+              favorites: t('favorites_list'),
             }}
             onNavigate={s.navigate}
             onDraftChange={setPathDraft}
             onBeginEdit={beginEditPath}
             onCancelEdit={() => setEditingPath(false)}
             onCommitEdit={commitEditPath}
+            onToggleFavorite={s.toggleFavorite}
+            onRemoveFavorite={s.removeFavorite}
           />
 
           {/* A hairline instead of a full skeleton keeps navigation from flashing. */}
@@ -510,15 +574,86 @@ export function SftpManager({ ssh }: SftpManagerProps) {
           </Box>
 
           <Box sx={{ flex: 1, position: 'relative', minHeight: 0, overflow: 'hidden' }}>
-        {s.error && (
-          <Paper sx={{ m: 1, p: 1.5, bgcolor: isDark ? '#2d2424' : '#fff4f4' }}>
-            <Typography variant="body2" sx={{ color: '#ff5252', fontSize: 12.5 }}>
-              {s.error}
-            </Typography>
-          </Paper>
-        )}
+        {(() => {
+          if (!(s.connState === 'failed' && s.error)) {
+            return s.error ? (
+              <Paper sx={{ m: 1, p: 1.5, bgcolor: isDark ? '#2d2424' : '#fff4f4' }}>
+                <Typography variant="body2" sx={{ color: '#ff5252', fontSize: 12.5 }}>
+                  {s.error}
+                </Typography>
+              </Paper>
+            ) : null;
+          }
+          const connCat = s.connErrorCategory ?? 'unknown';
+          const ConnIcon = CONN_CATEGORY_KEYS[connCat].icon;
+          return (
+            <Paper
+              sx={{
+                m: 2,
+                p: 2.5,
+                bgcolor: isDark ? '#2d2424' : '#fff4f4',
+                border: '1px solid',
+                borderColor: 'divider',
+              }}
+            >
+              <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'flex-start' }}>
+                <ConnIcon size={26} color={isDark ? '#F85149' : '#CF222E'} weight="fill" />
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Typography sx={{ fontWeight: 600, fontSize: 14, color: textColor }}>
+                    {t(`conn_title_${connCat}`)}
+                  </Typography>
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      color: '#ff5252',
+                      fontSize: 12.5,
+                      mt: 0.5,
+                      whiteSpace: 'pre-line',
+                      wordBreak: 'break-word',
+                    }}
+                  >
+                    {s.error}
+                  </Typography>
+                  <Typography variant="body2" sx={{ color: subtle, fontSize: 12.5, mt: 1 }}>
+                    {t(`conn_hint_${connCat}`)}
+                  </Typography>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<ArrowClockwiseIcon size={14} />}
+                    onClick={s.retryConnection}
+                    sx={{ mt: 1.5, textTransform: 'none' }}
+                  >
+                    {t('conn_retry')}
+                  </Button>
+                </Box>
+              </Box>
+            </Paper>
+          );
+        })()}
 
-        {showSkeleton ? (
+        {s.connState === 'connecting' && s.entries.length === 0 ? (
+          <Box
+            sx={{
+              height: '100%',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 1.5,
+              px: 3,
+              textAlign: 'center',
+            }}
+          >
+            <CircularProgress size={30} thickness={3.5} />
+            <Typography sx={{ color: textColor, fontSize: 13.5, fontWeight: 600 }}>
+              {t('connecting_status', { target, seconds: connectElapsed })}
+            </Typography>
+            <Typography sx={{ color: subtle, fontSize: 12.5 }}>
+              {t('connecting_hint')}
+            </Typography>
+          </Box>
+        ) : showSkeleton ? (
           <Box>
             {Array.from({ length: 14 }).map((_, i) => (
               <Box
@@ -682,6 +817,14 @@ export function SftpManager({ ssh }: SftpManagerProps) {
         selectedSize={s.selectedSizeLabel}
         target={target}
         filtered={s.displayed.length !== s.entries.length}
+        status={s.connState}
+        statusText={
+          s.connState === 'ready'
+            ? t('status_ready')
+            : s.connState === 'connecting'
+              ? t('status_connecting')
+              : t('status_failed')
+        }
         labels={{
           items: t('status_items', { count: s.entries.length }),
           hidden: t('status_hidden', { count: s.hiddenCount }),
@@ -906,6 +1049,21 @@ export function SftpManager({ ssh }: SftpManagerProps) {
           dense
           onClick={() => {
             setBgMenu(null);
+            s.setNewFileName('');
+            s.setNewFileOpen(true);
+          }}
+        >
+          <ListItemIcon sx={{ minWidth: 26 }}>
+            <FilePlusIcon size={15} color={subtle} />
+          </ListItemIcon>
+          <ListItemText slotProps={{ primary: { sx: { fontSize: 13 } } }}>
+            {t('new_file')}
+          </ListItemText>
+        </MenuItem>
+        <MenuItem
+          dense
+          onClick={() => {
+            setBgMenu(null);
             s.selectAll();
           }}
         >
@@ -945,6 +1103,63 @@ export function SftpManager({ ssh }: SftpManagerProps) {
           </ListItemText>
         </MenuItem>
       </Menu>
+
+      {/* Closing mid-transfer is a decision, not an accident: ask once. */}
+      <Dialog open={closeConfirmOpen} onClose={() => setCloseConfirmOpen(false)}>
+        <DialogTitle>{t('close_guard_title')}</DialogTitle>
+        <DialogContent>
+          <DialogContentText>{t('close_guard_desc')}</DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCloseConfirmOpen(false)} sx={{ textTransform: 'none' }}>
+            {t('cancel')}
+          </Button>
+          <Button color="error" onClick={confirmCloseAnyway} sx={{ textTransform: 'none' }}>
+            {t('close_guard_confirm')}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* New empty file — mirrors the new-folder dialog's shape. */}
+      <Dialog
+        open={s.newFileOpen}
+        onClose={() => s.setNewFileOpen(false)}
+        slotProps={{ paper: { sx: { minWidth: 340 } } }}
+      >
+        <DialogTitle>{t('new_file_title')}</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            fullWidth
+            size="small"
+            margin="dense"
+            label={t('file_name')}
+            value={s.newFileName}
+            onChange={(e) => s.setNewFileName(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                void s.submitNewFile();
+              }
+            }}
+            sx={{ mt: 1 }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => s.setNewFileOpen(false)} sx={{ textTransform: 'none' }}>
+            {t('cancel')}
+          </Button>
+          <Button
+            variant="contained"
+            disabled={!s.newFileName.trim() || s.busy}
+            onClick={() => void s.submitNewFile()}
+            sx={{ textTransform: 'none' }}
+          >
+            {t('ok')}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <SftpDialogs
         isDark={isDark}
