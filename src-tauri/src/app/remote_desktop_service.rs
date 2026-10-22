@@ -347,7 +347,13 @@ impl RemoteDesktopService {
 
                             if needs_password {
                                 tracing::info!("[remote-desktop] Detected password prompt, auto-filling...");
-                                let pw_bytes = format!("{}\n", pwd);
+                                // CR, not LF: ConPTY will not submit a bare newline
+                                // (see `Pty::write_line`).
+                                let pw_bytes = if cfg!(target_os = "windows") {
+                                    format!("{}\r", pwd)
+                                } else {
+                                    format!("{}\n", pwd)
+                                };
                                 if let Err(e) = writer.write_all(pw_bytes.as_bytes()) {
                                     tracing::error!("[remote-desktop] Failed to write password: {}", e);
                                 }
@@ -748,7 +754,13 @@ fn run_ssh_command_with_timeout(ssh: &SshConnectionInfo, command: &str, timeout_
                         if needs_password {
                             tracing::info!("[remote-desktop-setup] Detected password prompt, auto-filling...");
                             if let Some(ref pwd) = password {
-                                let pw_bytes = format!("{}\n", pwd);
+                                // CR, not LF: ConPTY will not submit a bare newline
+                                // (see `Pty::write_line`).
+                                let pw_bytes = if cfg!(target_os = "windows") {
+                                    format!("{}\r", pwd)
+                                } else {
+                                    format!("{}\n", pwd)
+                                };
                                 let _ = local_writer.write_all(pw_bytes.as_bytes());
                                 let _ = local_writer.flush();
                             }

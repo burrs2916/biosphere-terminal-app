@@ -667,6 +667,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             app_handle.manage(remote_desktop_service);
             app_handle.manage(sftp_service);
             app_handle.manage(licensing_service);
+            app_handle.manage(crate::interface::commands::connection::CredentialStash::default());
             let _ = write_debug_log_all(&debug_paths, "[setup] all services registered with app_handle");
 
             // Inspect the webview: log if main window exists and its URL.
@@ -781,6 +782,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::connection::test_connection,
             interface::commands::connection::get_rd_install_flavor,
             interface::commands::connection::set_rd_install_flavor,
+            interface::commands::connection::stash_sftp_credentials,
+            interface::commands::connection::take_stashed_credentials,
             interface::commands::notebook::list_notes,
             interface::commands::notebook::get_note,
             interface::commands::notebook::create_note,

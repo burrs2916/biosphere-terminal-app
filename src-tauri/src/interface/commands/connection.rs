@@ -3,9 +3,11 @@ use crate::core::types::{ConnectionConfig, SshConnectionInfo};
 use crate::infra::logging::debug_log;
 use crate::infra::storage::database::Database;
 use tauri::State;
-use std::sync::Arc;
-use std::net::TcpStream;
+use uuid::Uuid;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::net::TcpStream;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -137,6 +139,65 @@ pub async fn test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
     }
 }
 
+/// 密码模式：ssh 非零退出时，按「是否见过密码提示 + 会话记录」归类精准文案，
+/// 避免把「密码错」和「主机不可达」混成一句误导性的「主机不可达」。
+///
+/// - 见过密码提示（且已喂）→ 失败发生在认证层：区分 `Permission denied`
+///   （密码错 / 账户禁止密码登录）与其余（账户锁定、PAM 拒绝等）。
+/// - 从未见过密码提示 → 失败发生在认证之前（主机不可达 / 端口未监听 /
+///   防火墙拦截 / DNS 解析失败），此时绝不说是「密码不正确」。
+fn classify_password_auth_failure(ssh: &SshConnectionInfo, saw_prompt: bool, diag: &str) -> String {
+    if saw_prompt {
+        if diag.contains("Permission denied") {
+            format!(
+                "✗ SSH 密码认证失败（密码不正确，或该账户被禁止密码登录）：{}@{}:{}",
+                ssh.username, ssh.host, ssh.port
+            )
+        } else {
+            format!(
+                "✗ SSH 密码认证失败（服务器拒绝该凭证）：{}@{}:{}",
+                ssh.username, ssh.host, ssh.port
+            )
+        }
+    } else {
+        format!(
+            "✗ SSH 连接失败（主机不可达、端口未监听，或被防火墙拦截）：{}@{}:{}",
+            ssh.username, ssh.host, ssh.port
+        )
+    }
+}
+
+/// 密钥模式：ssh 非零退出时，按 stderr 归类精准文案。OpenSSH 关键错误为英文固定串
+/// （与客户端 locale 无关，且本路径已固定 `LC_MESSAGES=C`），故直接子串匹配；
+/// 命中失败则回退到「密钥不正确、主机不可达或被拒绝」通用文案（与旧行为一致，不退化）。
+fn classify_key_auth_failure(ssh: &SshConnectionInfo, stderr: &str) -> String {
+    if stderr.contains("Permission denied") {
+        format!(
+            "✗ SSH 密钥认证失败（密钥不正确，或该账户不允许密钥登录）：{}@{}:{}",
+            ssh.username, ssh.host, ssh.port
+        )
+    } else if stderr.contains("Connection refused")
+        || stderr.contains("Connection timed out")
+        || stderr.contains("No route to host")
+        || stderr.contains("Connection closed")
+    {
+        format!(
+            "✗ SSH 连接失败（主机不可达、端口未监听，或被防火墙拦截）：{}@{}:{}",
+            ssh.username, ssh.host, ssh.port
+        )
+    } else if stderr.starts_with("进程") || stderr.starts_with("连接") {
+        format!(
+            "✗ SSH 密钥认证失败（无法启动 SSH 或握手超时）：{}@{}:{}",
+            ssh.username, ssh.host, ssh.port
+        )
+    } else {
+        format!(
+            "✗ SSH 密钥认证失败（密钥不正确、主机不可达或被拒绝）：{}@{}:{}",
+            ssh.username, ssh.host, ssh.port
+        )
+    }
+}
+
 fn run_test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
     tracing::info!(
         "[TEST-CONN] run_test_connection ENTER auth_method={:?}",
@@ -181,15 +242,20 @@ fn run_test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
             &format!("ssh_bin={}", ssh_bin),
         );
         return match run_command_with_timeout(&ssh_bin, &args, Duration::from_secs(8)) {
-            Ok(true) => Ok(format!(
+            Ok(()) => Ok(format!(
                 "✓ SSH 密钥认证成功：{}@{}:{}",
                 ssh.username, ssh.host, ssh.port
             )),
-            Ok(false) => Err(format!(
-                "✗ SSH 认证失败（密钥不正确、主机不可达或被拒绝）{}@{}:{}",
-                ssh.username, ssh.host, ssh.port
-            )),
-            Err(e) => Err(e),
+            Err(e) => {
+                let msg = classify_key_auth_failure(&ssh, &e);
+                debug_log::term(
+                    "ERROR",
+                    "conn",
+                    "key-mode-auth-failed",
+                    &format!("stderr_or_err={} msg={}", e, msg),
+                );
+                Err(msg)
+            }
         };
     }
 
@@ -209,8 +275,10 @@ fn run_test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
                     "✓ SSH 密码认证成功：{}@{}:{}",
                     ssh.username, ssh.host, ssh.port
                 )),
+                // 防御性分支：test_ssh_password 在失败时一律返回 Err（精准文案），
+                // 此分支理论上不可达；保留以免 match 遗漏。
                 Ok(false) => Err(format!(
-                    "✗ SSH 密码认证失败（密码不正确或主机不可达）{}@{}:{}",
+                    "✗ SSH 密码认证失败（服务器拒绝该凭证）：{}@{}:{}",
                     ssh.username, ssh.host, ssh.port
                 )),
                 Err(e) => Err(e),
@@ -363,7 +431,16 @@ fn test_ssh_password(
                     };
                     match action {
                         AuthAction::FeedPassword => {
-                            let bytes = format!("{}\n", pw_owned).into_bytes();
+                            // CR, not LF: ConPTY will not submit a bare newline
+                            // (see `Pty::write_line`). Writing only `\n` leaves
+                            // the password sitting in the input buffer, the
+                            // client keeps waiting, and the session dies as a
+                            // bogus "连接超时".
+                            let bytes = if cfg!(target_os = "windows") {
+                                format!("{}\r", pw_owned).into_bytes()
+                            } else {
+                                format!("{}\n", pw_owned).into_bytes()
+                            };
                             if let Ok(mut w) = writer.lock() {
                                 let _ = w.write_all(&bytes);
                                 let _ = w.flush();
@@ -460,13 +537,20 @@ fn test_ssh_password(
             }
             Ok(Some(code)) => {
                 tracing::info!("[TEST-CONN] test_ssh_password: auth FAILED (exit {})", code);
+                // 非零退出：按是否见过密码提示 + 会话记录归类，杜绝把
+                // 「密码错」与「主机不可达」混成一句误导性的「主机不可达」。
+                let (saw_prompt, diag) = responder
+                    .lock()
+                    .map(|r| (r.password_prompt_seen(), r.diag()))
+                    .unwrap_or((false, String::new()));
+                let msg = classify_password_auth_failure(ssh, saw_prompt, &diag);
                 debug_log::term(
-                    "DEBUG",
+                    "ERROR",
                     "conn",
-                    "auth-exit",
-                    &format!("code={} diag={}", code, diag_snapshot()),
+                    "auth-failed",
+                    &format!("code={} saw_prompt={} msg={}", code, saw_prompt, msg),
                 );
-                result = Ok(false);
+                result = Err(msg);
                 break;
             }
             Ok(None) => {
@@ -531,12 +615,17 @@ fn test_ssh_password(
     result
 }
 
-/// 带超时的命令执行：成功返回退出码是否为 0
+/// 带超时的命令执行（密钥模式测试用）：成功返回 `Ok(())`；失败返回 `Err(原因)`，
+/// 原因取 ssh 的 stderr（已 trim，空则给通用文案），便于上层把「密钥错」与
+/// 「主机不可达」区分开。
+///
+/// 仅密钥模式测试路径使用；固定 `LC_MESSAGES=C` 使 OpenSSH 关键错误稳定为英文，
+/// 保证上层子串匹配生效（与 pty 路径的 locale 处理一致）。
 fn run_command_with_timeout(
     bin: &str,
     args: &[String],
     timeout: Duration,
-) -> std::result::Result<bool, String> {
+) -> std::result::Result<(), String> {
     tracing::info!(
         "[TEST-CONN] run_command_with_timeout: spawning {} with {} args, timeout={:?}",
         bin,
@@ -545,8 +634,10 @@ fn run_command_with_timeout(
     );
     let mut child = Command::new(bin)
         .args(args)
+        .env("LC_MESSAGES", "C")
+        .env("LC_ALL", "")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .stdin(Stdio::null())
         .spawn()
         .map_err(|e| format!("无法启动进程 {}: {}", bin, e))?;
@@ -557,32 +648,55 @@ fn run_command_with_timeout(
         &format!("bin={} timeoutMs=8000", bin),
     );
 
+    // 在等待线程内一并收集 stderr，供上层归类失败根因。
+    let stderr_pipe = child.stderr.take();
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let _ = tx.send(child.wait());
+        let status = child.wait();
+        let mut s = String::new();
+        if let Some(mut e) = stderr_pipe {
+            let _ = e.read_to_string(&mut s);
+        }
+        let _ = tx.send((status, s));
     });
 
     match rx.recv_timeout(timeout) {
-        Ok(Ok(status)) => {
-            tracing::info!(
-                "[TEST-CONN] run_command_with_timeout: {} exited success={}",
-                bin,
-                status.success()
-            );
-            debug_log::term(
-                "DEBUG",
-                "conn",
-                "key-mode-exited",
-                &format!("bin={} success={}", bin, status.success()),
-            );
-            Ok(status.success())
+        Ok((Ok(status), stderr)) => {
+            if status.success() {
+                tracing::info!(
+                    "[TEST-CONN] run_command_with_timeout: {} exited success",
+                    bin
+                );
+                debug_log::term(
+                    "DEBUG",
+                    "conn",
+                    "key-mode-exited",
+                    &format!("bin={} success=true", bin),
+                );
+                Ok(())
+            } else {
+                tracing::warn!(
+                    "[TEST-CONN] run_command_with_timeout: {} exited non-zero",
+                    bin
+                );
+                let stderr = stderr.trim().to_string();
+                // 非零退出：把 stderr 透传给调用方归类（不在此处下结论）。
+                Err(if stderr.is_empty() {
+                    format!("密钥认证失败（{} 非零退出，无错误输出）", bin)
+                } else {
+                    stderr
+                })
+            }
         }
-        Ok(Err(e)) => {
+        Ok((Err(e), _)) => {
             tracing::warn!("[TEST-CONN] run_command_with_timeout: {} error: {}", bin, e);
             Err(format!("进程 {} 错误: {}", bin, e))
         }
         Err(_) => {
-            tracing::warn!("[TEST-CONN] run_command_with_timeout: {} TIMEOUT after {:?}", bin, timeout);
+            tracing::warn!(
+                "[TEST-CONN] run_command_with_timeout: {} TIMEOUT after {:?}",
+                bin, timeout
+            );
             Err(format!("连接 {} 超时（握手/认证过慢）", bin))
         }
     }
@@ -635,5 +749,173 @@ fn tcp_only_test(ssh: &SshConnectionInfo) -> Result<String, String> {
                 ssh.host, ssh.port
             ))
         }
+    }
+}
+
+/// 一次性凭据暂存：打开 SFTP / 远程桌面子窗口时，前端把含密码/密钥的
+/// `SshConnectionInfo` 暂存于此（按随机 token 索引），URL 里只传 token，
+/// 不再把明文密码写进 URL query（避免进 devtools / 浏览器历史 / 潜在日志）。
+///
+/// 子窗口用 token 一次性取回后即删除；并带 5 分钟 TTL 兜底清理（防止异常路径下
+/// 残留）。token 是一次性随机数，即便被截获也仅在被合法窗口消费前短暂可用。
+///
+/// 安全约定：本结构内的密码绝不写入任何日志（见 crate 级「密码绝不入日志」铁律）。
+pub struct CredentialStash {
+    inner: Mutex<HashMap<String, (SshConnectionInfo, Instant)>>,
+}
+
+impl Default for CredentialStash {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl CredentialStash {
+    /// 暂存凭据并返回一次性 token。
+    fn stash(&self, ssh: SshConnectionInfo) -> String {
+        let token = Uuid::new_v4().to_string();
+        self.inner
+            .lock()
+            .expect("credential stash poisoned")
+            .insert(token.clone(), (ssh, Instant::now()));
+        token
+    }
+
+    /// 一次性取回凭据：取回后即从暂存中删除；不存在（已消费 / 不存在 / 已过期）返回 None。
+    fn take(&self, token: &str) -> Option<SshConnectionInfo> {
+        let mut g = self.inner.lock().expect("credential stash poisoned");
+        let now = Instant::now();
+        g.retain(|_, (_, t)| now.duration_since(*t) < Duration::from_secs(300));
+        g.remove(token).map(|(s, _)| s)
+    }
+}
+
+/// 把前端传来的含密码/密钥的 SSH 凭据暂存到进程内，返回一次性 token。
+/// 调用方（打开子窗口）应只把 token 写进 URL，绝不写密码。
+#[tauri::command]
+pub fn stash_sftp_credentials(
+    ssh: SshConnectionInfo,
+    stash: State<'_, CredentialStash>,
+) -> Result<String, String> {
+    Ok(stash.stash(ssh))
+}
+
+/// 子窗口凭一次性 token 取回完整 SSH 凭据。取回即销毁；token 无效 / 已过期返回明确错误。
+#[tauri::command]
+pub fn take_stashed_credentials(
+    token: String,
+    stash: State<'_, CredentialStash>,
+) -> Result<SshConnectionInfo, String> {
+    stash.take(&token).ok_or_else(|| {
+        "凭据已失效或不存在，请重新打开文件传输 / 远程桌面窗口".to_string()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn sample_ssh() -> SshConnectionInfo {
+        SshConnectionInfo {
+            host: "10.0.0.5".to_string(),
+            port: 22,
+            username: "ubuntu".to_string(),
+            auth_method: "password".to_string(),
+            private_key_path: None,
+            password: None,
+        }
+    }
+
+    // --- 密码模式：绝不把「密码错」说成「主机不可达」 ---
+
+    #[test]
+    fn password_wrong_password_is_not_host_unreachable() {
+        let msg = classify_password_auth_failure(
+            &sample_ssh(),
+            true,
+            "Permission denied, please try again.",
+        );
+        assert!(msg.contains("密码不正确"), "msg={}", msg);
+        assert!(!msg.contains("主机不可达"), "msg={}", msg);
+    }
+
+    #[test]
+    fn password_auth_rejected_without_permission_denied() {
+        let msg = classify_password_auth_failure(
+            &sample_ssh(),
+            true,
+            "Account locked due to 3 failed logins.",
+        );
+        assert!(msg.contains("服务器拒绝该凭证"), "msg={}", msg);
+        assert!(!msg.contains("主机不可达"), "msg={}", msg);
+    }
+
+    #[test]
+    fn password_no_prompt_means_connection_level_failure() {
+        let msg = classify_password_auth_failure(&sample_ssh(), false, "ssh: connect to host ... Connection refused");
+        assert!(msg.contains("连接失败（主机不可达"), "msg={}", msg);
+        assert!(!msg.contains("密码不正确"), "msg={}", msg);
+    }
+
+    // --- 密钥模式：同样区分「密钥错」与「主机不可达」 ---
+
+    #[test]
+    fn key_wrong_key_is_not_host_unreachable() {
+        let msg = classify_key_auth_failure(
+            &sample_ssh(),
+            "Permission denied (publickey,password).",
+        );
+        assert!(msg.contains("密钥不正确"), "msg={}", msg);
+        assert!(!msg.contains("主机不可达"), "msg={}", msg);
+    }
+
+    #[test]
+    fn key_connection_refused_is_host_unreachable() {
+        let msg = classify_key_auth_failure(
+            &sample_ssh(),
+            "ssh: connect to host 10.0.0.5 port 22: Connection refused",
+        );
+        assert!(msg.contains("连接失败（主机不可达"), "msg={}", msg);
+    }
+
+    #[test]
+    fn key_connection_timed_out_is_host_unreachable() {
+        let msg = classify_key_auth_failure(&sample_ssh(), "Connection timed out");
+        assert!(msg.contains("连接失败（主机不可达"), "msg={}", msg);
+    }
+
+    #[test]
+    fn key_unknown_stderr_falls_back_to_generic() {
+        let msg = classify_key_auth_failure(&sample_ssh(), "some opaque libssh error");
+        assert!(msg.contains("密钥不正确、主机不可达或被拒绝"), "msg={}", msg);
+    }
+
+    // --- 一次性凭据暂存：token 单次可用、二次失效、未知 token 返回 None ---
+
+    #[test]
+    fn credential_stash_is_single_use_and_rejects_unknown_token() {
+        let stash = CredentialStash::default();
+        let ssh = SshConnectionInfo {
+            host: "10.0.0.9".to_string(),
+            port: 22,
+            username: "u".to_string(),
+            auth_method: "password".to_string(),
+            private_key_path: None,
+            password: Some("secret".to_string()),
+        };
+        let token = stash.stash(ssh);
+        let got = stash
+            .take(&token)
+            .expect("first take must return the stashed credentials");
+        assert_eq!(got.password.as_deref(), Some("secret"));
+
+        // 取回后销毁：二次取回必须失败。
+        assert!(
+            stash.take(&token).is_none(),
+            "token must be single-use"
+        );
+        // 未知 token 必须返回 None（上层据此报「凭据已失效」）。
+        assert!(stash.take("does-not-exist").is_none());
     }
 }

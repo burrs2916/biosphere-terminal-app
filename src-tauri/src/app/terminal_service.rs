@@ -257,7 +257,13 @@ impl TerminalService {
                                 match responder.push(&output) {
                                     AuthAction::FeedPassword => {
                                         if let Some(ref pwd) = password {
-                                            let pw_bytes = format!("{}\n", pwd);
+                                            // CR, not LF: ConPTY will not submit a
+                                            // bare newline (see `Pty::write_line`).
+                                            let pw_bytes = if cfg!(target_os = "windows") {
+                                                format!("{}\r", pwd)
+                                            } else {
+                                                format!("{}\n", pwd)
+                                            };
                                             if let Ok(mut w) = writer.lock() {
                                                 let _ = w.write_all(pw_bytes.as_bytes());
                                                 let _ = w.flush();

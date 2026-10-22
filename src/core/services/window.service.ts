@@ -1,4 +1,6 @@
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { invoke } from '@tauri-apps/api/core';
+import { localizeBackendError } from '../backendError';
 
 const openWindows = new Map<string, WebviewWindow>();
 
@@ -51,6 +53,35 @@ interface SshWindowParams {
   password?: string;
   /** 来源连接的 id，用于把安装档位等偏好持久化到该连接。 */
   connectionId?: string;
+  /**
+   * 一次性凭据 token：密码/密钥已由 Rust 侧暂存，子窗口凭 token 取回。
+   * 由 `stashSshCredentials` 填充，调用方不要手工设置。
+   */
+  token?: string;
+}
+
+/** 把前端窗口参数转成后端 `SshConnectionInfo`（snake_case），用于凭据暂存。 */
+function toRustSsh(p: SshWindowParams) {
+  return {
+    host: p.host,
+    port: p.port ?? 22,
+    username: p.username,
+    auth_method: p.authMethod,
+    private_key_path: p.authMethod === 'private_key' ? (p.privateKeyPath ?? null) : null,
+    password: p.authMethod === 'password' ? (p.password ?? null) : null,
+  };
+}
+
+/**
+ * 打开子窗口前，把含密码/密钥的凭据暂存到 Rust 侧（内存，一次性取回 + 5 分钟 TTL），
+ * 返回一次性 token。URL 只传 token，绝不传密码 —— 这是「密码绝不进 URL」铁律的实现点。
+ *
+ * 无凭据（authMethod=none / 临时预填）时返回 undefined，子窗口按无凭据处理；
+ * 暂存失败时抛出（调用方应中止开窗，而不是打开一个注定认证失败的窗口）。
+ */
+async function stashSshCredentials(sshParams: SshWindowParams): Promise<string | undefined> {
+  if (!sshParams.password && !sshParams.privateKeyPath) return undefined;
+  return invoke<string>('stash_sftp_credentials', { ssh: toRustSsh(sshParams) });
 }
 
 /**
@@ -93,9 +124,11 @@ function buildSshUrl(path: string, sshParams?: SshWindowParams): string {
   if (sshParams.port) params.set('port', String(sshParams.port));
   params.set('username', sshParams.username);
   params.set('authMethod', sshParams.authMethod);
-  if (sshParams.privateKeyPath) params.set('privateKeyPath', sshParams.privateKeyPath);
-  if (sshParams.password) params.set('password', sshParams.password);
   if (sshParams.connectionId) params.set('connectionId', sshParams.connectionId);
+  // 安全铁律：密码/密钥路径绝不进 URL（devtools / 历史 / 潜在日志都会留痕）。
+  // 凭据已由 stashSshCredentials 暂存到 Rust 侧，这里只传一次性 token，
+  // 子窗口凭 token 调 take_stashed_credentials 一次性取回。
+  if (sshParams.token) params.set('token', sshParams.token);
   return `/#/${path}?${params.toString()}`;
 }
 
@@ -108,8 +141,20 @@ export async function openRemoteDesktopWindow(
   const existing = await reuseOrRecreate(key);
   if (existing) return existing;
 
+  // 凭据先暂存到 Rust 侧拿一次性 token，URL 不携带密码/密钥；暂存失败则不开窗。
+  let token: string | undefined;
+  if (sshParams) {
+    try {
+      token = await stashSshCredentials(sshParams);
+    } catch (e) {
+      console.error('[window] failed to stash ssh credentials:', e);
+      onError?.(localizeBackendError(e));
+      return null;
+    }
+  }
+
   const webview = new WebviewWindow(key, {
-    url: buildSshUrl('remote-desktop', sshParams),
+    url: buildSshUrl('remote-desktop', sshParams ? { ...sshParams, token } : undefined),
     title: 'Remote Desktop',
     width: 1200,
     height: 800,
@@ -146,8 +191,20 @@ export async function openSftpWindow(
   const existing = await reuseOrRecreate(key);
   if (existing) return existing;
 
+  // 凭据先暂存到 Rust 侧拿一次性 token，URL 不携带密码/密钥；暂存失败则不开窗。
+  let token: string | undefined;
+  if (sshParams) {
+    try {
+      token = await stashSshCredentials(sshParams);
+    } catch (e) {
+      console.error('[window] failed to stash ssh credentials:', e);
+      onError?.(localizeBackendError(e));
+      return null;
+    }
+  }
+
   const webview = new WebviewWindow(key, {
-    url: buildSshUrl('sftp', sshParams),
+    url: buildSshUrl('sftp', sshParams ? { ...sshParams, token } : undefined),
     title: 'SFTP File Transfer',
     width: 900,
     height: 650,

@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import TextField from '@mui/material/TextField';
@@ -64,6 +65,8 @@ export function RemoteDesktopPage() {
   const keyPathParam = searchParams.get('privateKeyPath') || '';
   const passwordParam = searchParams.get('password') || '';
   const modeParam = searchParams.get('mode') || '';
+  // 安全铁律：密码/密钥不进 URL，URL 只带一次性 token，凭据从 Rust 侧 CredentialStash 取回。
+  const token = searchParams.get('token') || '';
 
   const [step, setStep] = useState<Step>('config');
   const [mode, setMode] = useState<Mode>((modeParam || 'vnc') as Mode);
@@ -99,6 +102,37 @@ export function RemoteDesktopPage() {
   // 暂存待 spawn 的终端配置：spawnTerminal 延迟到 TerminalEmulator 的 onReady
   // 之后执行，确保监听器先注册，避免首屏输出竞态丢失（与 TerminalPage 同一修复）。
   const pendingSpawnRef = useRef<Record<string, PtyConfig>>({});
+
+  // 一次性 token 取回完整凭据（URL 不含密码/密钥）。取回前渲染 loading，
+  // 防止页面在凭据未就绪时用空密码发起连接。
+  const [credsReady, setCredsReady] = useState(!token);
+  const [credError, setCredError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!token) {
+      setCredsReady(true);
+      return;
+    }
+    let cancelled = false;
+    invoke<SshConnectionInfo>('take_stashed_credentials', { token })
+      .then((s) => {
+        if (cancelled) return;
+        setHost(s.host);
+        setPort(String(s.port));
+        setUsername(s.username);
+        setAuthMethod(s.auth_method);
+        setPrivateKeyPath(s.auth_method === 'private_key' ? (s.private_key_path ?? '') : '');
+        setPassword(s.auth_method === 'password' ? (s.password ?? '') : '');
+        setCredsReady(true);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setCredError(localizeBackendError(e));
+        setCredsReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   const bgColor = isDark ? '#0d1117' : '#f5f5f5';
   const cardBg = isDark ? '#161B22' : '#ffffff';
@@ -348,6 +382,23 @@ export function RemoteDesktopPage() {
   const featureGate = useFeatureGate('remote_desktop');
   if (!featureGate.canUse) {
     return <LockedScreen feature="remote_desktop" />;
+  }
+
+  // 凭据未取回（一次性 token 消费中）/ 取回失败：不渲染配置界面，
+  // 防止用空密码发起连接或展示半初始化表单。
+  if (!credsReady) {
+    return (
+      <Box sx={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: bgColor }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+  if (credError) {
+    return (
+      <Box sx={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: bgColor }}>
+        <Typography color="error">{credError}</Typography>
+      </Box>
+    );
   }
 
   if (step === 'viewer') {

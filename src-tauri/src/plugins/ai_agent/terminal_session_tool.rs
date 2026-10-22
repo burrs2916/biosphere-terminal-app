@@ -86,7 +86,14 @@ impl TerminalSessionTool {
             }
         }
 
-        let data = format!("{}\n", command);
+        // CR, not LF: ConPTY will not submit a bare newline, so a command sent
+        // to a Windows terminal would sit in the input buffer unexecuted
+        // (see `Pty::write_line`).
+        let data = if cfg!(target_os = "windows") {
+            format!("{}\r", command)
+        } else {
+            format!("{}\n", command)
+        };
         self.terminal.write(session_id, data.as_bytes())
             .map_err(|e| format!("Failed to write to session: {}", e))?;
 

@@ -410,6 +410,26 @@ impl Pty {
             .map_err(|e| crate::core::error::Error::Terminal(format!("write failed: {}", e)))
     }
 
+    /// Write one logical line to the pty and commit it.
+    ///
+    /// The terminator is platform-correct on purpose. ConPTY does **not**
+    /// translate a bare LF into Enter: conhost's Enter is CR, and a written
+    /// `\n` arrives at the child as Ctrl+Enter (a VK_RETURN record carrying
+    /// the CTRL modifier), which OpenSSH's `read_passphrase` and the sftp
+    /// command reader do not treat as "the user pressed Enter". The line then
+    /// sits in the input buffer unsubmitted and the child waits forever —
+    /// which is the "command phase sat silent for the full idle limit"
+    /// symptom. Windows therefore needs CR (CRLF is also accepted; the CR is
+    /// what commits, the LF is ignored).
+    pub fn write_line(&self, text: &str) -> Result<usize> {
+        let line = if cfg!(target_os = "windows") {
+            format!("{}\r", text)
+        } else {
+            format!("{}\n", text)
+        };
+        self.write(line.as_bytes())
+    }
+
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         let master = self.master.lock().unwrap();
         master

@@ -1471,11 +1471,14 @@ impl SftpService {
                                         "sftp-prompt-detected",
                                         "password prompt matched, feeding password",
                                     );
-                                    let _ = pty
-                                        .write(format!("{}\n", password).as_bytes());
+                                    // CR, not LF: ConPTY will not submit a bare
+                                    // newline (see `Pty::write_line`).
+                                    let _ = pty.write_line(&password);
                                 }
                                 AuthAction::AnswerHostKeyYes => {
-                                    let _ = pty.write(b"yes\n");
+                                    // CR, not LF: same ConPTY submission rule as
+                                    // the password above.
+                                    let _ = pty.write_line("yes");
                                 }
                                 AuthAction::Unsatisfiable(msg) => {
                                     let _ = pty.kill();
@@ -1540,7 +1543,7 @@ impl SftpService {
             // loop below; the write unblocks when the child reads or dies.
             let writer = thread::spawn(move || {
                 for cmd in &lines {
-                    if writer_pty.write(format!("{}\n", cmd).as_bytes()).is_err() {
+                    if writer_pty.write_line(cmd).is_err() {
                         return;
                     }
                 }
@@ -1652,25 +1655,10 @@ impl SftpService {
 
             // The client does not abort on a failed command when reading from
             // stdin (no `-b` semantics), so command-level errors are
-            // recognised from the transcript — the same scan the old
-            // per-command pumps ran, now over the whole batch. A leading `-`
-            // marks a command whose failure must not fail the batch (the
-            // listing probe); its output is the tail of the transcript, so
-            // everything from the echo of the first tolerant command on
-            // is exempt from the scan (`find`, not `rfind`: the probe's own
-            // error text repeats the command, and the echo always comes
-            // first). If the echo cannot be located, the whole transcript is
-            // scanned (conservative: a false failure costs a fallback round
-            // trip, never a wrong result).
-            let scan_upto = batch
-                .iter()
-                .position(|c| c.trim_start().starts_with('-'))
-                .and_then(|i| {
-                    let cmd = batch[i].trim_start();
-                    collected.find(cmd)
-                })
-                .unwrap_or(collected.len());
-            if let Some(err) = interactive_error(&collected[..scan_upto], "") {
+            // recognised from the transcript. `scan_batch_errors` owns the
+            // exemptions (tolerant probe output, command echoes, prompt
+            // prefixes); see its doc comment.
+            if let Some(err) = scan_batch_errors(&collected, batch) {
                 return Err(err);
             }
             if code == 0 {
@@ -1736,7 +1724,13 @@ impl SftpService {
                         }
                         match responder.push(&chunk) {
                             AuthAction::FeedPassword => {
-                                let bytes = format!("{}\n", password).into_bytes();
+                                // CR, not LF: ConPTY will not submit a bare
+                                // newline (see `Pty::write_line`).
+                                let bytes = if cfg!(target_os = "windows") {
+                                    format!("{}\r", password).into_bytes()
+                                } else {
+                                    format!("{}\n", password).into_bytes()
+                                };
                                 if let Ok(mut w) = writer.lock() {
                                     let _ = w.write_all(&bytes);
                                     let _ = w.flush();
@@ -1852,8 +1846,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// `Permission denied` cannot fake a failure.
 fn interactive_error(output: &str, cmd: &str) -> Option<String> {
     for raw in output.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line == cmd || line.starts_with("sftp>") {
+        // ConPTY repaints can put the prompt in front of any row — error rows
+        // included (`sftp> Couldn't canonicalize: ...`). Strip it before
+        // matching so a prefixed failure is still recognised; a bare prompt
+        // strips to empty and is skipped below.
+        let line = strip_prompt_prefix(raw.trim()).trim();
+        if line.is_empty() || line == cmd {
             continue;
         }
         if let Some(first) = line.split_whitespace().next() {
@@ -1879,6 +1877,50 @@ fn interactive_error(output: &str, cmd: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Scan a one-shot batch transcript for command-level failures.
+///
+/// The client does not abort on a failed command when reading from stdin
+/// (no `-b` semantics), so errors are recognised from the transcript — the
+/// same scan the old per-command pumps ran, now over the whole batch. Two
+/// properties of the one-shot lane shape it:
+///
+/// - Every command echo lands in one block **ahead of** every output line
+///   (the whole batch is written in a single pass). The position-based
+///   exemption the per-command pumps used — "from the tolerant command's
+///   echo onward" — therefore covers the *entire* output block and would
+///   silently disable detection. (On the Unix `-b` lane there are no echoes
+///   at all, so that cut never applied there either — the probe's own error
+///   used to be scanned as a real failure.) Exemption is by content
+///   instead: a line is dropped when it is a batch command's echo, or when
+///   it quotes a tolerant (`-`-prefixed) command. Only the probe's own
+///   error text repeats the command (`Can't ls: "-ls -1 {,.}*/" not
+///   found`), and nothing else does.
+/// - ConPTY can put the `sftp> ` prompt in front of any row, so prefixes
+///   are stripped first (a bare prompt strips to empty).
+fn scan_batch_errors(collected: &str, batch: &[String]) -> Option<String> {
+    let tolerant: Vec<&str> = batch
+        .iter()
+        .map(|c| c.trim_start())
+        .filter(|c| c.starts_with('-'))
+        .collect();
+    let mut kept = String::with_capacity(collected.len());
+    for raw in collected.lines() {
+        let line = strip_prompt_prefix(raw.trim()).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if batch.iter().any(|c| c.trim() == line) {
+            continue; // this command's echo
+        }
+        if tolerant.iter().any(|t| line.contains(t)) {
+            continue; // the tolerant probe's own output or error text
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    interactive_error(&kept, "")
 }
 
 /// Commands that operate on relative paths need the session's cwd pinned to the
@@ -2220,9 +2262,20 @@ fn local_tree_totals(paths: &[String]) -> (u64, u32) {
 }
 
 fn parse_progress_line(line: &str) -> Option<(String, u8, String, String, String)> {
-    let trimmed = line.trim_end();
-    if trimmed.starts_with("sftp>") {
+    // Strip the prompt echo first: ConPTY can prefix a meter line, and
+    // skipping those loses every progress tick on Windows transfers. Two
+    // guards keep the looser matching honest — a listing row (perm token
+    // first) is never a meter, and command echoes always carry quoted
+    // arguments while meter lines never do, so a prefixed
+    // `put "100%.txt" "100%.txt"` cannot read as a meter line.
+    let trimmed = strip_prompt_prefix(line.trim_end()).trim_end();
+    if trimmed.is_empty() || trimmed.contains('"') {
         return None;
+    }
+    if let Some(first) = trimmed.split_whitespace().next() {
+        if is_perm_token(first) {
+            return None;
+        }
     }
     let pct_idx = trimmed.find('%')?;
     let head = &trimmed[..pct_idx];
@@ -2378,7 +2431,10 @@ const UPLOAD_VERIFY_CAP: usize = 20;
 /// 要么 mode 不以 `-` 开头。名字取第 9 列起的全部余项（空格折叠），
 /// 含空格的文件名由此保持可匹配。
 fn ls_line_size_name(line: &str) -> Option<(u64, String)> {
-    let t = line.trim_start();
+    // Strip the prompt echo (pty lane): rows arrive as
+    // `sftp> -rw-r--r-- 1 u g 4096 ... name`, and the size verification
+    // would otherwise silently skip every file on Windows.
+    let t = strip_prompt_prefix(line).trim_start();
     if !t.starts_with('-') {
         return None;
     }
@@ -2455,7 +2511,12 @@ fn perm_str_to_octal(perms: &str) -> Option<u32> {
 /// sftp 的 `ls -la` 会列出 `.`/`..`，`.` 的权限就是目录自身的权限。
 fn parse_dir_mode_from_ls(output: &str) -> Option<u32> {
     for raw in output.lines() {
-        let line = raw.trim();
+        // Same prompt-echo tolerance as `parse_ls`: on the pty lane the row
+        // arrives as `sftp> drwx------ ? u g 4096 ... .` and the first token
+        // would otherwise be the prompt, never the perm token — which is how
+        // the Windows auto-chmod fallback for permission-denied uploads
+        // silently died.
+        let line = strip_prompt_prefix(raw.trim()).trim();
         let mut toks = line.split_whitespace();
         let first = match toks.next() {
             Some(f) => f,
@@ -2489,8 +2550,11 @@ fn friendly_sftp_error(stderr: &str, stdout: &str) -> String {
     let raw = if stderr.trim().is_empty() { stdout } else { stderr };
     let line = raw
         .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty() && !l.starts_with("sftp>"))
+        // Strip the prompt echo first (pty lane): a prefixed listing row
+        // would otherwise pass the perm-token filter below and surface as
+        // the error text, while a real prefixed error would be dropped.
+        .map(|l| strip_prompt_prefix(l.trim()).trim())
+        .filter(|l| !l.is_empty())
         // 跳过 listing 行：以权限令牌开头的 ls 输出（drwx------ …）
         .filter(|l| {
             l.split_whitespace()
@@ -2823,8 +2887,11 @@ fn join_remote(base: &str, name: &str) -> String {
 fn parse_pwd(output: &str) -> Option<String> {
     for line in output.lines() {
         let l = line.trim();
-        if let Some(rest) = l.strip_prefix("Remote working directory:") {
-            let p = rest.trim();
+        // `contains` for the same reason as [`split_listing_sections`]: the
+        // interactive lane echoes the prompt, so the line reads
+        // `sftp> Remote working directory: /home/user`.
+        if let Some(idx) = l.find("Remote working directory:") {
+            let p = l[idx + "Remote working directory:".len()..].trim();
             if !p.is_empty() {
                 return Some(p.to_string());
             }
@@ -2934,7 +3001,13 @@ fn parse_ls(output: &str) -> Vec<SftpEntry> {
     let mut entries = Vec::new();
     for raw in output.lines() {
         let line = raw.trim_end_matches(['\r', '\n']);
-        let trimmed = line.trim_start();
+        // The interactive (pty) lane echoes the prompt in front of a result
+        // line whenever the client reprints it, so a real listing row can
+        // arrive as `sftp> drwxr-x--- ? user group 462 Jul 22 19:01 .`.
+        // Skipping the whole line drops that entry; stripping the prefix
+        // first keeps it and still discards a bare prompt.
+        let body = strip_prompt_prefix(line);
+        let trimmed = body.trim_start();
         if trimmed.is_empty()
             || trimmed.starts_with("sftp>")
             || trimmed.starts_with("Remote working directory:")
@@ -2946,13 +3019,27 @@ fn parse_ls(output: &str) -> Vec<SftpEntry> {
         {
             continue;
         }
-        if let Some(entry) = parse_ls_line(line) {
+        if let Some(entry) = parse_ls_line(body) {
             entries.push(entry);
         }
     }
     // 去重收口在唯一的数据入口，而不是散在各个调用点：新增列表路径
     // 不会因为忘了调用而复发重复。
     dedup_entries(entries)
+}
+
+/// Remove a leading `sftp> ` prompt echo, if present.
+///
+/// Only the prompt is stripped — the rest of the line is handed back
+/// untouched so a file literally named `sftp>` (impossible on POSIX, legal on
+/// some servers) still parses.
+fn strip_prompt_prefix(line: &str) -> &str {
+    let t = line.trim_start();
+    if let Some(rest) = t.strip_prefix("sftp>") {
+        rest.strip_prefix(' ').unwrap_or(rest)
+    } else {
+        line
+    }
 }
 
 /// 同一个远程目录下不可能存在同名条目（POSIX 文件系统根本不允许）。
@@ -2986,7 +3073,7 @@ fn parse_dir_markers(output: &str) -> HashSet<String> {
     for raw in output.lines() {
         // Only the line ending is stripped: a directory named "data " keeps
         // its trailing space, and the slash still terminates the row.
-        let line = raw.trim_end_matches(['\r', '\n']);
+        let line = strip_prompt_prefix(raw.trim_end_matches(['\r', '\n']));
         if !line.ends_with('/') || line.trim_start().starts_with("sftp>") {
             continue;
         }
@@ -3032,17 +3119,24 @@ fn apply_dir_markers(entries: &mut [SftpEntry], dir_targets: &HashSet<String>) {
     }
 }
 
-/**
- * Split a multi-directory `sftp -b` transcript into one string per requested
- * directory. The sftp client prints `Remote working directory: <path>` before
- * each `ls`, which is the only reliable per-section boundary — `ls` output has
- * no such marker and file names can contain almost anything except a leading
- * perm token.
- */
+/// Split a multi-directory `sftp -b` transcript into one string per requested
+/// directory. The sftp client prints `Remote working directory: <path>` before
+/// each `ls`, which is the only reliable per-section boundary — `ls` output has
+/// no such marker and file names can contain almost anything except a leading
+/// perm token.
+///
+/// The boundary is matched with `contains`, not `starts_with`: in the
+/// interactive (pty) lane the client echoes the prompt in front of every
+/// result line, so the real transcript reads
+/// `sftp> Remote working directory: /home/user`. A leading-prefix match never
+/// fires there, the whole transcript collapses into one section, and the
+/// batched `list_dirs` degrades to one reconnect per directory — on Windows
+/// that means one password handshake per node, which is why the tree stayed
+/// blank while the handshake itself kept succeeding.
 fn split_listing_sections(output: &str) -> Vec<String> {
     let mut sections: Vec<String> = vec![String::new()];
     for line in output.lines() {
-        if line.trim().starts_with("Remote working directory:") {
+        if line.contains("Remote working directory:") {
             sections.push(String::new());
         } else {
             let s = sections.last_mut().unwrap();
@@ -3522,6 +3616,16 @@ drwxr-xr-x ? ubuntu ubuntu 4096 Aug  5 09:00 .config\n";
         assert!(ls_line_size_name("100% 4096 0.0KB/s 00:00").is_none());
         // Non-numeric size column is skipped rather than panicking.
         assert!(ls_line_size_name("-rw-r--r-- 1 ? ubuntu ??? Aug  5 10:35 x").is_none());
+        // The pty lane prefixes listing rows with the prompt echo; the row
+        // must still parse or upload verification silently dies on Windows.
+        let (size, name) = ls_line_size_name("sftp> -rw-r--r-- 1 ubuntu ubuntu 4096 Aug  5 10:35 report.pdf")
+            .expect("prefixed file line must parse");
+        assert_eq!(size, 4096);
+        assert_eq!(name, "report.pdf");
+        // A prefixed *directory* row still must not parse.
+        assert!(ls_line_size_name("sftp> drwxr-xr-x 2 ubuntu ubuntu 4096 Aug  5 10:35 docs").is_none());
+        // A bare prompt strips to empty and must not parse either.
+        assert!(ls_line_size_name("sftp> ").is_none());
     }
 
     #[test]
@@ -3531,17 +3635,144 @@ Uploading a.txt to /home/ubuntu/a.txt\n\
 100% 12 0.0KB/s 00:00\n\
 sftp> ls -lan \"a.txt\"\n\
 -rw-r--r-- 1 ubuntu ubuntu 12 Aug  5 10:35 a.txt\n\
--rw-r--r-- 1 ubuntu ubuntu 4096 Aug  5 10:35 b.txt\n";
-        // Matching sizes pass.
+sftp> -rw-r--r-- 1 ubuntu ubuntu 4096 Aug  5 10:35 b.txt\n";
+        // Matching sizes pass — including the prompt-prefixed row the pty
+        // lane produces on Windows.
         assert!(verify_upload_sizes(out, &[("a.txt".into(), 12)]).is_ok());
         assert!(verify_upload_sizes(out, &[("b.txt".into(), 4096)]).is_ok());
-        // Truncated upload is caught.
+        // Truncated upload is caught through the prefix as well.
         let err = verify_upload_sizes(out, &[("b.txt".into(), 5000)])
             .expect_err("size mismatch must fail");
         assert!(err.contains("b.txt"));
         assert!(err.contains("5000"));
         // A file the transcript never mentions is skipped, not an error.
         assert!(verify_upload_sizes(out, &[("ghost.txt".into(), 1)]).is_ok());
+    }
+
+    /// The pty lane can put the prompt in front of any row, error rows
+    /// included. A prefixed failure must still be recognised (it used to be
+    /// skipped wholesale), and a bare prompt must not fabricate one.
+    #[test]
+    fn interactive_error_sees_through_the_prompt_prefix() {
+        let out = "sftp> cd /root\n\
+sftp> Couldn't canonicalize: No such file or directory\n\
+sftp> \n";
+        let msg = interactive_error(out, "").expect("prefixed failure must be flagged");
+        assert!(msg.contains("权限不足") || msg.contains("不存在"), "msg={}", msg);
+        // A bare prompt (strips to empty) is never an error.
+        assert!(interactive_error("sftp> \nsftp> \n", "").is_none());
+        // Listing rows wearing the prefix stay ignored.
+        let listing = "sftp> drwx------ ? ubuntu ubuntu 4096 Aug  5 10:35 .ssh\n";
+        assert!(interactive_error(listing, "").is_none());
+    }
+
+    /// Regression for the one-shot lane's transcript shape: every command
+    /// echo lands ahead of every output line, so the old "exempt from the
+    /// tolerant command's echo onward" cut covered the whole output block and
+    /// silently disabled command-error detection. Exemption is by content
+    /// now — and it must keep exempting the tolerant probe's own error text.
+    #[test]
+    fn scan_batch_errors_exempts_only_the_tolerant_probe() {
+        let batch = vec![
+            "cd /home/liwenchao".to_string(),
+            "pwd".to_string(),
+            "ls -lan".to_string(),
+            "-ls -1 {,.}*/".to_string(),
+            "bye".to_string(),
+        ];
+        // One-shot shape: echo block first, output block after, prompt
+        // prefixes anywhere. A real cd failure must be flagged…
+        let failed = [
+            "sftp> cd /home/liwenchao",
+            "sftp> pwd",
+            "sftp> ls -lan",
+            "sftp> -ls -1 {,.}*/",
+            "sftp> bye",
+            "sftp> Remote working directory: /home/liwenchao",
+            "sftp> drwxr-xr-x ? u u 4096 Aug  5 10:35 docs",
+            "sftp> Couldn't canonicalize: No such file or directory",
+            // …while the tolerant probe's own failure stays exempt.
+            "sftp> Can't ls: \"-ls -1 {,.}*/\" not found",
+            "sftp> ./",
+            "sftp> .cache/",
+        ]
+        .join("\n");
+        let msg = scan_batch_errors(&failed, &batch).expect("real failure must be flagged");
+        assert!(msg.contains("canonicalize") || msg.contains("不存在"), "msg={}", msg);
+
+        // Same transcript without the real failure: the probe error alone
+        // must NOT fail the batch (on the Unix `-b` lane there are no echoes
+        // at all, and this used to sink every listing).
+        let probe_only = [
+            "Remote working directory: /home/liwenchao",
+            "drwxr-xr-x ? u u 4096 Aug  5 10:35 docs",
+            "Can't ls: \"-ls -1 {,.}*/\" not found",
+            "./",
+            ".cache/",
+        ]
+        .join("\n");
+        assert!(scan_batch_errors(&probe_only, &batch).is_none());
+
+        // A bad `ls -lan` flag is NOT tolerant — it must be flagged so the
+        // listing can fall back to the longlong view.
+        let bad_flag = [
+            "sftp> ls -lan",
+            "Invalid flag -n",
+            "usage: ls [-1Safhlnrt] [path]",
+        ]
+        .join("\n");
+        let msg = scan_batch_errors(&bad_flag, &batch).expect("bad ls flag must be flagged");
+        assert!(mentions_bad_ls_flag(&msg), "msg={}", msg);
+
+        // Clean transcript: nothing flagged.
+        let clean = [
+            "sftp> cd /home/liwenchao",
+            "sftp> Remote working directory: /home/liwenchao",
+            "sftp> drwxr-xr-x ? u u 4096 Aug  5 10:35 docs",
+            "sftp> ./",
+            "sftp> .cache/",
+        ]
+        .join("\n");
+        assert!(scan_batch_errors(&clean, &batch).is_none());
+    }
+
+    /// Progress parsing runs over transfer transcripts, which on the pty lane
+    /// carry prompt prefixes. A prefixed meter line must parse; a prefixed
+    /// command echo whose filename contains `%` must not; a listing row with
+    /// a `%` in its name must not either.
+    #[test]
+    fn parse_progress_line_handles_prefixes_without_false_meters() {
+        let m = parse_progress_line("big.bin 42% 4404019 1.2MB/s 00:03")
+            .expect("plain meter line must parse");
+        assert_eq!(m.0, "big.bin");
+        assert_eq!(m.1, 42);
+        let m = parse_progress_line("sftp> big.bin 42% 4404019 1.2MB/s 00:03")
+            .expect("prefixed meter line must parse");
+        assert_eq!(m.0, "big.bin");
+        assert_eq!(m.1, 42);
+        // Command echo with a % in the filename: quotes give it away.
+        assert!(parse_progress_line("sftp> put \"100%.txt\" \"100%.txt\"").is_none());
+        assert!(parse_progress_line("put \"100%.txt\" \"100%.txt\"").is_none());
+        // Listing row whose name contains a percentage.
+        assert!(parse_progress_line("sftp> -rw-r--r-- 1 u u 10 Jan  1 00:00 100% done.txt").is_none());
+        assert!(parse_progress_line("-rw-r--r-- 1 u u 10 Jan  1 00:00 100% done.txt").is_none());
+        // Bare prompt.
+        assert!(parse_progress_line("sftp> ").is_none());
+    }
+
+    /// `ensure_dir_writable` reads the target directory's mode back through
+    /// the same lane the upload used — on Windows that means prompt-prefixed
+    /// rows, and the auto-chmod retry died on exactly that prefix.
+    #[test]
+    fn parse_dir_mode_from_ls_sees_through_the_prompt_prefix() {
+        let plain = "drwxr-xr-x 3 ubuntu ubuntu 4096 Aug  5 10:35 .\n\
+drwxr-xr-x 3 ubuntu ubuntu 4096 Aug  5 10:35 ..\n";
+        assert_eq!(parse_dir_mode_from_ls(plain), Some(0o755));
+        let prefixed = "sftp> drwxr-xr-x 3 ubuntu ubuntu 4096 Aug  5 10:35 .\n\
+sftp> drwxr-xr-x 3 ubuntu ubuntu 4096 Aug  5 10:35 ..\n";
+        assert_eq!(parse_dir_mode_from_ls(prefixed), Some(0o755));
+        // No `.` row at all is still None rather than a wrong mode.
+        assert!(parse_dir_mode_from_ls("sftp> drwxr-xr-x 3 u u 4096 Aug  5 10:35 docs\n").is_none());
     }
 
     #[test]
@@ -3793,6 +4024,10 @@ realdir/\n";
         assert!(!entries[1].target_is_dir);
     }
 
+
+
+
+
     #[test]
     fn split_listing_sections_carves_one_per_directory() {
         // Two `cd` sections, each preceded by the `pwd` echo. The leading junk
@@ -3821,6 +4056,80 @@ drwxr-xr-x    ? u wheel   64 Aug  5 00:00 ..
         assert!(!sections[1].contains("Remote working directory: /a"));
         assert!(!sections[1].contains("Remote working directory: /a/b"));
         assert!(!sections[2].contains("one.txt"));
+    }
+
+    /// Regression: the interactive (pty) lane echoes the prompt in front of
+    /// every result line, so the real transcript reads
+    /// `sftp> Remote working directory: /home/user`. A leading-prefix match
+    /// never fires there: the whole transcript collapsed into one section,
+    /// `list_dirs` fell back to one reconnect per directory (one password
+    /// handshake per node on Windows) and the tree stayed blank.
+    ///
+    /// Captured from a real session against a live host, not hand-written.
+    /// The lines are joined from a slice rather than written as one
+    /// backslash-continued literal: Rust eats the newline after `\`, so a
+    /// hand-indented fixture silently becomes a single line and tests nothing.
+    #[test]
+    fn split_listing_sections_survives_the_interactive_prompt_prefix() {
+        let lines = [
+            "liwenchao@192.168.139.84's password: ",
+            "Connected to 192.168.139.84.",
+            "sftp> cd /home/liwenchao",
+            "pwd",
+            "ls -lan",
+            "pwd",
+            "-ls -1 {,.}*/",
+            "bye",
+            "sftp> Remote working directory: /home/liwenchao",
+            "sftp> drwxr-x---    ? liwenchao liwenchao      462 Jul 22 19:01 .",
+            "drwxr-xr-x    ? root     root           18 Jan 14  2026 ..",
+            "-rw-r--r--    ? liwenchao liwenchao      220 Mar 31  2024 .bash_logout",
+            // A real entry wearing the prompt prefix: ConPTY repaints can put
+            // it on any row, and it must survive the strip.
+            "sftp> drwxr-xr-x    ? liwenchao liwenchao       10 Feb  4  2026 .local",
+            "sftp> Remote working directory: /home/liwenchao",
+            "sftp> ../",
+            "./",
+            ".cache/",
+            ".local/",
+            "sftp> ",
+        ];
+        let out = lines.join("\n");
+        let sections = split_listing_sections(&out);
+        assert_eq!(sections.len(), 3);
+        // The listing section must hold the `ls` rows, not the command echo.
+        assert!(sections[1].contains(".bash_logout"));
+        assert!(!sections[1].contains("cd /home/liwenchao"));
+        // The probe section must hold the symlink markers, not the listing.
+        assert!(sections[2].contains("./"));
+        assert!(!sections[2].contains(".bash_logout"));
+        // The prompt echo itself never lands in a section as a boundary.
+        assert!(!sections[1].contains("Remote working directory: /home/liwenchao"));
+
+        // `parse_pwd` must also look past the prompt prefix: falling back to
+        // the requested path silently hides the server's real cwd (e.g. `~`).
+        assert_eq!(
+            parse_pwd(&out).as_deref(),
+            Some("/home/liwenchao"),
+            "parse_pwd must resolve the real remote cwd through the prompt echo"
+        );
+
+        // And the listing itself must survive end to end. `.` and `..` are
+        // deliberately dropped by `parse_ls_line` (the UI never shows them),
+        // so only the real entry comes through — but it MUST come through,
+        // which it did not before the prompt prefix was stripped.
+        let entries = parse_ls(&sections[1]);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, ".bash_logout");
+        assert!(!entries[0].is_dir);
+        // The prefixed row is only reachable through `strip_prompt_prefix`.
+        assert_eq!(entries[1].name, ".local");
+        assert!(entries[1].is_dir);
+
+        // The probe section keeps its markers too.
+        let markers = parse_dir_markers(&sections[2]);
+        assert!(markers.contains(".cache"));
+        assert!(markers.contains(".local"));
     }
 
     #[test]

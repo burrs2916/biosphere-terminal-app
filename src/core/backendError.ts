@@ -38,10 +38,13 @@ const RULES: BackendErrorRule[] = [
   { re: /^无法连接到/, key: 'connection.connect_failed' },
   { re: /^端口 .* 可达，但未提供密码/, key: 'connection.tcp_no_sshpass' },
   // 测试连接：密钥 / 密码认证失败（返回 Err，英文 UI 会露中文）
-  // 注意：源码 connection.rs:107 实际文案为「✗ SSH 认证失败（密钥不正确…）」（密钥分支），
-  // 仅前缀「SSH 认证失败」稳定，故用宽松前缀匹配（不会误中「SSH 密码认证失败」）。
-  { re: /^✗ SSH 认证失败/, key: 'connection.ssh_key_auth_failed' },
+  // 密钥分支统一前缀「✗ SSH 密钥认证失败」；密码分支前缀「✗ SSH 密码认证失败」。
+  { re: /^✗ SSH 密钥认证失败/, key: 'connection.ssh_key_auth_failed' },
   { re: /^✗ SSH 密码认证失败/, key: 'connection.ssh_password_auth_failed' },
+  // 测试连接：认证前的连接级失败（主机不可达 / 端口未监听 / 防火墙拦截）。
+  // 密码模式（从未出现密码提示）与密钥模式（Connection refused/timed out）共用，
+  // 与「认证失败」严格区分，避免误导用户去改密码/密钥。
+  { re: /^✗ SSH 连接失败/, key: 'connection.ssh_connection_failed_preauth' },
   // 测试连接 / SFTP：服务器要求二次验证码（verification code）。
   // 两个来源的前缀不同（测试路径带「✗ 」、SFTP 路径带「SSH 连接建立失败：」），
   // 故不做行首锚定，匹配稳定正文即可。
