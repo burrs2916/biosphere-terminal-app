@@ -71,18 +71,6 @@ function readFavorites(): FavoriteDir[] {
   }
 }
 
-/**
- * True only when the local OpenSSH client is missing.
- *
- * Matching a bare /sftp/ would swallow every ordinary failure — the backend
- * prefixes those with "SFTP 操作失败" — and replace the file list with a
- * full-screen "please install OpenSSH" page.
- */
-export function isSftpMissingError(e: unknown): boolean {
-  const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : JSON.stringify(e);
-  return /无法定位 sftp 程序|SFTP client .{0,24}not found|OpenSSH\.Client/i.test(msg);
-}
-
 /** Why a connect/listing attempt failed, in terms a user can act on. */
 export type SftpErrorCategory = 'unreachable' | 'auth' | 'timeout' | 'hostkey' | 'unknown';
 /** Where the session is on its way from "window opened" to "browsing files". */
@@ -192,7 +180,6 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
   const [entries, setEntries] = useState<SftpEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sftpMissing, setSftpMissing] = useState(false);
   const [busy, setBusy] = useState(false);
   // Connection feedback: the window opens into "connecting" and only a
   // successful first listing promotes it to "ready". Without this the user
@@ -275,7 +262,6 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
       }
       setLoading(true);
       setError(null);
-      setSftpMissing(false);
       try {
         const res = await sftpList(sshRef.current, target);
         setEntries(res.entries);
@@ -291,8 +277,7 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
         return true;
       } catch (e) {
         const msg = localizeBackendError(e);
-        if (isSftpMissingError(e)) setSftpMissing(true);
-        else setError(msg);
+        setError(msg);
         const cat = classifySftpError(msg);
         setConnErrorCategory(cat);
         // A first-attempt failure is always a connection failure. Afterwards,
@@ -1270,7 +1255,6 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     loading,
     busy,
     error,
-    sftpMissing,
     connState,
     connErrorCategory,
     connectingSince,

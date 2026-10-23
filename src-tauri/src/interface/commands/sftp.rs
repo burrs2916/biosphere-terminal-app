@@ -5,19 +5,19 @@ use crate::core::types::SshConnectionInfo;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 
-/// Every SFTP command body does blocking I/O (pty round trips, file reads,
-/// child-process control), so it is dispatched through `spawn_blocking` on the
-/// dedicated blocking pool.
+/// Every SFTP command body performs blocking work (file I/O, waits on the
+/// native transport's std channel), so it is dispatched through
+/// `spawn_blocking` on the dedicated blocking pool.
 ///
 /// Why not `#[tauri::command(async)] pub fn`: that form keeps the body on a
-/// **tokio worker thread** for its whole duration. A stalled or slow handshake
-/// (10-25s over a flaky link) pins workers; when the directory tree fires a
-/// batch of `list_many`/`list` calls concurrently, the bounded worker pool
-/// saturates, tokio can no longer drive IPC dispatch or event delivery, and the
-/// whole app freezes (the "close button does not respond" symptom is the
-/// onCloseRequested event failing to be delivered). The blocking pool is
-/// separate from the async runtime and grows on demand, so a stuck sftp
-/// handshake can never stall the event loop again.
+/// **tokio worker thread** for its whole duration. A slow handshake or a
+/// stalled transfer (the sync API blocks on `NativeSftp::call`) pins workers;
+/// when the directory tree fires a batch of `list_many`/`list` calls
+/// concurrently, the bounded worker pool saturates, tokio can no longer drive
+/// IPC dispatch or event delivery, and the whole app freezes (the "close
+/// button does not respond" symptom is the onCloseRequested event failing to
+/// be delivered). The blocking pool is separate from the async runtime and
+/// grows on demand, so a stuck SFTP op can never stall the event loop again.
 
 fn progress_ctx(app: &AppHandle, transfer_id: Option<String>) -> Option<ProgressCtx> {
     let id = transfer_id?;
@@ -174,8 +174,8 @@ pub async fn sftp_cancel(
     Ok(service.cancel(&transfer_id))
 }
 
-/// Drop the pooled SSH multiplex masters for this connection. Called when the
-/// transfer window closes so no `ssh -M -N` process is left running.
+/// Drop the pooled native SSH session for this connection. Called when the
+/// transfer window closes so no half-open session outlives the UI.
 #[tauri::command]
 pub async fn sftp_disconnect(
     ssh: SshConnectionInfo,

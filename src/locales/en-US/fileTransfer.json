@@ -78,8 +78,6 @@
   "root": "Root",
   "search_placeholder": "Search files…",
   "select_all": "Select all",
-  "sftp_not_found_desc": "The OpenSSH sftp client is not installed on this machine, so file transfer is unavailable.\n\nWindows: Settings → Apps → Optional features → Add 'OpenSSH Client'.\nOr run as Administrator in PowerShell:\nAdd-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0\n\nmacOS / Linux: pre-installed; please ensure OpenSSH is present.",
-  "sftp_not_found_title": "SFTP client not found",
   "show_hidden": "Show hidden files",
   "show_tree": "Show directory tree",
   "size": "Size",

@@ -78,8 +78,6 @@
   "root": "根目录",
   "search_placeholder": "搜索文件…",
   "select_all": "全选",
-  "sftp_not_found_desc": "本机未安装 OpenSSH 的 sftp 客户端，无法进行文件传输。\n\nWindows：设置 → 应用 → 可选功能 → 添加“OpenSSH 客户端”。\n或管理员 PowerShell 运行：\nAdd-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0\n\nmacOS / Linux：系统已预装，请确认 OpenSSH 已安装。",
-  "sftp_not_found_title": "未找到 SFTP 客户端",
   "show_hidden": "显示隐藏文件",
   "show_tree": "显示目录树",
   "size": "大小",

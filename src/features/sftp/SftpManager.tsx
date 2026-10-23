@@ -394,26 +394,6 @@ export function SftpManager({ ssh }: SftpManagerProps) {
   const border = isDark ? 'rgba(240,246,252,0.12)' : 'rgba(27,31,36,0.12)';
   const target = `${ssh.username}@${ssh.host}:${ssh.port}`;
 
-  if (s.sftpMissing) {
-    return (
-      <Box sx={{ p: 4 }}>
-        <Paper sx={{ p: 3, bgcolor: isDark ? '#2d2424' : '#fff4f4', border: '1px solid', borderColor: 'divider' }}>
-          <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'flex-start' }}>
-            <WarningIcon size={28} color="#ff9800" weight="fill" />
-            <Box>
-              <Typography variant="h6" sx={{ color: textColor }}>
-                {t('sftp_not_found_title')}
-              </Typography>
-              <Typography variant="body2" sx={{ color: subtle, whiteSpace: 'pre-line', mt: 1 }}>
-                {t('sftp_not_found_desc')}
-              </Typography>
-            </Box>
-          </Box>
-        </Paper>
-      </Box>
-    );
-  }
-
   const showSkeleton = s.loading && s.entries.length === 0;
   const filteredOut = s.displayed.length === 0 && s.entries.length > 0;
 

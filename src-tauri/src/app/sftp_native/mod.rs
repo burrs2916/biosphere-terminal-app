@@ -983,7 +983,7 @@ impl NativeSftp {
         resume: bool,
         ctx: Option<crate::app::sftp_service::ProgressCtx>,
         cancel: CancelCheck,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         self.run_op(ssh, Lane::Xfer, move |sftp| async move {
             let base = crate::app::sftp_service::normalize_local_path(&local_dir);
 
@@ -1004,7 +1004,7 @@ impl NativeSftp {
                 }
             }
             if files.is_empty() {
-                return Ok(());
+                return Ok(0);
             }
 
             // ---- resume sweep: remote size vs what is already local ----
@@ -1046,7 +1046,7 @@ impl NativeSftp {
                 work.push((entry, offset, remote_size));
             }
             if work.is_empty() {
-                return Ok(());
+                return Ok(0);
             }
 
             // ---- local directories, then honest totals ----
@@ -1070,8 +1070,9 @@ impl NativeSftp {
             }
 
             // ---- transfer ----
+            let mut moved_total: u64 = 0;
             for (entry, offset, total) in work {
-                get_file(
+                moved_total += get_file(
                     &sftp,
                     &entry.0,
                     std::path::Path::new(&entry.1),
@@ -1082,7 +1083,7 @@ impl NativeSftp {
                 )
                 .await?;
             }
-            Ok(())
+            Ok(moved_total)
         })
         .await
     }

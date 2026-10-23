@@ -554,7 +554,7 @@ impl SftpService {
                 .as_ref()
                 .map(|c| c.inner.transfer_id.clone())
                 .unwrap_or_default();
-            native.call(move |native| async move {
+            let moved: Result<u64, String> = native.call(move |native| async move {
                 let cancel = if transfer_id.is_empty() {
                     CancelCheck::Off
                 } else {
@@ -563,10 +563,17 @@ impl SftpService {
                 native
                     .download_items(&ssh, items, local_dir, resume, ctx, cancel)
                     .await
-            })
+            });
+            moved
         };
-        self.log_transfer("sftp-download", &out, started, 0);
-        out
+        // Split bytes from the verdict once: the log needs both, the caller
+        // only the verdict.
+        let (bytes, res) = match out {
+            Ok(n) => (n, Ok(())),
+            Err(e) => (0, Err(e)),
+        };
+        self.log_transfer("sftp-download", &res, started, bytes);
+        res
     }
 
     /// Delete remote files and directories. Directories are removed
