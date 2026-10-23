@@ -12,5 +12,7 @@ pub mod icon_service;
 pub mod remote_desktop_service;
 pub mod sftp_service;
 pub mod sftp_native;
+pub mod ssh_common;
+pub mod terminal_native;
 pub mod licensing;
 pub mod ai_assist;

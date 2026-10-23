@@ -1,6 +1,7 @@
 use crate::core::error::{Error, Result};
 use crate::infra::logging::debug_log;
 use crate::core::types::PtyConfig;
+use crate::app::terminal_native::{SshTerminalSession, TerminalStreamEvent};
 use crate::domain::terminal::pty::Pty;
 use crate::domain::terminal::pty_expect::{AuthAction, AuthResponder};
 use crate::interface::events::terminal_events;
@@ -60,8 +61,18 @@ enum TerminalEvent {
     Error(String),
 }
 
+/// One live terminal transport. A local tab owns a ConPTY child process; an
+/// SSH tab owns a native russh channel — no `ssh.exe` child at all. That is
+/// the whole point of the native lane: protocol-level auth (no prompt
+/// matching), shared host-key handling with SFTP, and one fewer process per
+/// terminal tab.
+enum TerminalTransport {
+    Pty(Pty),
+    Ssh(std::sync::Arc<SshTerminalSession>),
+}
+
 struct SessionState {
-    pty: std::sync::Arc<Mutex<Pty>>,
+    transport: std::sync::Arc<Mutex<TerminalTransport>>,
     output_buffer: std::sync::Arc<Mutex<VecDeque<String>>>,
 }
 
@@ -84,10 +95,7 @@ impl TerminalService {
     }
 
     pub fn spawn(&self, session_id: &str, config: &PtyConfig) -> Result<()> {
-        let pty = Pty::spawn(config)?;
-        let reader = pty.reader();
-        let writer = pty.writer_clone();
-
+        let conn_type = config.connection_type.as_deref().unwrap_or("local");
         let password: Option<String> = config
             .ssh
             .as_ref()
@@ -97,42 +105,54 @@ impl TerminalService {
         tracing::info!(
             "[terminal] spawn session={}, conn_type={}, auth_method={}, has_password={}",
             session_id,
-            config.connection_type.as_deref().unwrap_or("local"),
+            conn_type,
             config.ssh.as_ref().map(|s| s.auth_method.as_str()).unwrap_or("n/a"),
             password.is_some()
         );
 
         let buffer = std::sync::Arc::new(Mutex::new(VecDeque::with_capacity(OUTPUT_BUFFER_MAX_LINES)));
+        let handle = self.app_handle.lock().map_err(|e| Error::Terminal(format!("App handle lock error: {}", e)))?.clone();
+
+        // Stream source → emitter queue. Bounded on purpose: see OUTPUT_QUEUE_CAPACITY.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<TerminalEvent>(OUTPUT_QUEUE_CAPACITY);
+
+        // The emitter owns the IPC side. It runs on its own thread so that the
+        // producer is never blocked by a slow frontend, and so that the
+        // time-based coalescing window can actually fire while the stream is
+        // silent (a thread blocked in `read()` would never tick a timer).
+        {
+            let emitter_handle = handle.clone();
+            let emitter_sid = session_id.to_string();
+            std::thread::spawn(move || {
+                run_output_emitter(emitter_handle, &emitter_sid, rx);
+            });
+        }
+
+        // Native SSH lane: a russh PTY channel, zero child processes.
+        // Authentication is protocol-level and host-key verification is the
+        // shared known_hosts code, so the ConPTY expect machinery below is
+        // not needed at all.
+        if conn_type == "ssh" && config.ssh.is_some() {
+            return self.spawn_native_ssh(session_id, config, buffer, tx);
+        }
+
+        let pty = Pty::spawn(config)?;
+        let reader = pty.reader();
+        let writer = pty.writer_clone();
+
         // pty 用 Arc<Mutex> 共享：reader 线程检测到 host key 变更（远程重装系统）
         // 需要自动清理旧 key 并重建 pty，write/kill/resize 必须跟着走新 pty。
-        let pty_arc = std::sync::Arc::new(Mutex::new(pty));
+        let transport = std::sync::Arc::new(Mutex::new(TerminalTransport::Pty(pty)));
 
         self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?.insert(session_id.to_string(), SessionState {
-            pty: pty_arc.clone(),
+            transport: transport.clone(),
             output_buffer: buffer.clone(),
         });
         let buffer_clone = buffer.clone();
 
         let sid = session_id.to_string();
-        let handle = self.app_handle.lock().map_err(|e| Error::Terminal(format!("App handle lock error: {}", e)))?.clone();
         let config_owned = config.clone();
-        let pty_arc_thread = pty_arc.clone();
-
-        // Reader → emitter queue. Bounded on purpose: see OUTPUT_QUEUE_CAPACITY.
-        let (tx, rx) = std::sync::mpsc::sync_channel::<TerminalEvent>(OUTPUT_QUEUE_CAPACITY);
-
-        // The emitter owns the IPC side. It runs on its own thread so that the
-        // reader thread is never blocked by a slow frontend, and so that the
-        // time-based coalescing window can actually fire while the PTY is
-        // silent (the reader thread spends most of its time blocked in
-        // `read()`, so a timer living there would never tick).
-        {
-            let emitter_handle = handle.clone();
-            let emitter_sid = sid.clone();
-            std::thread::spawn(move || {
-                run_output_emitter(emitter_handle, &emitter_sid, rx);
-            });
-        }
+        let transport_thread = transport.clone();
 
         std::thread::spawn(move || {
             debug_log::term(
@@ -327,19 +347,27 @@ impl TerminalService {
                                 match Pty::spawn(&config_owned) {
                                     Ok(new_pty) => {
                                         {
-                                            let mut guard = match pty_arc_thread.lock() {
+                                            let mut guard = match transport_thread.lock() {
                                                 Ok(g) => g,
                                                 Err(_) => return,
                                             };
-                                            *guard = new_pty;
+                                            *guard = TerminalTransport::Pty(new_pty);
                                         }
                                         {
-                                            let guard = match pty_arc_thread.lock() {
+                                            let mut guard = match transport_thread.lock() {
                                                 Ok(g) => g,
                                                 Err(_) => return,
                                             };
-                                            reader = guard.reader();
-                                            writer = guard.writer_clone();
+                                            match &mut *guard {
+                                                TerminalTransport::Pty(p) => {
+                                                    reader = p.reader();
+                                                    writer = p.writer_clone();
+                                                }
+                                                // The reconnect flow only runs on the
+                                                // ConPTY lane; a native SSH session has
+                                                // no local process to respawn.
+                                                TerminalTransport::Ssh(_) => return,
+                                            }
                                         }
                                     }
                                     Err(e) => {
@@ -372,20 +400,104 @@ impl TerminalService {
 
         Ok(())
     }
-
-    pub fn write(&self, session_id: &str, data: &[u8]) -> Result<usize> {        let sessions = self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?;
+    pub fn write(&self, session_id: &str, data: &[u8]) -> Result<usize> {
+        let sessions = self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?;
         let state = sessions
             .get(session_id)
             .ok_or_else(|| crate::core::error::Error::Terminal("session not found".into()))?;
-        let pty = state.pty.lock().map_err(|e| Error::Terminal(format!("pty lock error: {}", e)))?;
-        pty.write(data)
+        let transport = state.transport.lock().map_err(|e| Error::Terminal(format!("Transport lock error: {}", e)))?;
+        match &*transport {
+            TerminalTransport::Pty(p) => p.write(data),
+            TerminalTransport::Ssh(s) => {
+                // The frontend sends what a real terminal sends (CR for Enter);
+                // no newline translation on either transport.
+                s.write(data.to_vec()).map_err(Error::Terminal)?;
+                Ok(data.len())
+            }
+        }
+    }
+
+    /// Spawn a native SSH terminal: one russh session, one PTY channel, zero
+    /// child processes. Output flows through the same bounded `TerminalEvent`
+    /// queue and coalescing emitter as the ConPTY lane, so ordering and
+    /// performance characteristics are identical from the frontend's point of
+    /// view.
+    fn spawn_native_ssh(
+        &self,
+        session_id: &str,
+        config: &PtyConfig,
+        buffer: std::sync::Arc<Mutex<VecDeque<String>>>,
+        tx: std::sync::mpsc::SyncSender<TerminalEvent>,
+    ) -> Result<()> {
+        let ssh = match config.ssh.as_ref() {
+            Some(s) => s.clone(),
+            None => return Err(Error::Terminal("ssh config missing".into())),
+        };
+
+        // Bridge the russh receive task into the shared queue: update the
+        // scrollback buffer, then hand the event to the coalescing emitter.
+        // Keeping this closure out of the emitter thread means output, closed
+        // and error keep their relative order exactly as on the ConPTY lane.
+        let emit_buffer = buffer.clone();
+        let emit: std::sync::Arc<dyn Fn(TerminalStreamEvent) + Send + Sync> =
+            std::sync::Arc::new(move |event| match event {
+                TerminalStreamEvent::Output(text) => {
+                    if let Ok(mut buf) = emit_buffer.lock() {
+                        for line in text.lines() {
+                            buf.push_back(line.to_string());
+                            if buf.len() > OUTPUT_BUFFER_MAX_LINES {
+                                buf.pop_front();
+                            }
+                        }
+                    }
+                    let _ = tx.send(TerminalEvent::Output(text));
+                }
+                TerminalStreamEvent::Closed => {
+                    let _ = tx.send(TerminalEvent::Closed(Some(0)));
+                }
+            });
+
+        tracing::info!(
+            "[terminal] native SSH session={} host={}:{} user={} auth={}",
+            session_id,
+            ssh.host,
+            ssh.port,
+            ssh.username,
+            ssh.auth_method
+        );
+
+        // Blocking and internally bounded by SESSION_ESTABLISH_TIMEOUT: a
+        // full handshake, but a late success can never register a session
+        // after the command has already reported failure and cleaned up.
+        // Servers reject a zero-size PTY, so fall back to the defaults a
+        // real terminal would use.
+        let cols = if config.cols == 0 { 80 } else { config.cols };
+        let rows = if config.rows == 0 { 24 } else { config.rows };
+        let session = SshTerminalSession::connect(&ssh, session_id, cols, rows, emit)
+            .map_err(Error::Terminal)?;
+
+        self.sessions
+            .lock()
+            .map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?
+            .insert(
+                session_id.to_string(),
+                SessionState {
+                    transport: std::sync::Arc::new(Mutex::new(TerminalTransport::Ssh(session))),
+                    output_buffer: buffer,
+                },
+            );
+        Ok(())
     }
 
     pub fn kill(&self, session_id: &str) -> Result<()> {
         let mut sessions = self.sessions.lock().map_err(|e| Error::Terminal(format!("Session lock error: {}", e)))?;
         if let Some(state) = sessions.get(session_id) {
-            let pty = state.pty.lock().map_err(|e| Error::Terminal(format!("pty lock error: {}", e)))?;
-            pty.kill()?;
+            let transport = state.transport.lock().map_err(|e| Error::Terminal(format!("Transport lock error: {}", e)))?;
+            match &*transport {
+                TerminalTransport::Pty(p) => p.kill()?,
+                // eof + close, then the handle drop tears the session down.
+                TerminalTransport::Ssh(s) => s.close(),
+            }
         }
         sessions.remove(session_id);
         Ok(())
@@ -396,8 +508,12 @@ impl TerminalService {
         let state = sessions
             .get(session_id)
             .ok_or_else(|| crate::core::error::Error::Terminal("session not found".into()))?;
-        let pty = state.pty.lock().map_err(|e| Error::Terminal(format!("pty lock error: {}", e)))?;
-        pty.resize(rows, cols)
+        let transport = state.transport.lock().map_err(|e| Error::Terminal(format!("Transport lock error: {}", e)))?;
+        match &*transport {
+            TerminalTransport::Pty(p) => p.resize(rows, cols),
+            // The native transport takes (cols, rows) — russh's argument order.
+            TerminalTransport::Ssh(s) => s.resize(cols, rows).map_err(Error::Terminal),
+        }
     }
 
     pub fn list_sessions(&self) -> Result<Vec<String>> {
@@ -435,7 +551,14 @@ impl TerminalService {
             None => return Ok(None),
         };
 
-        if let Some(pid) = state.pty.lock().ok().and_then(|p| p.process_id()) {
+        let transport = state.transport.lock().ok();
+        let pid = transport.as_deref().and_then(|t| match t {
+            TerminalTransport::Pty(p) => p.process_id(),
+            // A native SSH session has no local child process to probe; the
+            // remote cwd is not worth an extra round-trip here.
+            TerminalTransport::Ssh(_) => None,
+        });
+        if let Some(pid) = pid {
             return Ok(Self::resolve_process_cwd(pid));
         }
         Ok(None)
@@ -770,7 +893,7 @@ fn run_output_emitter(
 /// into U+FFFD, which the user sees as a garbled character in the terminal.
 /// `carry` holds the incomplete tail (at most 3 bytes) until it can be
 /// completed.
-fn decode_chunk(carry: &mut Vec<u8>, data: &[u8]) -> String {
+pub(crate) fn decode_chunk(carry: &mut Vec<u8>, data: &[u8]) -> String {
     // Fast path: nothing carried over and the chunk is already valid UTF-8.
     if carry.is_empty() {
         if let Ok(s) = std::str::from_utf8(data) {
@@ -823,7 +946,7 @@ fn decode_chunk(carry: &mut Vec<u8>, data: &[u8]) -> String {
 ///
 /// The PTY closed in the middle of a multi-byte character. The bytes can
 /// never be completed, so emit a replacement char instead of dropping them.
-fn flush_carry(carry: &mut Vec<u8>) -> String {
+pub(crate) fn flush_carry(carry: &mut Vec<u8>) -> String {
     if carry.is_empty() {
         return String::new();
     }

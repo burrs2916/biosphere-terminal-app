@@ -31,21 +31,15 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use russh::client::{self, Config, Handle, Handler};
-use russh::keys::{self, HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
+use russh::client::Handle;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::time::timeout;
 
+use crate::app::ssh_common::{self, SshHostKeyHandler};
 use crate::core::types::SshConnectionInfo;
 use crate::infra::logging::debug_log;
-
-/// Wall-clock cap for the TCP connect + SSH handshake + auth phase. The old
-/// pty lane used `ConnectTimeout=15` inside the child; we enforce the same
-/// budget ourselves so an unreachable host fails fast instead of hanging the
-/// op until the overall deadline.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Cap for one metadata operation (listing / mkdir / rename / delete / chmod).
 /// Generous because a huge directory listing streams continuously, but a hang
@@ -66,12 +60,6 @@ const BULK_CONCURRENCY: usize = 16;
 
 /// Idle sessions are reaped so a stale pool entry never outlives its peer.
 const SESSION_IDLE_TTL: Duration = Duration::from_secs(300);
-
-/// How often the SSH layer probes an otherwise silent session, and how many
-/// unanswered probes kill it. This is what turns "peer vanished" into an
-/// error the retry logic can act on, instead of a transfer that waits forever.
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
-const KEEPALIVE_MAX: usize = 3;
 
 // ---- error model ----
 
@@ -142,85 +130,10 @@ fn friendly_status(code: StatusCode, message: &str, path: &str) -> String {
     }
 }
 
-/// Failure raised from inside the SSH handshake, before a session exists.
-#[derive(Debug)]
-enum HandlerError {
-    /// `check_server_key` found a recorded key that does not match. Carries
-    /// the known_hosts detail so the caller can clear the stale entry and
-    /// retry once, exactly like the old `ssh-keygen -R` flow.
-    HostKeyChanged(String),
-    /// known_hosts exists but could not be parsed. Refuse rather than silently
-    /// downgrade to trust-on-first-use on a broken trust store.
-    HostKeyUnusable(String),
-    Russh(russh::Error),
-}
-
-impl From<russh::Error> for HandlerError {
-    fn from(e: russh::Error) -> Self {
-        HandlerError::Russh(e)
-    }
-}
-
-/// Classify a handshake-phase failure into the UI's five categories.
-fn classify_connect_error(e: HandlerError, ssh: &SshConnectionInfo) -> String {
-    match e {
-        HandlerError::HostKeyChanged(detail) => {
-            format!(
-                "主机密钥校验失败：{} 与 known_hosts 中记录的不一致（host key changed）。\
-                 如确认是主机重装/IP 复用，请删除旧记录后重试。",
-                detail
-            )
-        }
-        HandlerError::HostKeyUnusable(detail) => {
-            format!("主机密钥校验失败：无法读取 known_hosts（{}）", detail)
-        }
-        HandlerError::Russh(err) => classify_russh_error(&err, ssh),
-    }
-}
-
-/// Map a `russh::Error` onto the same categories, matching on the variant
-/// where possible and on the rendered text for the io-flavoured ones (TCP
-/// failures arrive wrapped).
-fn classify_russh_error(err: &russh::Error, ssh: &SshConnectionInfo) -> String {
-    use russh::Error::*;
-    match err {
-        NotAuthenticated | UnsupportedAuthMethod => {
-            "SSH 认证失败：认证未通过（凭据不正确，或服务器禁用了该登录方式）".to_string()
-        }
-        _ => {
-            let low = err.to_string().to_lowercase();
-            if low.contains("connection refused") {
-                format!(
-                    "连接建立失败：无法连接到 {}:{}（connection refused，SSH 服务未运行或端口不对）",
-                    ssh.host, ssh.port
-                )
-            } else if low.contains("no route") || low.contains("network is unreachable") {
-                format!("连接建立失败：网络不可达（{}:{}）", ssh.host, ssh.port)
-            } else if low.contains("name or service not known")
-                || low.contains("failed to lookup")
-                || low.contains("invalid socket address")
-            {
-                format!("连接建立失败：无法解析主机名 {}", ssh.host)
-            } else if low.contains("timed out") || low.contains("timeout") {
-                format!(
-                    "连接超时：无法在 {} 秒内连接到 {}:{}",
-                    CONNECT_TIMEOUT.as_secs(),
-                    ssh.host,
-                    ssh.port
-                )
-            } else if low.contains("host key") {
-                "主机密钥校验失败（host key verification failed）".to_string()
-            } else if low.contains("permission denied") || low.contains("auth") {
-                "SSH 认证失败：密码或密钥被拒绝（Permission denied）".to_string()
-            } else {
-                format!(
-                    "SSH 连接失败：{}:{}（{}）",
-                    ssh.host, ssh.port, low
-                )
-            }
-        }
-    }
-}
+// Host-key verification, authentication and error classification live in
+// `ssh_common` — one implementation shared with the native terminal so the
+// two features cannot drift apart (same known_hosts file, same TOFU rules,
+// same user-facing error wording).
 
 /// Cancellation probe handed to long-running transfers. `Off` for metadata
 /// operations (they are bounded by `META_OP_TIMEOUT` anyway).
@@ -238,58 +151,6 @@ impl CancelCheck {
     }
 }
 
-// ---- handler ----
-
-/// russh client handler. Its only real job is the host-key decision; the
-/// default `data`/`auth_banner` implementations are fine for an SFTP lane.
-struct SftpHandler {
-    host: String,
-    port: u16,
-}
-
-impl Handler for SftpHandler {
-    type Error = HandlerError;
-
-    async fn check_server_key(
-        &mut self,
-        server_public_key: &PublicKeyOrCertificate,
-    ) -> Result<bool, Self::Error> {
-        let pubkey = server_public_key.public_key();
-        match keys::check_known_hosts(&self.host, self.port, &pubkey) {
-            // Recorded and matching — the steady state after the first connect.
-            Ok(true) => Ok(true),
-            // Unknown host: trust on first use, mirroring the old
-            // `StrictHostKeyChecking=accept-new`. A failure to *record* the
-            // key must not block the connection; it only means the next
-            // connect will prompt the decision again.
-            Ok(false) => {
-                if let Err(e) = keys::known_hosts::learn_known_hosts(&self.host, self.port, &pubkey)
-                {
-                    tracing::warn!(
-                        "[SFTP] host key accepted but could not be recorded: {}",
-                        e
-                    );
-                }
-                debug_log::term(
-                    "DEBUG",
-                    "sftp",
-                    "sftp-hostkey-tofu",
-                    &format!("host={} port={} first use, key recorded", self.host, self.port),
-                );
-                Ok(true)
-            }
-            // Recorded for this host but a different key: a reinstall, an IP
-            // reuse, or a man in the middle. Refuse and let the caller clear
-            // the stale entry after an explicit retry.
-            Err(keys::Error::KeyChanged { line }) => Err(HandlerError::HostKeyChanged(format!(
-                "远端主机密钥已变更（known_hosts 第 {} 行记录的不是当前密钥）",
-                line
-            ))),
-            Err(e) => Err(HandlerError::HostKeyUnusable(e.to_string())),
-        }
-    }
-}
-
 // ---- session pool ----
 
 /// One live SSH session with its two SFTP subsystem lanes. Lanes are created
@@ -298,7 +159,7 @@ impl Handler for SftpHandler {
 pub(crate) struct NativeSession {
     /// Ownership only: dropping the handle ends the session. All channel
     /// traffic goes through the `SftpSession` lanes, which are `Sync`.
-    handle: Mutex<Option<Handle<SftpHandler>>>,
+    handle: Mutex<Option<Handle<SshHostKeyHandler>>>,
     meta: Arc<SftpSession>,
     xfer: Arc<SftpSession>,
     last_used: Mutex<Instant>,
@@ -482,100 +343,10 @@ impl NativeSftp {
             Some(format!("{}:{}", ssh.host, ssh.port)),
         );
 
-        let cfg = Arc::new(sftp_config());
-        let addrs: Vec<std::net::SocketAddr> =
-            match tokio::net::lookup_host((ssh.host.as_str(), ssh.port)).await {
-                Ok(it) => it.collect(),
-                Err(e) => {
-                    return Err(format!(
-                        "连接建立失败：无法解析主机名 {}（{}）",
-                        ssh.host, e
-                    ))
-                }
-            };
-        if addrs.is_empty() {
-            return Err(format!("连接建立失败：无法解析主机名 {}", ssh.host));
-        }
-
-        let mut handle: Option<Handle<SftpHandler>> = None;
-        let mut last_err: Option<String> = None;
-        for addr in addrs {
-            let handler = SftpHandler {
-                host: ssh.host.clone(),
-                port: ssh.port,
-            };
-            match timeout(CONNECT_TIMEOUT, client::connect(cfg.clone(), addr, handler)).await {
-                Ok(Ok(h)) => {
-                    handle = Some(h);
-                    break;
-                }
-                Ok(Err(HandlerError::HostKeyChanged(_detail))) => {
-                    // Exactly the old `clear_known_host` + retry-once flow,
-                    // minus the `ssh-keygen -R` subprocess: drop the stale
-                    // entries ourselves and reconnect.
-                    debug_log::term(
-                        "INFO",
-                        "sftp",
-                        "sftp-hostkey-changed",
-                        &format!(
-                            "host={} port={} clearing stale entries and retrying once",
-                            ssh.host, ssh.port
-                        ),
-                    );
-                    known_hosts::remove_entries(&ssh.host, ssh.port);
-                    let handler = SftpHandler {
-                        host: ssh.host.clone(),
-                        port: ssh.port,
-                    };
-                    match timeout(CONNECT_TIMEOUT, client::connect(cfg.clone(), addr, handler))
-                        .await
-                    {
-                        Ok(Ok(h)) => {
-                            handle = Some(h);
-                            break;
-                        }
-                        Ok(Err(e)) => {
-                            last_err = Some(classify_connect_error(e, ssh));
-                            continue;
-                        }
-                        Err(_) => {
-                            last_err = Some(format!(
-                                "连接超时：无法在 {} 秒内连接到 {}:{}",
-                                CONNECT_TIMEOUT.as_secs(),
-                                ssh.host,
-                                ssh.port
-                            ));
-                            continue;
-                        }
-                    }
-                }
-                Ok(Err(e)) => {
-                    last_err = Some(classify_connect_error(e, ssh));
-                    continue;
-                }
-                Err(_) => {
-                    last_err = Some(format!(
-                        "连接超时：无法在 {} 秒内连接到 {}:{}",
-                        CONNECT_TIMEOUT.as_secs(),
-                        ssh.host,
-                        ssh.port
-                    ));
-                    continue;
-                }
-            }
-        }
-        let mut handle = handle.ok_or_else(|| {
-            last_err.unwrap_or_else(|| {
-                format!("连接建立失败：无法连接到 {}:{}", ssh.host, ssh.port)
-            })
-        })?;
-
-        // ---- authenticate ----
-        let auth_ok = match ssh.auth_method.as_str() {
-            "private_key" => auth_publickey(&mut handle, ssh).await,
-            _ => auth_password(&mut handle, ssh).await,
-        };
-        auth_ok?;
+        // Full handshake: TCP (async DNS, per-address attempts, host-key
+        // change clears the stale entry and retries once) → SSH handshake
+        // (host-key decision inside the shared handler) → auth.
+        let handle = ssh_common::establish(ssh).await?;
 
         // ---- open both lanes up front ----
         let meta = open_sftp_lane(&handle).await?;
@@ -1107,86 +878,9 @@ fn join_local(base: &str, name: &str) -> String {
 
 // ---- free helpers ----
 
-fn sftp_config() -> Config {
-    let mut cfg = Config::default();
-    // Nagle off: SFTP is a request/response protocol and small replies must
-    // not sit in the kernel buffer for up to 40 ms (the russh-sftp benchmarks
-    // measure a ~2x latency win from this one flag).
-    cfg.nodelay = true;
-    cfg.keepalive_interval = Some(KEEPALIVE_INTERVAL);
-    cfg.keepalive_max = KEEPALIVE_MAX;
-    // Sessions stay pooled for the window's lifetime; the idle reaper, not
-    // the protocol layer, decides when they die.
-    cfg.inactivity_timeout = None;
-    cfg
-}
-
-async fn auth_password(handle: &mut Handle<SftpHandler>, ssh: &SshConnectionInfo) -> Result<(), String> {
-    let password = ssh.password.clone().unwrap_or_default();
-    if password.is_empty() {
-        return Err("服务器要求输入密码，但此连接未保存密码".to_string());
-    }
-    match handle.authenticate_password(&ssh.username, password).await {
-        Ok(result) if result.success() => {
-            debug_log::term(
-                "DEBUG",
-                "sftp",
-                "sftp-auth-ok",
-                &format!("method=password user={}", ssh.username),
-            );
-            Ok(())
-        }
-        Ok(_) => Err("SSH 认证失败：密码被拒绝（Permission denied）".to_string()),
-        Err(e) => Err(classify_russh_error(&e, ssh)),
-    }
-}
-
-async fn auth_publickey(
-    handle: &mut Handle<SftpHandler>,
-    ssh: &SshConnectionInfo,
-) -> Result<(), String> {
-    let path = ssh
-        .private_key_path
-        .clone()
-        .ok_or_else(|| "未配置私钥路径".to_string())?;
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("无法读取私钥文件 {}: {}", path, e))?;
-    let key = keys::decode_secret_key(&content, None).map_err(|e| {
-        let low = e.to_string().to_lowercase();
-        if low.contains("encrypted") || low.contains("passphrase") {
-            "私钥已加密，需要口令（请改用未加密的密钥或先 ssh-add 到代理）".to_string()
-        } else {
-            format!("无法解析私钥 {}: {}", path, e)
-        }
-    })?;
-    // RSA signs with SHA-1 unless told otherwise; every server from the last
-    // decade speaks rsa-sha2-256, and refusing SHA-1 avoids a whole class of
-    // "works against ssh, fails against us" rejections.
-    let hash_alg = if key.algorithm().is_rsa() {
-        Some(HashAlg::Sha256)
-    } else {
-        None
-    };
-    let key = Arc::new(key);
-    match handle
-        .authenticate_publickey(&ssh.username, PrivateKeyWithHashAlg::new(key, hash_alg))
-        .await
-    {
-        Ok(result) if result.success() => {
-            debug_log::term(
-                "DEBUG",
-                "sftp",
-                "sftp-auth-ok",
-                &format!("method=publickey user={}", ssh.username),
-            );
-            Ok(())
-        }
-        Ok(_) => Err("SSH 认证失败：私钥被拒绝（Permission denied）".to_string()),
-        Err(e) => Err(classify_russh_error(&e, ssh)),
-    }
-}
-
-async fn open_sftp_lane(handle: &Handle<SftpHandler>) -> Result<Arc<SftpSession>, String> {
+async fn open_sftp_lane(
+    handle: &Handle<SshHostKeyHandler>,
+) -> Result<Arc<SftpSession>, String> {
     let channel = handle
         .channel_open_session()
         .await
