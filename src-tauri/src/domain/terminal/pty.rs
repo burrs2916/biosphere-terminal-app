@@ -197,62 +197,6 @@ impl Pty {
         Ok(cmd)
     }
 
-    /// 用于 `test_connection` 的密码模式：用 pty 起一个带远端命令（如 `true`）的 ssh 会话，
-    /// 以便通过 pty-expect 自动喂密码完成真实身份认证。
-    /// 零外部依赖，仅用系统自带 ssh + portable-pty。
-    pub fn spawn_ssh_command_session(
-        ssh: &SshConnectionInfo,
-        remote_command: &str,
-    ) -> Result<Self> {
-        let mut cmd = Self::build_ssh_command(ssh, false, Some(remote_command), Some(10))
-            .map_err(|e| crate::core::error::Error::Terminal(e))?;
-        // One prompt only: a wrong password must fail fast (non-zero exit ->
-        // "认证失败") instead of re-prompting up to 3 times into a pty whose
-        // expect loop answers exactly once. Mirrors sftp's spawn.
-        cmd.args(&[
-            "-o".to_string(),
-            "NumberOfPasswordPrompts=1".to_string(),
-        ]);
-        // 密码模式测试：直接指定 password 认证，跳过 pubkey/gssapi 探针，
-        // 提示立即出现（与 GSSAPIAuthentication=no 配合消除 ~10s 延迟）。
-        cmd.args(&[
-            "-o".to_string(),
-            "PreferredAuthentications=password".to_string(),
-        ]);
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| {
-                crate::core::error::Error::Terminal(format!("openpty failed: {}", e))
-            })?;
-
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| {
-                crate::core::error::Error::Terminal(format!("spawn failed: {}", e))
-            })?;
-        drop(pair.slave);
-
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| {
-                crate::core::error::Error::Terminal(format!("take writer failed: {}", e))
-            })?;
-
-        Ok(Pty {
-            master: Arc::new(Mutex::new(pair.master)),
-            writer: Arc::new(Mutex::new(writer)),
-            child: Arc::new(Mutex::new(child)),
-        })
-    }
-
     /// 阻塞等待 ssh 子进程退出，返回退出码。
     pub fn wait(&self) -> Result<i32> {
         let mut child = self.child.lock().unwrap();
@@ -260,73 +204,6 @@ impl Pty {
             .wait()
             .map(|s| s.exit_code() as i32)
             .map_err(|e| crate::core::error::Error::Terminal(format!("wait failed: {}", e)))
-    }
-
-    /// Establish an SSH ControlMaster (`ssh -M -N`) via a pty so password auth can
-    /// be fed interactively — the exact same proven path as `spawn_ssh_command_session`
-    /// (same `TERM` env, same `StrictHostKeyChecking`/`ConnectTimeout` flags). The
-    /// control socket at `control_path` is created by ssh only AFTER successful
-    /// authentication; the caller must keep the returned `Pty` alive for the transfer
-    /// and `kill()` it afterwards.
-    pub fn spawn_ssh_master(ssh: &SshConnectionInfo, control_path: &str) -> Result<Self> {
-        let mut cmd = Self::build_ssh_command(ssh, false, None, Some(10))
-            .map_err(|e| crate::core::error::Error::Terminal(e))?;
-
-        // Master mode: stay alive (-N, no remote command) and own the control socket.
-        // ServerAlive* keeps the shared connection up across NAT/firewall idle
-        // timeouts so a long transfer multiplexed over it is not cut halfway.
-        let master_args: Vec<String> = vec![
-            "-M".to_string(),
-            "-N".to_string(),
-            "-o".to_string(),
-            "ControlMaster=yes".to_string(),
-            "-o".to_string(),
-            format!("ControlPath={}", control_path),
-            "-o".to_string(),
-            "ServerAliveInterval=20".to_string(),
-            "-o".to_string(),
-            "ServerAliveCountMax=6".to_string(),
-        ];
-        cmd.args(&master_args);
-        // 密码模式 master：直奔 password 认证，跳过 pubkey/gssapi 探针
-        // （与测试连接路径一致，消除 Windows 上 ~10s 的 gssapi 握手延迟）。
-        cmd.args(&[
-            "-o".to_string(),
-            "PreferredAuthentications=password".to_string(),
-        ]);
-
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| {
-                crate::core::error::Error::Terminal(format!("openpty failed: {}", e))
-            })?;
-
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| {
-                crate::core::error::Error::Terminal(format!("spawn failed: {}", e))
-            })?;
-        drop(pair.slave);
-
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| {
-                crate::core::error::Error::Terminal(format!("take writer failed: {}", e))
-            })?;
-
-        Ok(Pty {
-            master: Arc::new(Mutex::new(pair.master)),
-            writer: Arc::new(Mutex::new(writer)),
-            child: Arc::new(Mutex::new(child)),
-        })
     }
 
     /// Spawn an arbitrary program attached to a pty.

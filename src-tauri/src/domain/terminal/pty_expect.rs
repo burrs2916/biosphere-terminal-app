@@ -478,13 +478,14 @@ mod tests {
     ///
     /// SFTP is now a native russh channel (`sftp_native`), with no pty in the
     /// path, so it is no longer a pty-expect call site and is excluded on
-    /// purpose.
+    /// purpose. The SSH *test connection* path (`commands/connection.rs`) was
+    /// likewise migrated to protocol-level auth via `ssh_common::establish` —
+    /// no pty, no prompt scraping — so it is no longer a call site either. The
+    /// only remaining consumer is the ConPTY local-shell fallback in
+    /// `terminal_service.rs`, which still feeds a real ssh.exe's password prompt.
     #[test]
     fn all_call_sites_use_the_shared_module() {
-        let call_sites = [
-            include_str!("../../interface/commands/connection.rs"),
-            include_str!("../../app/terminal_service.rs"),
-        ];
+        let call_sites = [include_str!("../../app/terminal_service.rs")];
         for src in call_sites {
             assert!(
                 src.contains("pty_expect::"),

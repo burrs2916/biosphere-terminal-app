@@ -8,18 +8,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::net::TcpStream;
-use std::io::{Read, Write};
-use std::process::{Command, Stdio};
 use std::thread;
 use std::sync::mpsc;
+use crate::app::ssh_common;
 
-/// 喂密码前的预算：ssh 自带 `ConnectTimeout=10` 已让真不可达的主机快速以非零
-/// 退出（正确报错，不挂死）；此预算只兜底「连上了但握手/密钥协商迟迟不给密码
-/// 提示」的极端慢主机。给足 30s 避免误杀。
-const PRE_PROMPT_BUDGET_SECS: u64 = 30;
-/// 喂完密码后重启的认证完成预算：ssh 收到密码后做 PAM/执行远端命令通常 1–3s，
-/// 给 15s 足量余量，绝不再因「提示出现太晚」被 12s 硬超时误杀。
-const AUTH_COMPLETE_BUDGET_SECS: u64 = 15;
 
 #[tauri::command]
 pub fn list_connections(db: State<'_, Arc<Database>>) -> Result<Vec<ConnectionConfig>, String> {
@@ -148,7 +140,7 @@ pub async fn test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
 ///   防火墙拦截 / DNS 解析失败），此时绝不说是「密码不正确」。
 fn classify_password_auth_failure(ssh: &SshConnectionInfo, saw_prompt: bool, diag: &str) -> String {
     if saw_prompt {
-        if diag.contains("Permission denied") {
+        if diag.to_lowercase().contains("permission denied") {
             format!(
                 "✗ SSH 密码认证失败（密码不正确，或该账户被禁止密码登录）：{}@{}:{}",
                 ssh.username, ssh.host, ssh.port
@@ -171,15 +163,16 @@ fn classify_password_auth_failure(ssh: &SshConnectionInfo, saw_prompt: bool, dia
 /// （与客户端 locale 无关，且本路径已固定 `LC_MESSAGES=C`），故直接子串匹配；
 /// 命中失败则回退到「密钥不正确、主机不可达或被拒绝」通用文案（与旧行为一致，不退化）。
 fn classify_key_auth_failure(ssh: &SshConnectionInfo, stderr: &str) -> String {
-    if stderr.contains("Permission denied") {
+    let stderr = stderr.to_lowercase();
+    if stderr.contains("permission denied") {
         format!(
             "✗ SSH 密钥认证失败（密钥不正确，或该账户不允许密钥登录）：{}@{}:{}",
             ssh.username, ssh.host, ssh.port
         )
-    } else if stderr.contains("Connection refused")
-        || stderr.contains("Connection timed out")
-        || stderr.contains("No route to host")
-        || stderr.contains("Connection closed")
+    } else if stderr.contains("connection refused")
+        || stderr.contains("connection timed out")
+        || stderr.contains("no route to host")
+        || stderr.contains("connection closed")
     {
         format!(
             "✗ SSH 连接失败（主机不可达、端口未监听，或被防火墙拦截）：{}@{}:{}",
@@ -212,495 +205,64 @@ fn run_test_connection(ssh: SshConnectionInfo) -> Result<String, String> {
             ssh.auth_method, ssh.host, ssh.port, ssh.username
         ),
     );
-    // 密钥模式：BatchMode=yes 跑一次真实握手+认证（零外部依赖，仅系统自带 ssh）
-    if ssh.auth_method == "private_key" {
-        let mut args: Vec<String> = vec![
-            "-o".to_string(),
-            "StrictHostKeyChecking=accept-new".to_string(),
-            "-o".to_string(),
-            "BatchMode=yes".to_string(),
-            "-o".to_string(),
-            "ConnectTimeout=5".to_string(),
-        ];
-        if ssh.port != 22 {
-            args.push("-p".to_string());
-            args.push(ssh.port.to_string());
-        }
-        if let Some(key) = &ssh.private_key_path {
-            args.push("-i".to_string());
-            args.push(key.clone());
-        }
-        args.push(format!("{}@{}", ssh.username, ssh.host));
-        args.push("true".to_string());
-
-        let ssh_bin = crate::core::platform::resolve_ssh_binary()
-            .map_err(|e| format!("无法定位 ssh 程序: {}", e))?;
-        debug_log::term(
-            "DEBUG",
-            "conn",
-            "key-mode-ssh-bin",
-            &format!("ssh_bin={}", ssh_bin),
-        );
-        return match run_command_with_timeout(&ssh_bin, &args, Duration::from_secs(8)) {
-            Ok(()) => Ok(format!(
-                "✓ SSH 密钥认证成功：{}@{}:{}",
-                ssh.username, ssh.host, ssh.port
-            )),
-            Err(e) => {
-                let msg = classify_key_auth_failure(&ssh, &e);
-                debug_log::term(
-                    "ERROR",
-                    "conn",
-                    "key-mode-auth-failed",
-                    &format!("stderr_or_err={} msg={}", e, msg),
-                );
-                Err(msg)
-            }
-        };
+    // 非密码 / 密钥（none / local 等）：只做 TCP 端口探测，明确告知未验证身份。
+    if ssh.auth_method != "private_key" && ssh.auth_method != "password" {
+        return tcp_only_test(&ssh);
     }
-
-    // 密码模式：用 pty 起 ssh 会话，Rust 线程匹配密码提示自动喂密码
-    // （sshpass 的零依赖实现，仅系统 ssh + portable-pty，跨平台零额外安装）
-    if ssh.auth_method == "password" {
-        tracing::info!("[TEST-CONN] branch=password (has_pw={})", ssh.password.is_some());
-        debug_log::term(
-            "DEBUG",
-            "conn",
-            "branch-password",
-            &format!("has_pw={}", ssh.password.is_some()),
-        );
-        return match &ssh.password {
-            Some(pw) => match test_ssh_password(&ssh, pw, false) {
-                Ok(true) => Ok(format!(
-                    "✓ SSH 密码认证成功：{}@{}:{}",
-                    ssh.username, ssh.host, ssh.port
-                )),
-                // 防御性分支：test_ssh_password 在失败时一律返回 Err（精准文案），
-                // 此分支理论上不可达；保留以免 match 遗漏。
-                Ok(false) => Err(format!(
-                    "✗ SSH 密码认证失败（服务器拒绝该凭证）：{}@{}:{}",
-                    ssh.username, ssh.host, ssh.port
-                )),
-                Err(e) => Err(e),
-            },
-            None => tcp_only_test(&ssh),
-        };
+    // 密码 / 密钥统一走共享的 russh 握手+认证（与 SFTP / 终端同源），
+    // 不再 spawn 系统 ssh.exe + portable-pty。错误已由 ssh_common 按
+    // 连接级 / 认证级精确归类，这里再映射到 UI 本地化的 `✗ SSH …` 文案。
+    let auth_label = if ssh.auth_method == "private_key" { "密钥" } else { "密码" };
+    let s = ssh.clone();
+    match ssh_common::wait_on(async move { ssh_common::establish(&s).await }) {
+        Ok(Ok(_handle)) => Ok(format!(
+            "✓ SSH {}认证成功：{}@{}:{}",
+            auth_label, ssh.username, ssh.host, ssh.port
+        )),
+        Ok(Err(e)) => {
+            let msg = map_establish_error(&ssh, &e);
+            debug_log::term(
+                "ERROR",
+                "conn",
+                "auth-failed",
+                &format!("auth={} msg={}", ssh.auth_method, msg),
+            );
+            Err(msg)
+        }
+        Err(e) => Err(format!("SSH 测试连接内部错误：{}", e)),
     }
-
-    // 其它（如 none / local）：退化为 TCP 端口探测
-    tracing::info!("[TEST-CONN] branch=fallback -> tcp_only_test");
-    tcp_only_test(&ssh)
 }
 
-/// 用 pty + expect 实现 sshpass 等效逻辑：起 `ssh user@host true` 会话，
-/// 监控 pty 输出，匹配到密码提示时自动把密码写回。零外部依赖（仅系统 ssh + portable-pty）。
-///
-/// 提示识别走共享模块 [`crate::domain::terminal::pty_expect`]：
-/// - ANSI 转义序列先过滤再匹配 —— Windows ConPTY（conhost）会往输出流里插
-///   VT 序列，裸流上做 `ends_with("password:")` 会漏检，密码喂不进去，
-///   ssh 干坐在提示上直到超时，用户看到的就是假的「连接超时」。
-/// - host key 首连确认 `(yes/no/[fingerprint])?` 自动回 yes（与 accept-new
-///   语义一致：只对全新 key 自动接受，key 变更仍然拒绝并走下方重试）。
-/// - 二次验证码 / 加密私钥口令等无法满足的提示立即返回明确错误，不再耗到
-///   超时才给一个误导性的「主机不可达」。
-/// - 会话记录（脱敏）写入 debug.log，失败时可直接看到 ssh 到底说了什么。
-///
-/// `retried` 为 true 表示已因 host key 变更自动清理并重试过一次。
-fn test_ssh_password(
-    ssh: &SshConnectionInfo,
-    pw: &str,
-    retried: bool,
-) -> std::result::Result<bool, String> {
-    use crate::domain::terminal::pty_expect::{AuthAction, AuthResponder};
-
-    tracing::info!("[TEST-CONN] test_ssh_password: spawning pty ssh session...");
-    let pty = match crate::domain::terminal::pty::Pty::spawn_ssh_command_session(ssh, "true") {
-        Ok(p) => Arc::new(p),
-        Err(e) => {
-            tracing::error!("[TEST-CONN] test_ssh_password: spawn_ssh_command_session FAILED: {}", e);
-            debug_log::term(
-                "ERROR",
-                "conn",
-                "password-spawn-failed",
-                &format!("err={}", e),
-            );
-            return Err(format!("无法建立测试会话: {}", e));
-        }
-    };
-    debug_log::term(
-        "DEBUG",
-        "conn",
-        "password-pty-spawned",
-        "pty spawned ok, waiting for prompt",
-    );
-    tracing::info!("[TEST-CONN] test_ssh_password: pty spawned ok, getting reader/writer");
-    let reader = pty.reader();
-    let writer = pty.writer_clone();
-    let pw_owned = pw.to_string();
-
-    // 退出检测线程：用 try_wait（底层 waitpid(WNOHANG)，绝不阻塞）轮询退出码，
-    // 避免 portable-pty 的 wait() 在 PTY 仍被 feeder 持有时会因等待 EOF/回收而挂死
-    // （实测：macOS 上 pty.wait() 对不可达/挂起主机 15s+ 不返回，导致测试卡死）。
-    let pty_wait = pty.clone();
-    let (tx, rx) = mpsc::channel();
-    let (hk_tx, hk_rx) = mpsc::channel::<bool>();
-    // feeder 遇到「无法满足的提示」（二次验证码 / 加密私钥口令）时立即上报，
-    // 主线程不必等 ssh 在提示上干坐到超时。
-    let (un_tx, un_rx) = mpsc::channel::<&'static str>();
-    let hk_tx_feeder = hk_tx.clone();
-    let un_tx_feeder = un_tx.clone();
-    drop(hk_tx);
-    drop(un_tx);
-    // 喂密码时刻（feeder 写入 / 监控线程读取）：用于喂密码后重启认证完成计时，
-    // 使慢主机（提示出现晚）不再被固定 12s 硬超时误杀。
-    let password_fed_at = Arc::new(std::sync::Mutex::new(None::<Instant>));
-    let password_fed_at_monitor = password_fed_at.clone();
-    thread::spawn(move || {
-        let start = Instant::now();
-        let mut code: Option<i32> = None;
-        loop {
-            // 分阶段预算：喂密码前给足（ssh 自带 ConnectTimeout=10 让真不可达主机
-            // 快速非零退出）；喂密码后重启 AUTH_COMPLETE_BUDGET_SECS 认证完成计时。
-            let fed = password_fed_at_monitor
-                .lock()
-                .map(|g| *g)
-                .unwrap_or(None);
-            let deadline = match fed {
-                Some(t) => t + Duration::from_secs(AUTH_COMPLETE_BUDGET_SECS),
-                None => start + Duration::from_secs(PRE_PROMPT_BUDGET_SECS),
-            };
-            if Instant::now() >= deadline {
-                break;
-            }
-            match pty_wait.try_wait() {
-                Ok(Some(c)) => {
-                    code = Some(c);
-                    break;
-                }
-                Ok(None) => {
-                    thread::sleep(Duration::from_millis(250));
-                }
-                Err(e) => {
-                    tracing::warn!("[TEST-CONN] test_ssh_password: try_wait error: {}", e);
-                    break;
-                }
-            }
-        }
-        if code.is_none() {
-            let _ = pty_wait.kill();
-            tracing::warn!(
-                "[TEST-CONN] test_ssh_password: try_wait loop ended without exit after {:?} -> killed, treat as timeout",
-                start.elapsed()
-            );
-        } else {
-            tracing::info!(
-                "[TEST-CONN] test_ssh_password: try_wait got exit code={:?}",
-                code
-            );
-        }
-        let _ = tx.send(code);
-    });
-
-    // 监控输出并自动喂密码的线程 —— 全部决策来自共享 AuthResponder。
-    // responder 用 Arc<Mutex> 共享：主线程在失败路径上要读它的脱敏会话记录。
-    let responder = Arc::new(std::sync::Mutex::new(AuthResponder::new(Some(pw_owned.clone()))));
-    let responder_feeder = responder.clone();
-    let password_fed_at_feeder = password_fed_at.clone();
-    tracing::info!("[TEST-CONN] test_ssh_password: spawning feeder thread");
-    let feeder = thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        let mut guard = match reader.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        // 宽松上限：监控线程会在分阶段预算到点时 kill ssh，pty 读端随即 EOF 退出；
-        // 这里不提前死线，避免慢提示（出现在 >8s）时 feeder 已退出、根本不喂密码。
-        let deadline = Instant::now() + Duration::from_secs(45);
-        let mut hk_sent = false;
-        while Instant::now() < deadline {
-            match guard.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let output = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let (action, hk_changed) = {
-                        let mut r = match responder_feeder.lock() {
-                            Ok(g) => g,
-                            Err(_) => return,
-                        };
-                        (r.push(&output), r.host_key_changed())
-                    };
-                    match action {
-                        AuthAction::FeedPassword => {
-                            // CR, not LF: ConPTY will not submit a bare newline
-                            // (see `Pty::write_line`). Writing only `\n` leaves
-                            // the password sitting in the input buffer, the
-                            // client keeps waiting, and the session dies as a
-                            // bogus "连接超时".
-                            let bytes = if cfg!(target_os = "windows") {
-                                format!("{}\r", pw_owned).into_bytes()
-                            } else {
-                                format!("{}\n", pw_owned).into_bytes()
-                            };
-                            if let Ok(mut w) = writer.lock() {
-                                let _ = w.write_all(&bytes);
-                                let _ = w.flush();
-                            }
-                            // 记录喂密码时刻：监控线程据此把超时预算重启为
-                            // AUTH_COMPLETE_BUDGET_SECS，避免慢提示被误杀。
-                            if let Ok(mut f) = password_fed_at_feeder.lock() {
-                                *f = Some(Instant::now());
-                            }
-                            debug_log::term(
-                                "DEBUG",
-                                "conn",
-                                "password-prompt-detected",
-                                "password prompt matched, feeding password",
-                            );
-                        }
-                        AuthAction::AnswerHostKeyYes => {
-                            // 首连确认：accept-new 语义下的自动接受，与 SFTP 路径一致。
-                            if let Ok(mut w) = writer.lock() {
-                                let _ = w.write_all(b"yes\n");
-                                let _ = w.flush();
-                            }
-                            debug_log::term(
-                                "DEBUG",
-                                "conn",
-                                "hostkey-yes-answered",
-                                "first-connect host key confirmation answered yes",
-                            );
-                        }
-                        AuthAction::Unsatisfiable(msg) => {
-                            debug_log::term("ERROR", "conn", "auth-unsatisfiable", msg);
-                            let _ = un_tx_feeder.send(msg);
-                            break;
-                        }
-                        AuthAction::Idle => {}
-                    }
-                    if hk_changed && !hk_sent {
-                        // host key 变更：ssh 在握手阶段直接报错退出，不会弹密码提示。
-                        // 立即通知主线程清旧 key 重试，不等 EOF。
-                        let _ = hk_tx_feeder.send(true);
-                        hk_sent = true;
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        if !hk_sent {
-            let _ = hk_tx_feeder.send(false);
-        }
-    });
-
-    let diag_snapshot = || {
-        responder
-            .lock()
-            .map(|r| r.diag())
-            .unwrap_or_else(|_| "(responder lock poisoned)".to_string())
-    };
-
-    let mut result: std::result::Result<bool, String>;
-    // 外层安全上限：真实超时由监控线程的分阶段预算触发（pre-prompt 30s /
-    // 喂密码后 15s），这里只是兜底，防止任何路径意外卡死前端 invoke。
-    let outer_deadline = Instant::now() + Duration::from_secs(45);
-    loop {
-        // 二次验证码 / 加密私钥口令：200ms 轮询内即可给出明确错误。
-        if let Ok(msg) = un_rx.try_recv() {
-            let _ = pty.kill();
-            debug_log::term(
-                "ERROR",
-                "conn",
-                "auth-unsatisfiable-final",
-                &format!("msg={} diag={}", msg, diag_snapshot()),
-            );
-            result = Err(format!("✗ {}", msg));
-            break;
-        }
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(Some(0)) => {
-                tracing::info!("[TEST-CONN] test_ssh_password: auth OK (exit 0)");
-                let auto_accepted = responder
-                    .lock()
-                    .map(|r| r.host_key_answered())
-                    .unwrap_or(false);
-                if auto_accepted {
-                    debug_log::term(
-                        "INFO",
-                        "conn",
-                        "hostkey-auto-accepted",
-                        "first-connect host key auto-accepted (accept-new semantics)",
-                    );
-                }
-                result = Ok(true);
-                break;
-            }
-            Ok(Some(code)) => {
-                tracing::info!("[TEST-CONN] test_ssh_password: auth FAILED (exit {})", code);
-                // 非零退出：按是否见过密码提示 + 会话记录归类，杜绝把
-                // 「密码错」与「主机不可达」混成一句误导性的「主机不可达」。
-                let (saw_prompt, diag) = responder
-                    .lock()
-                    .map(|r| (r.password_prompt_seen(), r.diag()))
-                    .unwrap_or((false, String::new()));
-                let msg = classify_password_auth_failure(ssh, saw_prompt, &diag);
-                debug_log::term(
-                    "ERROR",
-                    "conn",
-                    "auth-failed",
-                    &format!("code={} saw_prompt={} msg={}", code, saw_prompt, msg),
-                );
-                result = Err(msg);
-                break;
-            }
-            Ok(None) => {
-                let _ = pty.kill();
-                let fed = password_fed_at.lock().map(|g| g.is_some()).unwrap_or(false);
-                debug_log::term(
-                    "ERROR",
-                    "conn",
-                    "auth-timeout",
-                    &format!("diag={} password_fed={}", diag_snapshot(), fed),
-                );
-                // 按阶段区分：喂过密码仍卡 → 认证无响应；未喂密码 → 主机不可达/握手过慢。
-                // 绝不把两者混成一个误导性的「主机不可达」。
-                let msg = if fed {
-                    "SSH 认证超时（已收到密码但长时间无响应，可能触发二次验证或服务器繁忙）"
-                        .to_string()
-                } else {
-                    "SSH 连接超时（主机不可达、网络不通，或 SSH 握手/密钥协商过慢）".to_string()
-                };
-                result = Err(msg);
-                break;
-            }
-            Err(_) => {
-                if Instant::now() >= outer_deadline {
-                    let _ = pty.kill();
-                    debug_log::term(
-                        "ERROR",
-                        "conn",
-                        "auth-timeout-outer",
-                        &format!("diag={}", diag_snapshot()),
-                    );
-                    tracing::warn!("[TEST-CONN] test_ssh_password: recv_timeout(13s) hit -> 认证超时");
-                    result = Err("SSH 认证超时（握手/网络过慢，或密码提示未出现）".to_string());
-                    break;
-                }
-            }
-        }
-    }
-    // host key 变更优先于退出码判断：ssh 在握手阶段直接报错退出，不会弹密码提示，
-    // 否则会被误判为「密码不正确或主机不可达」，误导用户（典型场景：云服务器重置系统后 host key 变了）。
-    // 仅失败路径等待 feeder 的结论（成功路径不可能有 host key 错误），最多 300ms。
-    let hk_changed = match &result {
-        Ok(true) => false,
-        _ => hk_rx.recv_timeout(Duration::from_millis(300)).unwrap_or(false),
-    };
-    if hk_changed {
-        if !retried {
-            // 自动清除旧 key 并整体重试一次（等价于用户手动 ssh-keygen -R 后重连）
-            let _ = crate::core::platform::clear_known_host(&ssh.host, ssh.port);
-            drop(feeder);
-            return test_ssh_password(ssh, pw, true);
-        }
-        result = Err(format!(
-            "✗ SSH 主机密钥校验失败（远程主机密钥已变更，很可能系统已重置）。已自动清除旧密钥并重试，但仍失败：{}@{}:{}",
+/// 把 `ssh_common::establish` 已归类的错误字符串映射到测试连接的 `✗ SSH …` 文案，
+/// 复用既有 `classify_*` 辅助与 backendError.ts 的本地化规则，保持行为一致。
+fn map_establish_error(ssh: &SshConnectionInfo, e: &str) -> String {
+    // host key 变更：保留专属可操作文案（backendError 规则 `^✗ SSH 主机密钥校验失败`）。
+    if e.contains("主机密钥") {
+        return format!(
+            "✗ SSH 主机密钥校验失败（远程主机密钥已变更，很可能系统已重置）：{}@{}:{}",
             ssh.username, ssh.host, ssh.port
-        ));
+        );
     }
-    // 绝不无限等待 feeder 线程：ssh 已被 kill 或自行退出后读端会返回 EOF，
-    // 但为绝对避免 join 阻塞导致命令线程卡死，这里 detach（丢弃 JoinHandle），
-    // feeder 线程会在读端返回后自行结束。
-    drop(feeder);
-    result
-}
-
-/// 带超时的命令执行（密钥模式测试用）：成功返回 `Ok(())`；失败返回 `Err(原因)`，
-/// 原因取 ssh 的 stderr（已 trim，空则给通用文案），便于上层把「密钥错」与
-/// 「主机不可达」区分开。
-///
-/// 仅密钥模式测试路径使用；固定 `LC_MESSAGES=C` 使 OpenSSH 关键错误稳定为英文，
-/// 保证上层子串匹配生效（与 pty 路径的 locale 处理一致）。
-fn run_command_with_timeout(
-    bin: &str,
-    args: &[String],
-    timeout: Duration,
-) -> std::result::Result<(), String> {
-    tracing::info!(
-        "[TEST-CONN] run_command_with_timeout: spawning {} with {} args, timeout={:?}",
-        bin,
-        args.len(),
-        timeout
-    );
-    let mut child = Command::new(bin)
-        .args(args)
-        .env("LC_MESSAGES", "C")
-        .env("LC_ALL", "")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("无法启动进程 {}: {}", bin, e))?;
-    debug_log::term(
-        "DEBUG",
-        "conn",
-        "key-mode-spawned",
-        &format!("bin={} timeoutMs=8000", bin),
-    );
-
-    // 在等待线程内一并收集 stderr，供上层归类失败根因。
-    let stderr_pipe = child.stderr.take();
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let status = child.wait();
-        let mut s = String::new();
-        if let Some(mut e) = stderr_pipe {
-            let _ = e.read_to_string(&mut s);
+    // 其余按「认证级」vs「连接级」区分：ssh_common 已给出精确的中文归类，
+    // 这里只决定落到哪一个 `✗ SSH …` 前缀，避免把「密码错」说成「主机不可达」。
+    let is_auth = e.contains("认证失败")
+        || e.contains("Permission denied")
+        || e.contains("被拒绝")
+        || e.contains("未通过")
+        || e.contains("未保存密码")
+        || e.contains("私钥");
+    if is_auth {
+        if ssh.auth_method == "private_key" {
+            classify_key_auth_failure(ssh, e)
+        } else {
+            classify_password_auth_failure(ssh, true, e)
         }
-        let _ = tx.send((status, s));
-    });
-
-    match rx.recv_timeout(timeout) {
-        Ok((Ok(status), stderr)) => {
-            if status.success() {
-                tracing::info!(
-                    "[TEST-CONN] run_command_with_timeout: {} exited success",
-                    bin
-                );
-                debug_log::term(
-                    "DEBUG",
-                    "conn",
-                    "key-mode-exited",
-                    &format!("bin={} success=true", bin),
-                );
-                Ok(())
-            } else {
-                tracing::warn!(
-                    "[TEST-CONN] run_command_with_timeout: {} exited non-zero",
-                    bin
-                );
-                let stderr = stderr.trim().to_string();
-                // 非零退出：把 stderr 透传给调用方归类（不在此处下结论）。
-                Err(if stderr.is_empty() {
-                    format!("密钥认证失败（{} 非零退出，无错误输出）", bin)
-                } else {
-                    stderr
-                })
-            }
-        }
-        Ok((Err(e), _)) => {
-            tracing::warn!("[TEST-CONN] run_command_with_timeout: {} error: {}", bin, e);
-            Err(format!("进程 {} 错误: {}", bin, e))
-        }
-        Err(_) => {
-            tracing::warn!(
-                "[TEST-CONN] run_command_with_timeout: {} TIMEOUT after {:?}",
-                bin, timeout
-            );
-            Err(format!("连接 {} 超时（握手/认证过慢）", bin))
-        }
+    } else {
+        classify_password_auth_failure(ssh, false, e)
     }
 }
+
+
 
 /// 退化方案：仅做 TCP 端口探测，并明确告知用户未验证身份
 ///

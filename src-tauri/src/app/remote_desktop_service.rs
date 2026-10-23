@@ -1,19 +1,28 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use russh::client::Handle;
+use russh::ChannelMsg;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::app::ssh_common::{self, SshHostKeyHandler};
 use crate::core::types::SshConnectionInfo;
 
 struct TunnelState {
-    pty_master: Option<Box<dyn MasterPty + Send>>,
-    pty_child: Option<Box<dyn portable_pty::Child + Send>>,
+    /// Shared handle; keeps the russh session (and every forwarded channel)
+    /// alive for the whole remote-desktop session. `Handle` is not `Clone`, so
+    /// it is wrapped in `Arc` and handed to the per-connection forward tasks.
+    /// Held here purely as a lifetime guard — dropping it (on session close,
+    /// together with the accept loop's own clone) is what tears the session down.
+    #[allow(dead_code)]
+    ssh: Arc<Handle<SshHostKeyHandler>>,
+    /// Stops the local forward listener's accept loop on session close.
+    tunnel_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     ws_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
@@ -78,7 +87,8 @@ impl RemoteDesktopService {
             ssh.host, ssh.username, ssh.auth_method, ssh.password.is_some()
         );
 
-        let ssh_output = run_ssh_command(ssh, "which tigervncserver x11vnc vncserver Xvnc Xtightvnc 2>/dev/null; echo SEP123456; ( grep -E '^(ID|ID_LIKE)=' /etc/os-release 2>/dev/null | tr 'A-Z' 'a-z' ) ; echo SEP123456; vncserver -list 2>/dev/null; echo SEP123456; ( if uname -s 2>/dev/null | grep -qi darwin; then netstat -an -f inet -p tcp 2>/dev/null | grep -E ':590[0-9]' || lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -E ':590[0-9]'; else ss -tlnp 2>/dev/null | grep -E ':590[0-9]' || netstat -tlnp 2>/dev/null | grep -E ':590[0-9]'; fi ) || true; echo SEP123456; test -f ~/.vnc/passwd && echo PASSWD_EXISTS || echo NO_PASSWD; echo SEP123456; uname -s 2>/dev/null || echo UNKNOWN_UNAME; echo SEP123456; which startxfce4 gnome-session xterm 2>/dev/null || true")
+        let ssh_output = run_ssh_command(ssh, "which tigervncserver x11vnc vncserver Xvnc Xtightvnc 2>/dev/null; echo SEP123456; ( grep -E '^(ID|ID_LIKE)=' /etc/os-release 2>/dev/null | tr 'A-Z' 'a-z' ) ; echo SEP123456; vncserver -list 2>/dev/null; echo SEP123456; ( if uname -s 2>/dev/null | grep -qi darwin; then netstat -an -f inet -p tcp 2>/dev/null | grep -E ':590[0-9]' || lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -E ':590[0-9]'; else ss -tlnp 2>/dev/null | grep -E ':590[0-9]' || netstat -tlnp 2>/dev/null | grep -E ':590[0-9]'; fi ) || true; echo SEP123456; test -f ~/.vnc/passwd && echo PASSWD_EXISTS || echo NO_PASSWD; echo SEP123456; uname -s 2>/dev/null || echo UNKNOWN_UNAME; echo SEP123456; which startxfce4 gnome-session xterm 2>/dev/null || true", 30)
+            .await
             .map_err(|e| format!("SSH connection failed: {}", e))?;
 
         tracing::info!("[remote-desktop-setup] SSH output ({} bytes): {}", ssh_output.len(), if ssh_output.len() > 500 { &ssh_output[..500] } else { &ssh_output });
@@ -305,79 +315,10 @@ impl RemoteDesktopService {
             ssh.username
         );
 
-        let (master, reader, writer, child) = start_ssh_tunnel_pty(ssh, local_port, vnc_port)?;
+        let (ssh_handle, tunnel_shutdown) =
+            start_ssh_tunnel_russh(ssh, local_port, vnc_port).await?;
 
-        let password = ssh.password.clone();
-        let password_auth = ssh.auth_method == "password" && password.is_some();
-
-        tracing::info!("[remote-desktop] password_auth={}, starting auto-fill thread", password_auth);
-
-        if password_auth {
-            let pwd = password.unwrap();
-            let mut trailing = String::with_capacity(256);
-            let mut password_filled = false;
-
-            std::thread::spawn(move || {
-                let mut buf = [0u8; 4096];
-                let mut reader = reader;
-                let mut writer = writer;
-                tracing::info!("[remote-desktop] Password auto-fill thread started, waiting for prompt...");
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) => {
-                            tracing::info!("[remote-desktop] PTY reader EOF");
-                            break;
-                        }
-                        Ok(n) => {
-                            let output = String::from_utf8_lossy(&buf[..n]).to_string();
-                            tracing::debug!("[remote-desktop] PTY output: {}", output.trim());
-                            if password_filled {
-                                continue;
-                            }
-                            trailing.push_str(&output);
-                            if trailing.len() > 512 {
-                                trailing = trailing[trailing.len() - 512..].to_string();
-                            }
-                            let lower = trailing.to_lowercase();
-                            let needs_password = lower.ends_with("password:")
-                                || lower.ends_with("password: ")
-                                || (lower.contains("password:") && trailing.trim_end().ends_with(':'))
-                                || lower.ends_with("passphrase:")
-                                || lower.ends_with("passphrase for key:");
-
-                            if needs_password {
-                                tracing::info!("[remote-desktop] Detected password prompt, auto-filling...");
-                                // CR, not LF: ConPTY will not submit a bare newline
-                                // (see `Pty::write_line`).
-                                let pw_bytes = if cfg!(target_os = "windows") {
-                                    format!("{}\r", pwd)
-                                } else {
-                                    format!("{}\n", pwd)
-                                };
-                                if let Err(e) = writer.write_all(pw_bytes.as_bytes()) {
-                                    tracing::error!("[remote-desktop] Failed to write password: {}", e);
-                                }
-                                if let Err(e) = writer.flush() {
-                                    tracing::error!("[remote-desktop] Failed to flush: {}", e);
-                                }
-                                password_filled = true;
-                                trailing.clear();
-                                tracing::info!("[remote-desktop] Password auto-filled successfully");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("[remote-desktop] PTY read error: {}", e);
-                            break;
-                        }
-                    }
-                }
-            });
-        } else {
-            drop(reader);
-            drop(writer);
-        }
-
-        tracing::info!("[remote-desktop] Waiting for SSH tunnel to be ready on port {}...", local_port);
+        tracing::info!("[remote-desktop] Waiting for local forward port {} to be ready...", local_port);
         let mut retries = 0;
         let max_retries = 20;
         loop {
@@ -415,8 +356,8 @@ impl RemoteDesktopService {
         tunnels.insert(
             session_id.to_string(),
             TunnelState {
-                pty_master: Some(master),
-                pty_child: Some(child),
+                ssh: ssh_handle,
+                tunnel_shutdown: Some(tunnel_shutdown),
                 ws_shutdown: Some(shutdown_tx),
             },
         );
@@ -435,9 +376,11 @@ impl RemoteDesktopService {
             if let Some(tx) = state.ws_shutdown.take() {
                 let _ = tx.send(());
             }
-            if let Some(ref mut child) = state.pty_child {
-                let _ = child.kill();
+            if let Some(tx) = state.tunnel_shutdown.take() {
+                let _ = tx.send(());
             }
+            // Dropping `state.ssh` (the last `Arc<Handle>`) closes the SSH
+            // session and every forwarded channel.
         }
         Ok(())
     }
@@ -449,8 +392,8 @@ impl RemoteDesktopService {
             if let Some(tx) = state.ws_shutdown.take() {
                 let _ = tx.send(());
             }
-            if let Some(ref mut child) = state.pty_child {
-                let _ = child.kill();
+            if let Some(tx) = state.tunnel_shutdown.take() {
+                let _ = tx.send(());
             }
         }
     }
@@ -465,85 +408,133 @@ async fn find_available_port() -> Result<u16, String> {
     Ok(port)
 }
 
-fn start_ssh_tunnel_pty(
+/// Establish the russh session and bind a local TCP listener that replaces the
+/// old `ssh -L` port forward. Each connection accepted on `local_port` is
+/// bridged to the remote VNC server (`localhost:<vnc_port>`) through a fresh
+/// `direct-tcpip` channel — no `ssh.exe`, no password-prompt scraping.
+async fn start_ssh_tunnel_russh(
     ssh: &SshConnectionInfo,
     local_port: u16,
     vnc_port: u16,
-) -> Result<
-    (
-        Box<dyn MasterPty + Send>,
-        Box<dyn Read + Send>,
-        Box<dyn Write + Send>,
-        Box<dyn portable_pty::Child + Send>,
-    ),
-    String,
-> {
-    let pty_system = native_pty_system();
+) -> Result<(Arc<Handle<SshHostKeyHandler>>, tokio::sync::oneshot::Sender<()>), String> {
+    let handle = Arc::new(
+        ssh_common::establish(ssh)
+            .await
+            .map_err(|e| format!("SSH 隧道建立失败：{}", e))?,
+    );
 
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("openpty failed: {}", e))?;
+    let listener = TcpListener::bind(("127.0.0.1", local_port))
+        .await
+        .map_err(|e| format!("无法绑定本地转发端口 127.0.0.1:{}: {}", local_port, e))?;
 
-    let ssh_bin = crate::core::platform::resolve_ssh_binary()?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let mut args: Vec<String> = Vec::new();
+    let handle_for_loop = Arc::clone(&handle);
+    ssh_common::spawn_on(run_tunnel_accept_loop(handle_for_loop, listener, vnc_port, shutdown_rx))
+        .map_err(|e| format!("SSH 隧道转发任务启动失败：{}", e))?;
 
-    args.push("-o".to_string());
-    args.push("StrictHostKeyChecking=accept-new".to_string());
-    args.push("-o".to_string());
-    args.push("ServerAliveInterval=30".to_string());
-    args.push("-o".to_string());
-    args.push("ServerAliveCountMax=3".to_string());
-    args.push("-N".to_string());
-    args.push("-L".to_string());
-    args.push(format!("{}:localhost:{}", local_port, vnc_port));
+    tracing::info!(
+        "[remote-desktop] SSH tunnel (russh) started: local 127.0.0.1:{} -> remote localhost:{}",
+        local_port,
+        vnc_port
+    );
+    Ok((handle, shutdown_tx))
+}
 
-    if ssh.port != 22 {
-        args.push("-p".to_string());
-        args.push(ssh.port.to_string());
-    }
-
-    if ssh.auth_method == "private_key" {
-        if let Some(key_path) = &ssh.private_key_path {
-            args.push("-i".to_string());
-            args.push(key_path.clone());
+/// Accept loop for the local forward port. Spawned onto the dedicated SSH
+/// runtime; terminates when `shutdown_rx` fires (on session close).
+async fn run_tunnel_accept_loop(
+    handle: Arc<Handle<SshHostKeyHandler>>,
+    listener: TcpListener,
+    vnc_port: u16,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                match accept {
+                    Ok((tcp, _addr)) => {
+                        let h = Arc::clone(&handle);
+                        tokio::spawn(async move {
+                            if let Err(e) = forward_tcp_to_direct_tcpip(h, tcp, vnc_port).await {
+                                tracing::debug!("[remote-desktop] tunnel forward error: {}", e);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("[remote-desktop] tunnel listener accept error: {}", e);
+                        break;
+                    }
+                }
+            }
+            _ = &mut shutdown_rx => {
+                tracing::info!("[remote-desktop] tunnel accept loop shutting down");
+                break;
+            }
         }
     }
+}
 
-    args.push(format!("{}@{}", ssh.username, ssh.host));
+/// Bridge one accepted local TCP connection to the remote VNC server through a
+/// `direct-tcpip` channel. Bytes flow both ways until either side closes.
+async fn forward_tcp_to_direct_tcpip(
+    handle: Arc<Handle<SshHostKeyHandler>>,
+    tcp: TcpStream,
+    vnc_port: u16,
+) -> Result<(), String> {
+    let channel = handle
+        .channel_open_direct_tcpip("localhost", vnc_port as u32, "127.0.0.1", 0)
+        .await
+        .map_err(|e| format!("SSH 转发通道建立失败：{}", e))?;
 
-    tracing::info!("[remote-desktop] Starting SSH tunnel PTY: {} {}", &ssh_bin, args.join(" "));
+    let (mut ch_read, ch_write) = channel.split();
+    let (mut tcp_read, mut tcp_write) = tcp.into_split();
 
-    let mut cmd = CommandBuilder::new(ssh_bin);
-    cmd.args(&args);
-    cmd.env("TERM", "xterm-256color");
+    let mut buf = vec![0u8; 32768];
 
-    let mut child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("SSH spawn failed: {}", e))?;
+    // VNC client (via ws proxy) -> SSH channel -> remote VNC.
+    let tcp_to_chan = async {
+        loop {
+            match tcp_read.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if ch_write.data_bytes(buf[..n].to_vec()).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = ch_write.eof().await;
+        let _ = ch_write.close().await;
+    };
 
-    drop(pair.slave);
+    // Remote VNC -> SSH channel -> VNC client.
+    let chan_to_tcp = async {
+        loop {
+            match ch_read.wait().await {
+                Some(ChannelMsg::Data { data }) => {
+                    if tcp_write.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    if tcp_write.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                Some(_) => continue,
+            }
+        }
+        let _ = tcp_write.shutdown().await;
+    };
 
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("clone reader failed: {}", e))?;
-
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| format!("take writer failed: {}", e))?;
-
-    let master = pair.master;
-
-    tracing::info!("[remote-desktop] SSH tunnel PTY started: local {} -> remote localhost:{}", local_port, vnc_port);
-    Ok((master, reader, writer, child))
+    tokio::select! {
+        _ = tcp_to_chan => {},
+        _ = chan_to_tcp => {},
+    }
+    Ok(())
 }
 
 async fn run_ws_proxy(
@@ -648,162 +639,66 @@ async fn handle_ws_connection(stream: TcpStream, target_addr: &str) -> Result<()
     Ok(())
 }
 
-fn run_ssh_command(ssh: &SshConnectionInfo, command: &str) -> Result<String, String> {
-    run_ssh_command_with_timeout(ssh, command, 30)
-}
+/// Run a command on the remote host over a native russh `exec` channel
+/// (replaces the old `ssh.exe` + PTY password-scraping approach). Collects
+/// stdout/stderr, strips ANSI, and enforces a wall-clock timeout.
+async fn run_ssh_command(
+    ssh: &SshConnectionInfo,
+    command: &str,
+    timeout_secs: u64,
+) -> Result<String, String> {
+    tracing::info!(
+        "[remote-desktop-setup] run_ssh_command: {}@{}:{} -> '{}'",
+        ssh.username, ssh.host, ssh.port, command
+    );
 
-fn run_ssh_command_with_timeout(ssh: &SshConnectionInfo, command: &str, timeout_secs: u64) -> Result<String, String> {
-    tracing::info!("[remote-desktop-setup] run_ssh_command: {}@{}:{} -> '{}'", ssh.username, ssh.host, ssh.port, command);
+    let ssh = ssh.clone();
+    let command = command.to_string();
 
-    let pty_system = native_pty_system();
+    let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async move {
+        let handle = ssh_common::establish(&ssh).await?;
 
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("openpty failed: {}", e))?;
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|e| format!("无法打开命令通道: {}", e))?;
 
-    let ssh_bin = crate::core::platform::resolve_ssh_binary()?;
+        channel
+            .exec(true, command.into_bytes())
+            .await
+            .map_err(|e| format!("命令执行失败: {}", e))?;
 
-    let mut args: Vec<String> = Vec::new();
-    args.push("-o".to_string());
-    args.push("StrictHostKeyChecking=accept-new".to_string());
-    args.push("-o".to_string());
-    args.push(format!("ConnectTimeout=10"));
-
-    if ssh.port != 22 {
-        args.push("-p".to_string());
-        args.push(ssh.port.to_string());
-    }
-
-    if ssh.auth_method == "private_key" {
-        if let Some(key_path) = &ssh.private_key_path {
-            args.push("-i".to_string());
-            args.push(key_path.clone());
-        }
-    }
-
-    args.push(format!("{}@{}", ssh.username, ssh.host));
-    args.push(command.to_string());
-
-    let mut cmd = CommandBuilder::new(ssh_bin);
-    cmd.args(&args);
-    cmd.env("TERM", "xterm-256color");
-
-    let mut child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("SSH spawn failed: {}", e))?;
-
-    drop(pair.slave);
-
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("clone reader failed: {}", e))?;
-
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| format!("take writer failed: {}", e))?;
-
-    let password = ssh.password.clone();
-    let password_auth = ssh.auth_method == "password" && password.is_some();
-
-    let output_arc: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
-    let done_arc = Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-    let output_clone = output_arc.clone();
-    let done_clone = done_arc.clone();
-
-    let read_thread = std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        let mut trailing = String::with_capacity(512);
-        let mut password_filled = !password_auth;
-        let mut local_writer = writer;
-
+        let mut output = String::new();
         loop {
-            match reader.read(&mut buf) {
-                Ok(0) => {
-                    tracing::info!("[remote-desktop-setup] PTY reader EOF, total output so far: {} bytes", output_clone.lock().map(|o| o.len()).unwrap_or(0));
-                    break;
+            match channel.wait().await {
+                Some(ChannelMsg::Data { data }) => {
+                    output.push_str(&String::from_utf8_lossy(&data));
                 }
-                Ok(n) => {
-                    let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
-
-                    if let Ok(mut out) = output_clone.lock() {
-                        out.push_str(&chunk);
-                    }
-
-                    tracing::info!("[remote-desktop-setup] Read {} bytes, total: {}, password_filled: {}", n, output_clone.lock().map(|o| o.len()).unwrap_or(0), password_filled);
-
-                    if !password_filled {
-                        trailing.push_str(&chunk);
-                        if trailing.len() > 1024 {
-                            trailing = trailing[trailing.len() - 512..].to_string();
-                        }
-                        let lower = trailing.to_lowercase();
-                        let needs_password = lower.ends_with("password:")
-                            || lower.ends_with("password: ")
-                            || lower.ends_with("passphrase:")
-                            || (lower.contains("password:") && trailing.trim_end().ends_with(':'));
-
-                        if needs_password {
-                            tracing::info!("[remote-desktop-setup] Detected password prompt, auto-filling...");
-                            if let Some(ref pwd) = password {
-                                // CR, not LF: ConPTY will not submit a bare newline
-                                // (see `Pty::write_line`).
-                                let pw_bytes = if cfg!(target_os = "windows") {
-                                    format!("{}\r", pwd)
-                                } else {
-                                    format!("{}\n", pwd)
-                                };
-                                let _ = local_writer.write_all(pw_bytes.as_bytes());
-                                let _ = local_writer.flush();
-                            }
-                            password_filled = true;
-                            trailing.clear();
-                            tracing::info!("[remote-desktop-setup] Password auto-filled, continuing to read output...");
-                        }
-                    }
-
-                    if password_filled {
-                        tracing::debug!("[remote-desktop-setup] Post-fill output chunk ({} bytes): {}", chunk.len(), chunk.trim());
-                    }
+                Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    output.push_str(&String::from_utf8_lossy(&data));
                 }
-                Err(_) => break,
+                // Server finished sending; keep draining until Close/None.
+                Some(ChannelMsg::Eof) => {}
+                Some(ChannelMsg::Close) | None => break,
+                Some(_) => continue,
             }
         }
-        done_clone.store(true, std::sync::atomic::Ordering::Relaxed);
-    });
+        Ok::<String, String>(clean_ansi_output(&output))
+    })
+    .await;
 
-    let start = std::time::Instant::now();
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if done_arc.load(std::sync::atomic::Ordering::Relaxed) {
-            break;
+    match result {
+        Ok(Ok(cleaned)) => {
+            tracing::info!(
+                "[remote-desktop-setup] Cleaned output ({} bytes): {}",
+                cleaned.len(),
+                if cleaned.len() > 300 { &cleaned[..300] } else { &cleaned }
+            );
+            Ok(cleaned)
         }
-        if start.elapsed().as_secs() > timeout_secs {
-            tracing::warn!("[remote-desktop-setup] Command timed out after {}s", timeout_secs);
-            let _ = child.kill();
-            break;
-        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(format!("命令执行超时（{} 秒）", timeout_secs)),
     }
-
-    let _ = read_thread.join();
-    let exit_status = child.wait();
-    tracing::info!("[remote-desktop-setup] SSH child exit status: {:?}", exit_status);
-
-    let output = output_arc.lock().unwrap().clone();
-    tracing::info!("[remote-desktop-setup] Raw output ({} bytes): {}", output.len(), if output.len() > 300 { &output[..300] } else { &output });
-
-    let cleaned = clean_ansi_output(&output);
-    tracing::info!("[remote-desktop-setup] Cleaned output ({} bytes): {}", cleaned.len(), if cleaned.len() > 300 { &cleaned[..300] } else { &cleaned });
-
-    Ok(cleaned)
 }
 
 fn clean_ansi_output(input: &str) -> String {
