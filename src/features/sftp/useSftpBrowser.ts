@@ -4,6 +4,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import type { SshConnectionInfo } from '../../proto/connection';
 import {
   onSftpProgress,
+  onSftpStatus,
   sftpCancel,
   sftpChmod,
   sftpCreateFile,
@@ -414,6 +415,32 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
           };
         }),
       );
+    })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // Connection-lifecycle beats from the native pool. "connecting"/"ready"
+  // drive the status light from the backend's actual view; "dropped" is
+  // deliberately ignored here — the pool reconnects on the next operation,
+  // whose own connecting/ready beats (or the invoke error path) update the
+  // state, so a mid-transfer drop never flashes the whole pane.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    onSftpStatus((s) => {
+      if (s.phase === 'connecting') {
+        setConnState('connecting');
+        setConnectingSince(Date.now());
+      } else if (s.phase === 'ready') {
+        everReadyRef.current = true;
+        setConnState('ready');
+        setConnectingSince(null);
+      }
     })
       .then((fn) => {
         unlisten = fn;

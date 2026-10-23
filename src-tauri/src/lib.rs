@@ -642,6 +642,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let icon_service = Arc::new(IconService::new(db_arc.clone(), icons_dir));
             let remote_desktop_service = Arc::new(RemoteDesktopService::new());
             let sftp_service = Arc::new(SftpService::new());
+            // Push connection-lifecycle beats (connecting/ready/dropped) to the
+            // SFTP window in real time via the events channel.
+            {
+                let handle_for_status = app_handle.clone();
+                sftp_service.set_status_sink(Arc::new(move |s| {
+                    let _ = tauri::Emitter::emit(&handle_for_status, "sftp-status", &s);
+                }));
+            }
             let licensing_service = Arc::new(LicensingService::new(effective_data_dir.clone()));
             let _ = write_debug_log_all(&debug_paths, "[setup] all services initialized");
 
@@ -871,7 +879,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::licensing::extend_trial,
             interface::commands::licensing::get_pro_product_id,
         ])
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!())
+        .map(|app| {
+            // Tear down pooled SSH sessions (and their keepalive probes) on
+            // exit instead of relying on process teardown to close the TCP
+            // connections. The sftp window already disconnects on close.
+            app.run(move |app: &tauri::AppHandle, event: tauri::RunEvent| {
+                if let tauri::RunEvent::Exit = event {
+                    app.state::<SftpService>().shutdown_all();
+                }
+            });
+        });
 
     match &result {
         Ok(()) => {

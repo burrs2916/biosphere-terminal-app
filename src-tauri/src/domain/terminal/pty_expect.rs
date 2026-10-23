@@ -475,12 +475,15 @@ mod tests {
     /// Guardrail: every pty-expect call site must go through this module.
     /// A regression to a private, ANSI-naive matcher is exactly the bug that
     /// produced the false "连接超时" on Windows.
+    ///
+    /// SFTP is now a native russh channel (`sftp_native`), with no pty in the
+    /// path, so it is no longer a pty-expect call site and is excluded on
+    /// purpose.
     #[test]
     fn all_call_sites_use_the_shared_module() {
         let call_sites = [
             include_str!("../../interface/commands/connection.rs"),
             include_str!("../../app/terminal_service.rs"),
-            include_str!("../../app/sftp_service.rs"),
         ];
         for src in call_sites {
             assert!(

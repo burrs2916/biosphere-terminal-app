@@ -165,3 +165,20 @@ export async function onSftpProgress(
 ): Promise<UnlistenFn> {
   return listen<SftpProgressPayload>('sftp-progress', (e) => handler(e.payload));
 }
+
+/**
+ * Connection-lifecycle beat pushed by the native pool: a handshake starts,
+ * lands, or a live session was found dead and dropped (the next operation
+ * reconnects automatically, which surfaces as a new "connecting" beat).
+ */
+export interface SftpStatusPayload {
+  phase: 'connecting' | 'ready' | 'dropped';
+  /** `host:port` for connect beats, an error digest for a drop. */
+  detail?: string;
+}
+
+export async function onSftpStatus(
+  handler: (s: SftpStatusPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<SftpStatusPayload>('sftp-status', (e) => handler(e.payload));
+}

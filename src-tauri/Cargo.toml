@@ -30,6 +30,28 @@ tokio-tungstenite = "0.24"
 futures = "0.3"
 bytes = "1"
 
+# Native SFTP transport — replaces the old `portable-pty` + system `sftp.exe`
+# subprocess lane (which paid a full SSH handshake per operation on Windows and
+# could lose command bytes to ConPTY repaints). Pure-Rust SSH + SFTP protocol,
+# zero external binaries: the app no longer needs OpenSSH installed for file
+# transfers at all.
+# - `ring` crypto backend instead of the default `aws-lc-rs`: ring needs no
+#   cmake, so a local Windows build works with just the MSVC toolchain.
+# - `ssh-key` is pinned to the exact rc russh 0.64.1 depends on, so the
+#   known_hosts check shares one `PublicKey` type instead of two copies.
+# - hmac/sha1 back hashed known_hosts entries (HMAC-SHA1(salt, hostname)).
+russh = { version = "0.64", default-features = false, features = [
+    "ring",
+    "flate2",
+    "rsa",
+] }
+russh-sftp = "2.3"
+# Hashed known_hosts entries are HMAC-SHA1(salt, hostname); we re-implement
+# only the *removal* half (russh checks and learns keys but never forgets
+# them), so the two hash crates are needed directly.
+hmac = "0.13"
+sha1 = "0.11"
+
 rusqlite = { version = "0.37", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
