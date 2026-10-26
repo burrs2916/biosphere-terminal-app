@@ -721,6 +721,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let _ = write_debug_log_all(&debug_paths, &format!("[setup] app identifier: {}", app_handle.config().identifier));
             let _ = write_debug_log_all(&debug_paths, &format!("[setup] app product_name: {:?}", app_handle.config().product_name));
             let _ = write_debug_log_all(&debug_paths, &format!("[setup] app version: {:?}", app_handle.config().version));
+            // Which exact build is this? Stamped by build.rs from `git rev-parse`
+            // — settles any "is the fix actually deployed" question from the
+            // very first line of the log.
+            let _ = write_debug_log_all(&debug_paths, &format!("[setup] build: {}", env!("GIT_COMMIT_SHA")));
             if let Some(frontend_dist) = &app_handle.config().build.frontend_dist {
                 let _ = write_debug_log_all(&debug_paths, &format!("[setup] config frontendDist: {:?}", frontend_dist));
             } else {

@@ -105,8 +105,6 @@
   "upload_files": "上传文件",
   "upload_folder": "上传文件夹",
   "upload_here": "上传到此文件夹",
-  "uploaded": "已上传：{{name}}",
-  "uploaded_count": "已上传 {{count}} 项",
   "batch_rename_apply": "重命名",
   "batch_rename_conflict": "新名称「{{name}}」已存在于当前目录。",
   "batch_rename_desc": "使用占位符组合新名称，下方实时预览结果。",

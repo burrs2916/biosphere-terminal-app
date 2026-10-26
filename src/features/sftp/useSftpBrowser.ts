@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SshConnectionInfo } from '../../proto/connection';
 import {
   onSftpProgress,
@@ -112,6 +113,27 @@ function invalidName(name: string): boolean {
   return name.includes('/') || name.includes('\\') || name === '.' || name === '..';
 }
 
+/**
+ * True when `dir` is the viewed directory itself or nested inside it. Uploading
+ * into a child bumps the child row's mtime in the parent listing, so a parent
+ * view counts as "affected" too; an unrelated directory must not be refreshed.
+ */
+function viewCoversDir(viewed: string | null, dir: string): boolean {
+  if (!viewed) return false;
+  if (dir === viewed) return true;
+  const prefix = viewed.endsWith('/') ? viewed : `${viewed}/`;
+  return dir.startsWith(prefix);
+}
+
+/** Payload of the `sftp-remote-changed` broadcast (upload success). */
+export interface RemoteChangedPayload {
+  host: string;
+  port: number;
+  username: string;
+  /** Destination directory; `.` means the remote login directory. */
+  dir: string;
+}
+
 /** Restore the saved column ordering, falling back to name ascending. */
 function readSort(): { key: SortKey; dir: SortDir } {
   const raw = readPref(SORT_KEY);
@@ -193,6 +215,9 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
   sshRef.current = ssh;
   const pathRef = useRef(path);
   pathRef.current = path;
+  /** Stable view of the login directory for the long-lived remote-changed listener. */
+  const homePathRef = useRef<string | null>(null);
+  homePathRef.current = homePath;
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
   /** Anchor row for Shift range selection — must survive the click extending it. */
@@ -341,6 +366,34 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 远端目录变化联动：任何上传成功（本窗口、其他 SFTP 窗口、终端工具栏）
+  // 都广播 `sftp-remote-changed`。本窗口若连着同一台主机且正看着目标目录
+  // （或其父目录），自动重列当前视图——文件即刻出现，无需手动刷新。
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | null = null;
+    void listen<RemoteChangedPayload>('sftp-remote-changed', (event) => {
+      const p = event.payload;
+      const ssh = sshRef.current;
+      if (p.host !== ssh.host || p.port !== ssh.port || p.username !== ssh.username) return;
+      // `.` 是远端登录目录：换算成本窗口学到的 home 再比对。
+      const target = p.dir === '.' ? homePathRef.current : p.dir;
+      if (!target || !viewCoversDir(pathRef.current, target)) return;
+      void load(pathRef.current, false);
+    })
+      .then((fn) => {
+        // StrictMode 双挂载：第一轮 cleanup 已跑过时立即注销，防泄漏。
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+      unlisten = null;
+    };
+  }, [load]);
 
   // ---- derived view data ---------------------------------------------------
 
@@ -572,7 +625,6 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
       paths: string[],
       dir: string,
       remoteNames: string[] | undefined,
-      count: number,
       resume: boolean,
     ) => {
       await attemptTransfer(id, async () => {
@@ -582,15 +634,19 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
             x.id === id ? { ...x, status: 'done', percent: 100, queuePos: undefined } : x,
           ),
         );
-        notify(
-          count === 1 ? t('uploaded', { name: basename(paths[0]) }) : t('uploaded_count', { count }),
-        );
-        // Refresh whatever the user is looking at: either the destination
-        // itself, or the parent whose folder row just grew.
-        await load(pathRef.current, false);
+        // 实时反馈（代替成功 toast）：广播「远端目录已变化」。所有连着同一台
+        // 主机的传输窗口——包括本窗口——只要正看着目标目录（或其父目录）就
+        // 自动重列当前视图，新文件即刻出现在列表里。终端工具栏的上传成功
+        // 也发同一事件，两边联动走同一条通道。
+        void emit<RemoteChangedPayload>('sftp-remote-changed', {
+          host: sshRef.current.host,
+          port: sshRef.current.port,
+          username: sshRef.current.username,
+          dir,
+        });
       });
     },
-    [attemptTransfer, t, notify, load],
+    [attemptTransfer],
   );
 
   const runUpload = useCallback(
@@ -615,7 +671,7 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
         retryable: true,
         resuming: resume,
       });
-      enqueueTransfer(id, async () => runUploadOnce(id, paths, dir, remoteNames, count, resume));
+      enqueueTransfer(id, async () => runUploadOnce(id, paths, dir, remoteNames, resume));
     },
     [t, notify, load, openTransferRow, enqueueTransfer, runUploadOnce],
   );

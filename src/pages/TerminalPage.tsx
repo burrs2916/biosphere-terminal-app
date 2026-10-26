@@ -40,7 +40,7 @@ import { openNotesReferenceWindow, openAiCopilotWindow, openRemoteDesktopWindow,
 import { useConnectIntent } from '../features/terminal/connectIntent';
 import { localizeBackendError } from '../core/backendError';
 import { termTimed } from '../core/terminalLog';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
 import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { useSettingsStore } from '../engine';
 import { useNotify } from '../core/notification';
@@ -549,7 +549,17 @@ export function TerminalPage() {
             notify(t('upload_dedup_failed') || '无法读取远端目录，已跳过同名去重，重名文件可能被覆盖', 'warning');
             return sftpUpload(ssh, paths, '.', newTransferId(), undefined);
           })
-          .then(() => notify(t('upload_to_cwd_done') || '文件已传输到当前目录', 'success'))
+          .then(() => {
+            notify(t('upload_to_cwd_done') || '文件已传输到当前目录', 'success');
+            // 实时反馈：广播远端目录已变化（dir='.'，由传输窗口换算成 home），
+            // 已打开的 SFTP 窗口若在看该目录会自动重列——与窗口内上传同一通道。
+            void emit('sftp-remote-changed', {
+              host: ssh.host,
+              port: ssh.port,
+              username: ssh.username,
+              dir: '.',
+            });
+          })
           .catch((e) => notify(localizeBackendError(e), 'error'));
       } else {
         invoke('local_copy_files', { localPaths: paths, destDir: activeCwd })

@@ -105,8 +105,6 @@
   "upload_files": "Upload files",
   "upload_folder": "Upload folder",
   "upload_here": "Upload here",
-  "uploaded": "Uploaded: {{name}}",
-  "uploaded_count": "Uploaded {{count}} items",
   "batch_rename_apply": "Rename",
   "batch_rename_conflict": "New name \"{{name}}\" already exists in this folder.",
   "batch_rename_desc": "Combine placeholders to build new names; results preview live below.",
