@@ -266,6 +266,12 @@ export function RemoteFileEditor({
   /** Latest draft, readable from the Ctrl+S keymap without re-creating it. */
   const draftRef = useRef('');
   draftRef.current = draft;
+  /** Same trick for onSave: the keymap is memoized, so it must reach the
+   * latest callback through a ref — otherwise a frozen closure sees a stale
+   * `saving` flag and a second Ctrl+S during an in-flight save re-enters
+   * saveEditedFile while the backend is still reading the scratch file. */
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
 
   useEffect(() => {
     setDraft(state?.content ?? '');
@@ -292,7 +298,7 @@ export function RemoteFileEditor({
           key: 'Mod-s',
           preventDefault: true,
           run: () => {
-            onSave(draftRef.current);
+            onSaveRef.current(draftRef.current);
             return true;
           },
         },
@@ -319,7 +325,10 @@ export function RemoteFileEditor({
   }, []);
 
   const requestClose = useCallback(() => {
-    if (dirty && !saving) setConfirmDiscard(true);
+    // An in-flight save is reading the scratch file right now — closing the
+    // editor would delete it underneath the upload. Wait for it to settle.
+    if (saving) return;
+    if (dirty) setConfirmDiscard(true);
     else onClose();
   }, [dirty, saving, onClose]);
 

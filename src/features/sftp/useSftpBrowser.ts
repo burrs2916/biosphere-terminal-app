@@ -948,13 +948,17 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
         setPendingEdit(entry);
         return;
       }
+      // 未修改直接换文件：旧 scratch 已无价值，立刻清掉再开新的。
+      cleanupScratch(editorRef.current?.localDir);
       await openEditorFor(entry);
     },
-    [downloadEntries, openEditorFor],
+    [downloadEntries, openEditorFor, cleanupScratch],
   );
 
   /** Confirmed: throw away the current draft and open the parked file. */
   const confirmPendingEdit = useCallback(() => {
+    // 保存进行中时 scratch 正被上传读取，此刻换文件会把它删掉。
+    if (editorSaving) return;
     const en = pendingEdit;
     setPendingEdit(null);
     editorDirtyRef.current = false;
@@ -962,7 +966,7 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
     setEditor(null);
     cleanupScratch(old?.localDir);
     if (en) void openEditorFor(en);
-  }, [pendingEdit, openEditorFor, cleanupScratch]);
+  }, [pendingEdit, openEditorFor, cleanupScratch, editorSaving]);
 
   /**
    * Re-download the file currently open in the editor (e.g. it changed on the
@@ -994,7 +998,9 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
   const saveEditedFile = useCallback(
     async (content: string) => {
       const ed = editor;
-      if (!ed || editorSaving) return;
+      // reloading 时下载正写同一 scratch 文件：此时保存会把两股写入互相
+      // 践踏，产出损坏内容并原样传上去。按钮已禁用，这里兜底 keymap。
+      if (!ed || editorSaving || editorReloading) return;
       setEditorSaving(true);
       try {
         await writeLocalTextFile(ed.localPath, content);
@@ -1016,15 +1022,17 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
         setEditorSaving(false);
       }
     },
-    [editor, editorSaving, notify, cleanupScratch],
+    [editor, editorSaving, editorReloading, notify, cleanupScratch],
   );
 
   /** Close the editor (discard or after save) and drop its scratch dir. */
   const closeEditor = useCallback(() => {
+    // 保存中 scratch 正被上传读取，删目录会让上传读到一半的文件。
+    if (editorSaving) return;
     const ed = editorRef.current;
     setEditor(null);
     cleanupScratch(ed?.localDir);
-  }, [cleanupScratch]);
+  }, [cleanupScratch, editorSaving]);
 
   /**
    * Replay a finished transfer exactly as it was queued. The remote paths are
