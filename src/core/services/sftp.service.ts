@@ -159,6 +159,39 @@ export async function sftpDisconnect(ssh: SshConnectionInfo): Promise<void> {
   return invoke('sftp_disconnect', { ssh });
 }
 
+// ---- Local scratch-file helpers (remote file in-place editing) -------------
+// The edit flow downloads the remote file into a temp dir, lets CodeMirror
+// edit it and re-uploads it. These three commands do the filesystem side.
+
+/** Create `path` (and parents) if missing — prepares the scratch dir. */
+export async function ensureLocalDir(path: string): Promise<void> {
+  return invoke('ensure_local_dir', { path });
+}
+
+/**
+ * Read a local file as UTF-8 text. Rejects anything over 8MB or not valid
+ * UTF-8 (binary / GBK) — the edit round-trip is a whole-file overwrite, so a
+ * wrong guess would corrupt the remote file. A BOM stays in the string.
+ */
+export async function readLocalTextFile(path: string): Promise<string> {
+  return invoke('read_local_text_file', { path });
+}
+
+/** Write `content` back to the scratch file (parents created if needed). */
+export async function writeLocalTextFile(path: string, content: string): Promise<void> {
+  return invoke('write_local_text_file', { path, content });
+}
+
+/**
+ * Delete a scratch directory after an edit session ends (saved, discarded or
+ * switched files). The backend only accepts paths containing the
+ * `biosphere-sftp-edit` component — anything else is refused, so a frontend
+ * bug can never turn this into an arbitrary delete.
+ */
+export async function removeLocalDir(path: string): Promise<void> {
+  return invoke('remove_local_dir', { path });
+}
+
 /** Subscribe to live transfer progress emitted by the backend. */
 export async function onSftpProgress(
   handler: (p: SftpProgressPayload) => void,

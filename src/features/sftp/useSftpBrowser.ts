@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
+import { join, tempDir } from '@tauri-apps/api/path';
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SshConnectionInfo } from '../../proto/connection';
 import {
@@ -16,6 +17,10 @@ import {
   sftpRemove,
   sftpRename,
   sftpUpload,
+  ensureLocalDir,
+  readLocalTextFile,
+  writeLocalTextFile,
+  removeLocalDir,
   type SftpEntry,
   type SftpProgressPayload,
   type SftpRemoteItem,
@@ -24,6 +29,7 @@ import { useNotify } from '../../core/notification';
 import { localizeBackendError } from '../../core/backendError';
 import { isActiveTransfer, type TransferItem } from './TransferQueue';
 import type { ConfirmState } from './SftpDialogs';
+import type { RemoteFileEditorState } from './RemoteFileEditor';
 import {
   basename,
   formatSize,
@@ -111,6 +117,36 @@ function isCancellation(msg: string): boolean {
 /** Names that would silently target the wrong node if we passed them through. */
 function invalidName(name: string): boolean {
   return name.includes('/') || name.includes('\\') || name === '.' || name === '..';
+}
+
+// ---- 远端文本文件在线编辑 --------------------------------------------------
+// 点击/双击文本文件直接打开编辑器，保存后自动回传远端；二进制或超大的文件
+// 维持原来的「下载到本地」行为。预检在打开前做——双击 zip 不该弹出编辑器。
+
+/** 与后端 `read_local_text_file` 的上限一致，超限直接走下载。 */
+const EDIT_MAX_BYTES = 8 * 1024 * 1024;
+
+/** 明确的二进制扩展名（小写、不含点）。命中即不支持在线编辑。 */
+const BINARY_EXTENSIONS = new Set([
+  'zip', 'gz', 'bz2', 'xz', 'zst', 'tar', 'tgz', 'tbz', 'rar', '7z',
+  'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico', 'icns', 'tiff',
+  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+  'deb', 'rpm', 'apk', 'appimage', 'dmg', 'pkg', 'msi', 'exe',
+  'dll', 'so', 'dylib', 'bin', 'o', 'a', 'class', 'jar', 'war', 'pyc', 'wasm',
+  'iso', 'img', 'vhd', 'sqlite', 'sqlite3', 'db',
+  'mp3', 'flac', 'ogg', 'wav', 'm4a',
+  'mp4', 'mkv', 'avi', 'mov', 'webm', 'flv',
+  'woff', 'woff2', 'ttf', 'otf', 'eot',
+  'psd', 'ai', 'sketch',
+]);
+
+/** 无扩展名/点开头/明确文本扩展名 → 可编辑；其余按二进制处理。 */
+function isEditableName(name: string, size: number): boolean {
+  if (size > EDIT_MAX_BYTES) return false;
+  const idx = name.lastIndexOf('.');
+  // `.bashrc`、`Dockerfile`、`LICENSE` 这类没有「扩展名」的都当文本。
+  if (idx <= 0) return true;
+  return !BINARY_EXTENSIONS.has(name.slice(idx + 1).toLowerCase());
 }
 
 /**
@@ -207,6 +243,31 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
   const [chmodTargets, setChmodTargets] = useState<SftpEntry[] | null>(null);
   const [chmodValue, setChmodValue] = useState('644');
   const [batchRename, setBatchRename] = useState<SftpEntry[] | null>(null);
+
+  // 在线编辑：非 null 时视图层弹出编辑器对话框。
+  const [editor, setEditor] = useState<RemoteFileEditorState | null>(null);
+  const [editorSaving, setEditorSaving] = useState(false);
+  const [editorReloading, setEditorReloading] = useState(false);
+  // 已有未保存草稿时再双击新文件：先挂起，等用户在确认框里拍板。
+  const [pendingEdit, setPendingEdit] = useState<SftpEntry | null>(null);
+  /** Mirror of `editor` — lets the edit callbacks avoid stale-closure traps. */
+  const editorRef = useRef<RemoteFileEditorState | null>(null);
+  editorRef.current = editor;
+  /** Dirty flag reported by the editor; true = a draft would be lost. */
+  const editorDirtyRef = useRef(false);
+  const setEditorDirty = useCallback((d: boolean) => {
+    editorDirtyRef.current = d;
+  }, []);
+  /** For the window-close guard: true while a draft would be lost. */
+  const editorDirtyGetter = useCallback(
+    () => editorRef.current !== null && editorDirtyRef.current,
+    [],
+  );
+  /** Best-effort scratch cleanup; failure just means the OS temp dir cleans up later. */
+  const cleanupScratch = useCallback((localDir: string | undefined) => {
+    if (!localDir) return;
+    removeLocalDir(localDir).catch(() => {});
+  }, []);
 
   const [transfers, setTransfers] = useState<TransferItem[]>([]);
   const [history, setHistory] = useState<HistoryState>({ canBack: false, canForward: false });
@@ -362,6 +423,8 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
       // Drop anything still waiting: the window is going away, so firing those
       // transfers would move files with nowhere to report the outcome.
       queueRef.current = [];
+      // 编辑 scratch 目录同样随窗口销毁清理；失败留给 OS temp 目录兜底。
+      cleanupScratch(editorRef.current?.localDir);
       sftpDisconnect(sshRef.current).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -843,6 +906,127 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
   );
 
   /**
+   * Do the actual download + open for one entry. Split from `editFile` so the
+   * pending-edit confirmation can call it after dropping the old editor,
+   * without racing the guard that lives in `editFile`.
+   */
+  const openEditorFor = useCallback(
+    async (entry: SftpEntry) => {
+      const remotePath = joinRemote(pathRef.current, entry.name);
+      try {
+        // 每次编辑一个独立 scratch 目录：不同目录同名文件不互相覆盖，
+        // 下载失败也不会读到上次残留的旧内容。
+        const localDir = await join(await tempDir(), 'biosphere-sftp-edit', newTransferId());
+        await ensureLocalDir(localDir);
+        await sftpDownload(sshRef.current, [{ path: remotePath, isDir: false }], localDir);
+        const localPath = await join(localDir, entry.name);
+        const content = await readLocalTextFile(localPath);
+        setEditor({ name: entry.name, remotePath, localDir, localPath, content });
+      } catch (e) {
+        notify(localizeBackendError(e), 'error');
+      }
+    },
+    [notify],
+  );
+
+  /**
+   * Open a remote text file in the in-place editor.
+   *
+   * Precheck first: binary extension or oversized files fall straight through
+   * to the ordinary download flow, so double-clicking an archive behaves
+   * exactly as before. If another file is already open *with unsaved edits*,
+   * park the request — the view shows a confirm dialog, because silently
+   * replacing the editor would destroy the user's draft.
+   */
+  const editFile = useCallback(
+    async (entry: SftpEntry) => {
+      if (!isEditableName(entry.name, entry.size)) {
+        void downloadEntries([entry]);
+        return;
+      }
+      if (editorRef.current && editorDirtyRef.current) {
+        setPendingEdit(entry);
+        return;
+      }
+      await openEditorFor(entry);
+    },
+    [downloadEntries, openEditorFor],
+  );
+
+  /** Confirmed: throw away the current draft and open the parked file. */
+  const confirmPendingEdit = useCallback(() => {
+    const en = pendingEdit;
+    setPendingEdit(null);
+    editorDirtyRef.current = false;
+    const old = editorRef.current;
+    setEditor(null);
+    cleanupScratch(old?.localDir);
+    if (en) void openEditorFor(en);
+  }, [pendingEdit, openEditorFor, cleanupScratch]);
+
+  /**
+   * Re-download the file currently open in the editor (e.g. it changed on the
+   * server since it was opened) and replace the draft. The scratch dir and
+   * local path are reused, so save keeps writing to the same place.
+   */
+  const reloadEditorFile = useCallback(async () => {
+    const ed = editorRef.current;
+    if (!ed || editorReloading) return;
+    setEditorReloading(true);
+    try {
+      await sftpDownload(sshRef.current, [{ path: ed.remotePath, isDir: false }], ed.localDir);
+      const content = await readLocalTextFile(ed.localPath);
+      setEditor({ ...ed, content });
+    } catch (e) {
+      notify(localizeBackendError(e), 'error');
+    } finally {
+      setEditorReloading(false);
+    }
+  }, [editorReloading, notify]);
+
+  /**
+   * Save the edited draft back to the remote host: scratch file → sftp upload
+   * under the *original* name (no `(1)` uniquifying — overwriting is the whole
+   * point) → broadcast `sftp-remote-changed` so every window watching this
+   * directory refreshes. On failure the editor stays open with the draft
+   * intact, so nothing typed is lost.
+   */
+  const saveEditedFile = useCallback(
+    async (content: string) => {
+      const ed = editor;
+      if (!ed || editorSaving) return;
+      setEditorSaving(true);
+      try {
+        await writeLocalTextFile(ed.localPath, content);
+        const remoteDir = parentPath(ed.remotePath) ?? '.';
+        await sftpUpload(sshRef.current, [ed.localPath], remoteDir, newTransferId(), [ed.name], false);
+        // 与 runUploadOnce 同一条联动通道：本窗口和终端侧都即时刷新。
+        void emit<RemoteChangedPayload>('sftp-remote-changed', {
+          host: sshRef.current.host,
+          port: sshRef.current.port,
+          username: sshRef.current.username,
+          dir: remoteDir,
+        });
+        setEditor(null);
+        // 上传已完成，scratch 目录（原稿 + 草稿副本）不再需要，立即清掉。
+        cleanupScratch(ed.localDir);
+      } catch (e) {
+        notify(localizeBackendError(e), 'error');
+      } finally {
+        setEditorSaving(false);
+      }
+    },
+    [editor, editorSaving, notify, cleanupScratch],
+  );
+
+  /** Close the editor (discard or after save) and drop its scratch dir. */
+  const closeEditor = useCallback(() => {
+    const ed = editorRef.current;
+    setEditor(null);
+    cleanupScratch(ed?.localDir);
+  }, [cleanupScratch]);
+
+  /**
    * Replay a finished transfer exactly as it was queued. The remote paths are
    * absolute and the local folder is remembered, so this stays correct even
    * after the user has browsed somewhere else in the meantime.
@@ -1190,9 +1374,11 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
           setLoading(false);
         }
       }
-      void downloadEntries([entry]);
+      // 文本文件直接进在线编辑器（打开失败才提示）；二进制/超大文件在
+      // editFile 内部落回原有的「下载到本地」流程，行为不变。
+      void editFile(entry);
     },
-    [navigate, resetViewState, pushHistory, downloadEntries, notify, t],
+    [navigate, resetViewState, pushHistory, editFile, notify, t],
   );
 
   // ---- selection -----------------------------------------------------------
@@ -1394,6 +1580,19 @@ export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
     submitChmod,
     startBatchRename,
     submitBatchRename,
+    // in-place remote file editing
+    editor,
+    editorSaving,
+    editorReloading,
+    pendingEdit,
+    editFile,
+    saveEditedFile,
+    closeEditor,
+    setEditorDirty,
+    editorDirtyGetter,
+    confirmPendingEdit,
+    setPendingEdit,
+    reloadEditorFile,
     handleRowClick,
     handleSort,
     selectAll,

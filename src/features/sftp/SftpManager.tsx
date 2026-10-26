@@ -40,6 +40,7 @@ import {
   KeyIcon,
   LockKeyIcon,
   MagnifyingGlassIcon,
+  NotePencilIcon,
   PencilSimpleIcon,
   PlugsIcon,
   SelectionAllIcon,
@@ -63,6 +64,7 @@ import { DirectoryTree } from './DirectoryTree';
 import { FileTable } from './FileTable';
 import { PathBar } from './PathBar';
 import { SftpDialogs } from './SftpDialogs';
+import { RemoteFileEditor } from './RemoteFileEditor';
 import { SftpToolbar } from './SftpToolbar';
 import { StatusBar } from './StatusBar';
 import { TransferQueue } from './TransferQueue';
@@ -154,7 +156,21 @@ export function SftpManager({ ssh, initialPath }: SftpManagerProps) {
     if (!hasActiveTransfer) return undefined;
     return registerWindowCloseGuard('sftp-transfers', () => true);
   }, [hasActiveTransfer]);
-  useEffect(() => onCloseBlocked(() => setCloseConfirmOpen(true)), []);
+  // 编辑器里有未保存草稿时同样拦下窗口关闭——关掉就是静默丢稿。
+  useEffect(() => {
+    if (!s.editor) return undefined;
+    return registerWindowCloseGuard('sftp-editor', s.editorDirtyGetter);
+  }, [s.editor, s.editorDirtyGetter]);
+  // 记录是谁拦的，确认框文案按实际情况说「传输」「草稿」还是两者都有。
+  const [blockedGuards, setBlockedGuards] = useState<string[]>([]);
+  useEffect(
+    () =>
+      onCloseBlocked((ids) => {
+        setBlockedGuards(ids);
+        setCloseConfirmOpen(true);
+      }),
+    [],
+  );
 
   const confirmCloseAnyway = useCallback(() => {
     setCloseConfirmOpen(false);
@@ -868,6 +884,24 @@ export function SftpManager({ ssh, initialPath }: SftpManagerProps) {
             {rowMenu && isNavigable(rowMenu.entry) ? t('context_open') : t('context_download')}
           </ListItemText>
         </MenuItem>
+        {/* 文件才可在线编辑（目录走 open，超链接目录已被 openEntry 解析）。 */}
+        {rowMenu && !isNavigable(rowMenu.entry) && (
+          <MenuItem
+            dense
+            onClick={() => {
+              const en = rowMenu!.entry;
+              setRowMenu(null);
+              void s.editFile(en);
+            }}
+          >
+            <ListItemIcon sx={{ minWidth: 26 }}>
+              <NotePencilIcon size={15} color={subtle} />
+            </ListItemIcon>
+            <ListItemText slotProps={{ primary: { sx: { fontSize: 13 } } }}>
+              {t('context_edit')}
+            </ListItemText>
+          </MenuItem>
+        )}
         {/* For a single file the first item already downloads it — only offer
             the plain download again when it means something different. */}
         {((rowMenu && isNavigable(rowMenu.entry)) || s.selected.size > 1) && (
@@ -1088,9 +1122,19 @@ export function SftpManager({ ssh, initialPath }: SftpManagerProps) {
 
       {/* Closing mid-transfer is a decision, not an accident: ask once. */}
       <Dialog open={closeConfirmOpen} onClose={() => setCloseConfirmOpen(false)}>
-        <DialogTitle>{t('close_guard_title')}</DialogTitle>
+        <DialogTitle>
+          {blockedGuards.includes('sftp-editor') && blockedGuards.length === 1
+            ? t('close_guard_title_editor')
+            : t('close_guard_title')}
+        </DialogTitle>
         <DialogContent>
-          <DialogContentText>{t('close_guard_desc')}</DialogContentText>
+          <DialogContentText>
+            {blockedGuards.includes('sftp-editor') && blockedGuards.includes('sftp-transfers')
+              ? t('close_guard_desc_both')
+              : blockedGuards.includes('sftp-editor')
+                ? t('close_guard_desc_editor')
+                : t('close_guard_desc')}
+          </DialogContentText>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setCloseConfirmOpen(false)} sx={{ textTransform: 'none' }}>
@@ -1237,6 +1281,40 @@ export function SftpManager({ ssh, initialPath }: SftpManagerProps) {
         onBatchRenameCancel={() => s.setBatchRename(null)}
         onBatchRenameSubmit={(names) => void s.submitBatchRename(names)}
       />
+
+      {/* 远端文本文件在线编辑：保存即回传远端并联动刷新各窗口。 */}
+      <RemoteFileEditor
+        state={s.editor}
+        saving={s.editorSaving}
+        reloading={s.editorReloading}
+        onDirtyChange={s.setEditorDirty}
+        onReload={() => void s.reloadEditorFile()}
+        onSave={(content) => void s.saveEditedFile(content)}
+        onClose={s.closeEditor}
+      />
+
+      {/* 已有未保存草稿时双击了新文件：确认后才允许丢稿换文件。 */}
+      <Dialog
+        open={!!s.pendingEdit}
+        onClose={() => s.setPendingEdit(null)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>{t('editor_dirty_title')}</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {t('editor_pending_body', { name: s.pendingEdit?.name ?? '' })}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button size="small" onClick={() => s.setPendingEdit(null)}>
+            {t('editor_keep_editing')}
+          </Button>
+          <Button size="small" color="warning" onClick={() => s.confirmPendingEdit()}>
+            {t('editor_discard_open')}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

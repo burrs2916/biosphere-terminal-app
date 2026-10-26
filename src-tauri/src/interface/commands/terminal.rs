@@ -183,6 +183,83 @@ pub async fn local_copy_files(
     .map_err(|e| format!("本地复制任务异常: {}", e))?
 }
 
+/// 确保本地目录存在（SFTP 在线编辑的临时目录准备步骤）。
+#[tauri::command]
+pub async fn ensure_local_dir(path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&path).map_err(|e| format!("创建目录失败 {}: {}", path, e))
+    })
+    .await
+    .map_err(|e| format!("创建目录任务异常: {}", e))?
+}
+
+/// 读取本地文本文件内容（SFTP 在线编辑的取稿路径）。
+///
+/// 仅接受 UTF-8 文本：二进制或 GBK 等其他编码一律拒绝——在线编辑回传是
+/// 整文件覆盖，编码误判会把远端文件写坏，宁可拒开。BOM 作为合法 UTF-8
+/// 字符保留在字符串里，写回时原样带回，round-trip 无损。
+#[tauri::command]
+pub async fn read_local_text_file(path: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| format!("无法读取文件信息 {}: {}", path, e))?;
+        if !meta.is_file() {
+            return Err(format!("不是普通文件: {}", path));
+        }
+        const MAX_TEXT_EDIT_BYTES: u64 = 8 * 1024 * 1024;
+        if meta.len() > MAX_TEXT_EDIT_BYTES {
+            return Err(format!(
+                "文件过大（{} 字节），在线编辑仅支持 8MB 以内的文本文件",
+                meta.len()
+            ));
+        }
+        let bytes = std::fs::read(&path).map_err(|e| format!("读取失败 {}: {}", path, e))?;
+        String::from_utf8(bytes).map_err(|_| {
+            "文件不是 UTF-8 文本（可能是二进制文件或 GBK 等其他编码），为避免损坏不支持在线编辑".to_string()
+        })
+    })
+    .await
+    .map_err(|e| format!("读取文本文件任务异常: {}", e))?
+}
+
+/// 把编辑后的内容写回本地临时文件（SFTP 在线编辑的存稿路径）。
+/// 路径来自应用自己的临时目录，但仍确保父目录存在；写失败必须报错，
+/// 因为后续上传以这个文件为准。
+#[tauri::command]
+pub async fn write_local_text_file(path: String, content: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, content).map_err(|e| format!("写入失败 {}: {}", path, e))
+    })
+    .await
+    .map_err(|e| format!("写入文本文件任务异常: {}", e))?
+}
+
+/// 删除本地目录（SFTP 在线编辑的 scratch 目录清理）。
+///
+/// 护栏：只允许删除路径中含 `biosphere-sftp-edit` 组件的目录——这是本功能
+/// 专用的 temp 区，之外的任何路径一律拒绝，防止前端 bug 变成误删事故。
+#[tauri::command]
+pub async fn remove_local_dir(path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let p = std::path::Path::new(&path);
+        let guarded = p
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy() == "biosphere-sftp-edit");
+        if !guarded {
+            return Err(format!("拒绝删除：目录不在 scratch 区内 {}", path));
+        }
+        if p.exists() {
+            std::fs::remove_dir_all(p).map_err(|e| format!("删除目录失败 {}: {}", path, e))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("删除目录任务异常: {}", e))?
+}
+
 /// Append a frontend-side Terminal diagnostic entry to `debug.log`.
 ///
 /// The frontend half of a terminal session (WebGL renderer setup, output
