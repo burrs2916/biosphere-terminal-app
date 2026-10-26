@@ -60,7 +60,7 @@ export function CommandPalette({ open, onClose, onExecute }: CommandPaletteProps
       return;
     }
     const timer = setTimeout(() => {
-      searchCommandHistory(query).then(setHistory).catch((e) => notify(localizeBackendError(e)));
+      searchCommandHistory(query).then(setHistory).catch((e) => notify(localizeBackendError(e), 'error'));
       parseCommandOnly(query).then(setParsed).catch(() => setParsed(null));
     }, 200);
     return () => clearTimeout(timer);

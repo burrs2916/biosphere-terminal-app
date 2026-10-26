@@ -124,7 +124,7 @@ export function AgentChat() {
               if (firstUserMsg) {
                 const autoTitle = firstUserMsg.content.replace(/\[(?:附件|Attachment):.*?\]\s*/g, '').trim().slice(0, 40);
                 if (autoTitle) {
-                  updateConversationTitle(activeConversationId, autoTitle).catch((e) => notify(localizeBackendError(e)));
+                  updateConversationTitle(activeConversationId, autoTitle).catch((e) => { console.error('AgentChat: conversation title update', e); });
                 }
               }
             }
@@ -232,7 +232,7 @@ export function AgentChat() {
     setToolCalls([]);
     toolCallCounterRef.current = 0;
 
-    try { await saveMessage(userMsg); } catch (err) { console.error('AgentChat: failed to save message', err); notify(t('chat.message_save_failed')); }
+    try { await saveMessage(userMsg); } catch (err) { console.error('AgentChat: failed to save message', err); notify(t('chat.message_save_failed'), 'error'); }
 
     const assistantMsgId = crypto.randomUUID();
     streamingMsgIdRef.current = assistantMsgId;

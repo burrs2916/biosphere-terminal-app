@@ -196,6 +196,31 @@ export function newTransferId(): string {
   return `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Find a remote file name that does not collide with anything already present
+ * (or already claimed in this batch). Mirrors what every OS file manager does
+ * on a name clash: `report.pdf` -> `report (1).pdf` -> `report (2).pdf`.
+ * `taken` is mutated so successive calls in one batch stay unique.
+ */
+export function uniqueRemoteName(base: string, taken: Set<string>): string {
+  if (!taken.has(base)) {
+    taken.add(base);
+    return base;
+  }
+  const dot = base.lastIndexOf('.');
+  const hasExt = dot > 0 && dot < base.length - 1;
+  const stem = hasExt ? base.slice(0, dot) : base;
+  const ext = hasExt ? base.slice(dot) : '';
+  let n = 1;
+  let candidate: string;
+  do {
+    candidate = `${stem} (${n})${ext}`;
+    n += 1;
+  } while (taken.has(candidate));
+  taken.add(candidate);
+  return candidate;
+}
+
 /** Read a persisted UI preference, treating blanks as absent. */
 export function readPref(key: string): string | null {
   try {

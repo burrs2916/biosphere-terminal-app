@@ -2,9 +2,10 @@ import Box from '@mui/material/Box';
 import Tooltip from '@mui/material/Tooltip';
 import { XIcon } from '@phosphor-icons/react';
 import { useTheme } from '@mui/material/styles';
+import type { ConnStatus } from '../../terminal';
 
 interface TabBarProps {
-  tabs: { id: string; title: string; isActive: boolean; connectionType: 'local' | 'ssh'; disconnected?: boolean }[];
+  tabs: { id: string; title: string; isActive: boolean; connectionType: 'local' | 'ssh'; conn?: { status: ConnStatus; error?: string } }[];
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
 }
@@ -26,6 +27,7 @@ export function TabBar({ tabs, onSelect, onClose }: TabBarProps) {
         dotSsh: '#4FC3F7',
         dotLocal: '#81C784',
         dotDisconnected: '#FF5252',
+        dotConnecting: '#FFB300',
         indicator: '#6C63FF',
         indicatorErr: '#FF5252',
         closeHover: 'rgba(255,255,255,0.12)',
@@ -41,6 +43,7 @@ export function TabBar({ tabs, onSelect, onClose }: TabBarProps) {
         dotSsh: '#0284C7',
         dotLocal: '#2E7D32',
         dotDisconnected: '#D32F2F',
+        dotConnecting: '#FF8F00',
         indicator: '#6C63FF',
         indicatorErr: '#D32F2F',
         closeHover: 'rgba(0,0,0,0.10)',
@@ -64,12 +67,16 @@ export function TabBar({ tabs, onSelect, onClose }: TabBarProps) {
       }}
     >
       {tabs.map((tab) => {
-        const isDisconnected = !!tab.disconnected;
+        const status = tab.conn?.status ?? 'connected';
+        const isDisconnected = status === 'disconnected';
+        const isConnecting = status === 'connecting';
         const isSSH = tab.connectionType === 'ssh';
         const isActive = tab.isActive;
         const dotColor = isDisconnected
           ? colors.dotDisconnected
-          : isSSH ? colors.dotSsh : colors.dotLocal;
+          : isConnecting
+            ? colors.dotConnecting
+            : isSSH ? colors.dotSsh : colors.dotLocal;
 
         return (
           <Tooltip

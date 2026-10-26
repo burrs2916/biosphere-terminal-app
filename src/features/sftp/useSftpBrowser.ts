@@ -34,6 +34,7 @@ import {
   permsToOctal,
   readPref,
   sortEntries,
+  uniqueRemoteName,
   writePref,
   type SortDir,
   type SortKey,
@@ -145,32 +146,7 @@ interface QueuedTransfer {
  * history, selection, transfers and the destructive-action queue. Keeping it
  * out of the view makes the render tree readable and the logic testable.
  */
-/**
- * Find a remote file name that does not collide with anything already present
- * (or already claimed in this batch). Mirrors what every OS file manager does
- * on a name clash: `report.pdf` -> `report (1).pdf` -> `report (2).pdf`.
- * `taken` is mutated so successive calls in one batch stay unique.
- */
-function uniqueRemoteName(base: string, taken: Set<string>): string {
-  if (!taken.has(base)) {
-    taken.add(base);
-    return base;
-  }
-  const dot = base.lastIndexOf('.');
-  const hasExt = dot > 0 && dot < base.length - 1;
-  const stem = hasExt ? base.slice(0, dot) : base;
-  const ext = hasExt ? base.slice(dot) : '';
-  let n = 1;
-  let candidate: string;
-  do {
-    candidate = `${stem} (${n})${ext}`;
-    n += 1;
-  } while (taken.has(candidate));
-  taken.add(candidate);
-  return candidate;
-}
-
-export function useSftpBrowser(ssh: SshConnectionInfo) {
+export function useSftpBrowser(ssh: SshConnectionInfo, initialPath?: string) {
   const { t } = useTranslation('fileTransfer');
   const notify = useNotify().notify;
 
@@ -344,7 +320,19 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
   }, [load, resetViewState, syncHistory]);
 
   useEffect(() => {
-    void load('.', true);
+    // 路径点击跳转：给了 initialPath（非 `.`）就直接列目标目录；
+    // 否则保持原行为，从远端 home（`.`）开始。
+    const first = initialPath && initialPath !== '.' ? initialPath : '.';
+    void load(first, true);
+    if (first !== '.') {
+      // 直接跳到目标目录时，home 未经 `.` 解析学到 —— 后台补一次 home 解析，
+      // 供目录树的 home 节点与 Home 按钮使用；失败不影响浏览。
+      sftpList(sshRef.current, '.')
+        .then((res) => {
+          if (res.path.startsWith('/')) setHomePath(res.path);
+        })
+        .catch(() => {});
+    }
     return () => {
       // Drop anything still waiting: the window is going away, so firing those
       // transfers would move files with nowhere to report the outcome.
@@ -569,11 +557,13 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
           pumpRef.current();
           return;
         }
-        const msg = settleTransfer(id, e);
-        if (msg) notify(msg, 'error');
+        // Settle the row (status/error/retry) but stay silent: the transfer
+        // queue already shows the failure with a retry action, so a toast on
+        // top of it is pure duplication.
+        settleTransfer(id, e);
       }
     },
-    [notify, settleTransfer],
+    [settleTransfer],
   );
 
   const runUploadOnce = useCallback(
@@ -761,7 +751,7 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
   const downloadEntries = useCallback(
     async (list: SftpEntry[], ask = false) => {
       if (list.length === 0) {
-        notify(t('no_selection'));
+        notify(t('no_selection'), 'warning');
         return;
       }
       // Resolve the folder *before* the queue row is created so a cancelled
@@ -887,7 +877,8 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
       try {
         setBusy(true);
         await sftpRemove(sshRef.current, items);
-        notify(names.length === 1 ? t('deleted', { name: names[0] }) : t('deleted_count', { count: names.length }));
+        // Success is silent on purpose: the row disappears from the refreshed
+        // listing, which is the feedback (same as Finder/Explorer).
         setSelected(new Set());
         setFocused(null);
         await load(base, false);
@@ -897,7 +888,7 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
         setBusy(false);
       }
     },
-    [t, notify, load],
+    [notify, load],
   );
 
   const submitRename = useCallback(async () => {
@@ -908,57 +899,55 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
       return;
     }
     if (invalidName(next)) {
-      notify(t('invalid_name'), 'error');
+      setDialogError(t('invalid_name'));
       return;
     }
     if (entriesRef.current.some((e) => e.name === next)) {
-      notify(t('name_taken', { name: next }), 'error');
+      setDialogError(t('name_taken', { name: next }));
       return;
     }
     const base = pathRef.current;
     try {
       setBusy(true);
       await sftpRename(sshRef.current, joinRemote(base, renaming.name), joinRemote(base, next));
-      notify(t('renamed'));
       setRenaming(null);
       setRenameValue('');
       setSelected(new Set([next]));
       setFocused(next);
       await load(base, false);
     } catch (e) {
-      notify(localizeBackendError(e), 'error');
+      setDialogError(localizeBackendError(e));
     } finally {
       setBusy(false);
     }
-  }, [renaming, renameValue, t, notify, load]);
+  }, [renaming, renameValue, t, load]);
 
   const submitNewFolder = useCallback(async () => {
     const name = newFolderName.trim();
     if (!name) return;
     if (invalidName(name)) {
-      notify(t('invalid_name'), 'error');
+      setDialogError(t('invalid_name'));
       return;
     }
     if (entriesRef.current.some((e) => e.name === name)) {
-      notify(t('name_taken', { name }), 'error');
+      setDialogError(t('name_taken', { name }));
       return;
     }
     const base = pathRef.current;
     try {
       setBusy(true);
       await sftpMkdir(sshRef.current, joinRemote(base, name));
-      notify(t('folder_created'));
       setNewFolderOpen(false);
       setNewFolderName('');
       setSelected(new Set([name]));
       setFocused(name);
       await load(base, false);
     } catch (e) {
-      notify(localizeBackendError(e), 'error');
+      setDialogError(localizeBackendError(e));
     } finally {
       setBusy(false);
     }
-  }, [newFolderName, t, notify, load]);
+  }, [newFolderName, t, load]);
 
   // ---- favorites -----------------------------------------------------------
 
@@ -1006,32 +995,32 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     const name = newFileName.trim();
     if (!name) return;
     if (invalidName(name)) {
-      notify(t('invalid_name'), 'error');
+      setDialogError(t('invalid_name'));
       return;
     }
     if (entriesRef.current.some((e) => e.name === name)) {
-      notify(t('name_taken', { name }), 'error');
+      setDialogError(t('name_taken', { name }));
       return;
     }
     const base = pathRef.current;
     try {
       setBusy(true);
       await sftpCreateFile(sshRef.current, joinRemote(base, name));
-      notify(t('file_created'));
       setNewFileOpen(false);
       setNewFileName('');
       setSelected(new Set([name]));
       setFocused(name);
       await load(base, false);
     } catch (e) {
-      notify(localizeBackendError(e), 'error');
+      setDialogError(localizeBackendError(e));
     } finally {
       setBusy(false);
     }
-  }, [newFileName, t, notify, load]);
+  }, [newFileName, t, load]);
 
   const startChmod = useCallback((list: SftpEntry[]) => {
     if (list.length === 0) return;
+    setDialogError(null);
     // Seed with the first target's current bits so a single-file edit starts
     // from the truth instead of a guess.
     setChmodValue(permsToOctal(list[0].perms) || (list[0].is_dir ? '755' : '644'));
@@ -1046,7 +1035,9 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     if (!chmodTargets || chmodTargets.length === 0) return;
     const mode = chmodValue.trim();
     if (!OCTAL_MODE.test(mode)) {
-      notify(t('invalid_mode'), 'error');
+      // Unreachable via the UI (submit is gated on a valid mode), kept as a
+      // defensive guard — and if it ever fires, it shows inline.
+      setDialogError(t('invalid_mode'));
       return;
     }
     const base = pathRef.current;
@@ -1054,19 +1045,14 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     try {
       setBusy(true);
       await sftpChmod(sshRef.current, targets, mode);
-      notify(
-        targets.length === 1
-          ? t('perms_changed', { name: chmodTargets[0].name, mode })
-          : t('perms_changed_count', { count: targets.length, mode }),
-      );
       setChmodTargets(null);
       await load(base, false);
     } catch (e) {
-      notify(localizeBackendError(e), 'error');
+      setDialogError(localizeBackendError(e));
     } finally {
       setBusy(false);
     }
-  }, [chmodTargets, chmodValue, t, notify, load]);
+  }, [chmodTargets, chmodValue, t, load]);
 
   /**
    * Open the batch-rename dialog over a selection. Entries are sorted by name
@@ -1075,6 +1061,7 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
    */
   const startBatchRename = useCallback((list: SftpEntry[]) => {
     if (list.length < 1) return;
+    setDialogError(null);
     setBatchRename(
       [...list].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })),
     );
@@ -1096,15 +1083,14 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
           const newName = (newNames[i] ?? '').trim();
           if (!newName || newName === oldName) continue;
           if (invalidName(newName)) {
-            notify(t('batch_rename_invalid', { name: newName }), 'error');
+            setDialogError(t('batch_rename_invalid', { name: newName }));
             break;
           }
           await sftpRename(sshRef.current, joinRemote(base, oldName), joinRemote(base, newName));
           done++;
         }
-        if (done > 0) notify(t('renamed_count', { count: done }));
       } catch (e) {
-        notify(localizeBackendError(e), 'error');
+        setDialogError(localizeBackendError(e));
       } finally {
         setBusy(false);
         setBatchRename(null);
@@ -1113,7 +1099,7 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
         await load(base, false);
       }
     },
-    [batchRename, t, notify, load],
+    [batchRename, t, load],
   );
 
   /**
@@ -1224,9 +1210,43 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     [sortKey, sortDir],
   );
 
+  /**
+   * Inline error for whichever dialog is currently open (rename / new folder /
+   * new file / chmod / batch rename). Validation and IPC failures land here —
+   * attached to the dialog's own input — instead of a detached toast the user
+   * has to go find. Cleared whenever a dialog (re)opens or its input changes.
+   */
+  const [dialogError, setDialogError] = useState<string | null>(null);
+
   const startRename = useCallback((entry: SftpEntry) => {
+    setDialogError(null);
     setRenaming(entry);
     setRenameValue(entry.name);
+  }, []);
+
+  const openNewFolder = useCallback(() => {
+    setDialogError(null);
+    setNewFolderOpen(true);
+  }, []);
+
+  const openNewFile = useCallback(() => {
+    setDialogError(null);
+    setNewFileOpen(true);
+  }, []);
+
+  const handleRenameChange = useCallback((v: string) => {
+    setDialogError(null);
+    setRenameValue(v);
+  }, []);
+
+  const handleNewFolderChange = useCallback((v: string) => {
+    setDialogError(null);
+    setNewFolderName(v);
+  }, []);
+
+  const handleNewFileNameChange = useCallback((v: string) => {
+    setDialogError(null);
+    setNewFileName(v);
   }, []);
 
   const requestDelete = useCallback((names: string[]) => {
@@ -1271,6 +1291,9 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     chmodTargets,
     chmodValue,
     batchRename,
+    /** Inline error for the open dialog — rendered by SftpDialogs, not a toast. */
+    dialogError,
+    setDialogError,
     // favorites
     favorites: connFavorites,
     isFavorite,
@@ -1278,8 +1301,11 @@ export function useSftpBrowser(ssh: SshConnectionInfo) {
     removeFavorite,
     // setters used by the view
     setSearch,
-    setRenameValue,
-    setNewFolderName,
+    handleRenameChange,
+    handleNewFolderChange,
+    handleNewFileNameChange,
+    openNewFolder,
+    openNewFile,
     setNewFolderOpen,
     setNewFileName,
     setNewFileOpen,

@@ -46,7 +46,7 @@ export function ProfileEditor() {
   const notify = useNotify().notify;
 
   const load = () => {
-    listProfiles().then(setProfiles).catch((e) => notify(localizeBackendError(e)));
+    listProfiles().then(setProfiles).catch((e) => notify(localizeBackendError(e), 'error'));
   };
 
   useEffect(() => { load(); }, []);

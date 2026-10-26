@@ -2,7 +2,7 @@
 
 use crate::core::error::Result;
 use crate::infra::logging::debug_log;
-use crate::core::types::{PtyConfig, SshConnectionInfo};
+use crate::core::types::PtyConfig;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -83,14 +83,9 @@ impl Pty {
     }
 
     fn build_command(config: &PtyConfig) -> std::result::Result<CommandBuilder, String> {
-        let conn_type = config.connection_type.as_deref().unwrap_or("local");
-
-        if conn_type == "ssh" {
-            if let Some(ssh) = &config.ssh {
-                return Self::build_ssh_command(ssh, config.x11_forwarding.unwrap_or(false), None, None);
-            }
-        }
-
+        // SSH sessions no longer route through a `ssh.exe` child — the native
+        // russh transport (app/terminal_native.rs) owns every SSH terminal.
+        // What remains here is the local shell lane only.
         Ok(Self::build_local_command(config))
     }
 
@@ -126,78 +121,7 @@ impl Pty {
         cmd
     }
 
-    fn build_ssh_command(
-        ssh: &SshConnectionInfo,
-        x11_forwarding: bool,
-        remote_command: Option<&str>,
-        connect_timeout: Option<u64>,
-    ) -> std::result::Result<CommandBuilder, String> {
-        let ssh_bin = crate::core::platform::resolve_ssh_binary()?;
-        debug_log::term("DEBUG", "pty", "ssh-bin", &format!("ssh_bin={}", ssh_bin));
-
-        let mut args: Vec<String> = Vec::new();
-
-        args.push("-o".to_string());
-        args.push("StrictHostKeyChecking=accept-new".to_string());
-
-        // 禁用 GSSAPI（Kerberos/SSPI）认证探针：Windows 自带 OpenSSH 默认把
-        // gssapi-with-mic 排在 PreferredAuthentications 最前，非域环境无 KDC 时
-        // 这次握手会卡 ~10s 才失败、才回退到 password 提示。这会让密码提示延迟
-        // 出现、触发测试连接的硬超时 → 假「连接超时」。禁用后直奔 password，与
-        // PuTTY/MobaXterm 等行为一致。覆盖测试连接 / 交互终端 / SFTP 全部路径。
-        args.push("-o".to_string());
-        args.push("GSSAPIAuthentication=no".to_string());
-
-        // 仅测试会话（密码模式）传入 connect_timeout：给 ssh 设 TCP 连接超时，
-        // 避免主机不可达时 ssh 一直重试 SYN 导致测试线程卡死。
-        // ssh 用非阻塞 connect + select 实现 ConnectTimeout，跨平台可靠（区别于 std 的不可靠 connect_timeout）。
-        if let Some(secs) = connect_timeout {
-            args.push("-o".to_string());
-            args.push(format!("ConnectTimeout={}", secs));
-        }
-
-        // 交互式会话同样需要 SSH keepalive：用 vim/nano 编辑文件时连接长时间
-        // 无业务流量，易被 NAT/防火墙/SSH 服务端超时掐断，退出编辑器后表现为
-        // "终端已断开"。与 SFTP ControlMaster / VNC 隧道保持一致的取值。
-        args.push("-o".to_string());
-        args.push("ServerAliveInterval=20".to_string());
-        args.push("-o".to_string());
-        args.push("ServerAliveCountMax=6".to_string());
-
-        if x11_forwarding {
-            args.push("-X".to_string());
-        }
-
-        if ssh.port != 22 {
-            args.push("-p".to_string());
-            args.push(ssh.port.to_string());
-        }
-
-        if ssh.auth_method == "private_key" {
-            if let Some(key_path) = &ssh.private_key_path {
-                args.push("-i".to_string());
-                args.push(key_path.clone());
-            }
-        }
-
-        args.push(format!("{}@{}", ssh.username, ssh.host));
-        if let Some(remote) = remote_command {
-            args.push(remote.to_string());
-        }
-
-        let mut cmd = CommandBuilder::new(ssh_bin);
-        cmd.args(&args);
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        // 强制 ssh 客户端用英文消息目录：OpenSSH 会把密码提示本地化成客户端
-        // locale（中文系统下是 "user@host 的密码："），只匹配英文 "password:"
-        // 的自动喂密码逻辑会漏检，导致认证失败。LC_MESSAGES=C 让提示恒为
-        // 英文 "Password: "，是确定性修复（与 sftp 的 locale_env 同一哲学）。
-        cmd.env("LC_MESSAGES", "C");
-        Ok(cmd)
-    }
-
-    /// 阻塞等待 ssh 子进程退出，返回退出码。
+    /// 阻塞等待子进程退出，返回退出码。
     pub fn wait(&self) -> Result<i32> {
         let mut child = self.child.lock().unwrap();
         child

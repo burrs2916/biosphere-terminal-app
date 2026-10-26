@@ -6,7 +6,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { listen, type UnlistenFn, emit } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { openUrl } from '@tauri-apps/plugin-opener';
+import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener';
 import { writeToTerminal, resizeTerminal, getTerminalCwd } from '../../../core/services/terminal.service';
 import { copyText, pasteText } from '../../../core/services/clipboard.service';
 import { parseCommand } from '../../../core/services/command.service';
@@ -49,7 +49,20 @@ interface TerminalEmulatorProps {
   onReady?: (sessionId: string) => void;
   visible?: boolean;
   profileId?: string;
+  /** Local vs SSH session — drives file-path link behavior (reveal locally, copy on SSH). */
+  connectionType?: 'local' | 'ssh';
+  /**
+   * SSH 会话点击输出里的路径 → 打开文件传输窗口并定位到该目录。
+   * 由父组件提供（需要 tab 的 SSH 凭据）；未提供时回退为复制路径。
+   * 父组件必须传稳定引用（useCallback）——emulator 是 React.memo。
+   */
+  onRemotePathActivate?: (path: string) => void;
 }
+
+// alt-screen 切换序列（\x1b[?47/1047/1049h|l，最长 9 字符）可能被切在两个输出
+// chunk 的边界上。尾部若是这些"不完整前缀"之一，必须留到下一块拼接后再匹配，
+// 否则漏检会让 altScreenRef 失真（TUI 期间误 fit / 退出后 ghost 不清）。
+const ALT_SEQ_PREFIX_RE = /^(?:\x1b|\x1b\[|\x1b\[\?|\x1b\[\?1|\x1b\[\?10|\x1b\[\?104|\x1b\[\?1047|\x1b\[\?1049)$/;
 
 function buildTheme(appearance: ReturnType<typeof getThemeAppearance>) {
   return {
@@ -88,7 +101,7 @@ function buildTheme(appearance: ReturnType<typeof getThemeAppearance>) {
 export const TerminalEmulator = memo(
   forwardRef<TerminalEmulatorHandle, TerminalEmulatorProps>(
     function TerminalEmulator(
-      { sessionId, onExit, onTitleChange, onFindResultsChange, onReady, visible = true, profileId },
+      { sessionId, onExit, onTitleChange, onFindResultsChange, onReady, visible = true, profileId, connectionType, onRemotePathActivate },
       ref,
     ) {
     const { t } = useTranslation('terminal');
@@ -116,14 +129,29 @@ export const TerminalEmulator = memo(
     const webglRenderer = useSettingsStore((s) => s.settings.webglRenderer);
     const notify = useNotify().notify;
 
+    // Tracks whether the PTY is currently in the alternate screen buffer
+    // (a full-screen TUI such as vim/less/htop). While true we must NOT call
+    // fit()/resize — resizing a TUI mid-session is what produces rendering
+    // artifacts. Also drives a forced repaint on exit to clear the WebGL ghost.
+    const altScreenRef = useRef(false);
+    // 跨 chunk 的 alt-screen 序列残缺前缀（见 ALT_SEQ_PREFIX_RE 注释）。
+    const altCarryRef = useRef('');
+    // Stable view of the session's connection type for the file-path link provider.
+    const connectionTypeRef = useRef(connectionType);
+    connectionTypeRef.current = connectionType;
+    // The link-provider closure below is created once per session; a ref keeps
+    // the callback reachable without re-registering listeners on identity change.
+    const onRemotePathActivateRef = useRef(onRemotePathActivate);
+    onRemotePathActivateRef.current = onRemotePathActivate;
+
     // 粘贴的命令记录到历史（terminal.paste 不触发 onData）
     // 只记录第一个非空行，避免多行命令（for/do/done）被拆成多条历史
     const recordPastedCommand = (text: string, sid: string) => {
       const firstLine = text.split('\n').map((l) => l.trim()).find(Boolean);
       if (firstLine) {
         getTerminalCwd(sid).then((cwd) => {
-          parseCommand(firstLine, sid, cwd ?? undefined).catch((e) => notify(localizeBackendError(e)));
-        }).catch((e) => notify(localizeBackendError(e)));
+          parseCommand(firstLine, sid, cwd ?? undefined).catch((e) => { console.error('TerminalEmulator: parseCommand after paste', e); });
+        }).catch((e) => { console.error('TerminalEmulator: getTerminalCwd after paste', e); });
       }
     };
 
@@ -139,8 +167,8 @@ export const TerminalEmulator = memo(
                 console.error('TerminalEmulator: JSON.parse profile config from listProfiles', err);
               }
             }
-          }).catch((e) => notify(localizeBackendError(e)));
-        }).catch((e) => notify(localizeBackendError(e)));
+          }).catch((e) => { console.error('TerminalEmulator: listProfiles load', e); });
+        }).catch((e) => { console.error('TerminalEmulator: profile.service import', e); });
       } else {
           getDefaultProfile().then((profile) => {
           if (profile) {
@@ -150,7 +178,7 @@ export const TerminalEmulator = memo(
               console.error('TerminalEmulator: JSON.parse default profile config', err);
             }
           }
-        }).catch((e) => notify(localizeBackendError(e)));
+        }).catch((e) => { console.error('TerminalEmulator: getDefaultProfile load', e); });
       }
     }, [profileId]);
 
@@ -248,9 +276,15 @@ export const TerminalEmulator = memo(
         } catch (err) {
           console.warn('TerminalEmulator: syncBackendSize fit() failed', err);
         }
-        resizeTerminal(sessionId, term.rows, term.cols).catch((e) => notify(localizeBackendError(e)));
+        resizeTerminal(sessionId, term.rows, term.cols).catch((e) => { console.error('TerminalEmulator: syncBackendSize resize', e); });
       },
     }), []);
+
+    // handleResize 会被 mount effect 里的 ResizeObserver / window listener 长期持有。
+    // 必须经 ref 读最新 visible：直接闭包捕获会让守卫读到 mount 时的旧值——
+    // 窗口 resize 时隐藏 tab 会 fit() 并 term.focus() 抢走焦点。
+    const visibleRef = useRef(visible);
+    visibleRef.current = visible;
 
     const handleResize = useCallback(() => {
       if (resizeTimerRef.current) {
@@ -264,7 +298,10 @@ export const TerminalEmulator = memo(
         if (!fit || !term || !container) return;
         if (terminalRef.current !== term) return;
         if (!term.element) return;
-        if (!visible) return;
+        if (!visibleRef.current) return;
+        // 全屏 TUI（vim/less 等）运行期间不重排：resize 会触发 PTY 的 SIGWINCH，
+        // 与 alt-screen 渲染叠加会产生画面 artifact。退出 alt-screen 后由 altExit 分支补一次 fit。
+        if (altScreenRef.current) return;
         // Cross-platform safety: ensure renderer is ready before fit() to prevent
         // 'this._renderer.value.dimensions' undefined errors on Windows/Linux/macOS
         const internal = term as any;
@@ -283,7 +320,7 @@ export const TerminalEmulator = memo(
           console.warn('TerminalEmulator: fit() during resize failed', err);
         }
       }, 100);
-    }, [visible]);
+    }, []);
 
     const isDisposedRef = useRef(false);
     // True only after the parent has confirmed the backend PTY session exists.
@@ -297,6 +334,19 @@ export const TerminalEmulator = memo(
     const outputWindowStartRef = useRef(Date.now());
 
     useEffect(() => {
+      // React 18 StrictMode (development) mounts every component twice —
+      // effect → cleanup → effect — on the SAME instance, so refs survive
+      // the simulated unmount. The cleanup below flips `isDisposedRef` to
+      // true; without re-arming it here, the second mount's listener gate
+      // (fireReadyOnce), fit retry (tryInitialFit) and resize guard would
+      // all bail out forever: onReady never fires → the backend PTY is
+      // never spawned → the local terminal stays a blank canvas and SSH
+      // tabs hang at "connecting" with no error anywhere. Refs are
+      // per-instance state, not per-run state — always reset them at the
+      // top of the effect body.
+      isDisposedRef.current = false;
+      readyFiredRef.current = false;
+
       if (!containerRef.current) return;
 
       const terminal = new Terminal({
@@ -326,6 +376,75 @@ export const TerminalEmulator = memo(
       terminal.loadAddon(fitAddon);
       terminal.loadAddon(webLinksAddon);
       terminal.loadAddon(searchAddon);
+
+      // 让终端输出里的文件路径可点击：本地会话 → 在文件管理器打开；SSH 会话 → 复制路径。
+      // 这是"把终端里的文件操作变容易"的核心交互（终端原生无法操作文件）。
+      const onPathActivate = (p: string) => {
+        if (connectionTypeRef.current === 'ssh') {
+          // 优先打开文件传输窗口并定位到该目录（父组件需 tab 凭据）；
+          // 未提供回调时回退为复制路径。
+          const openInSftp = onRemotePathActivateRef.current;
+          if (openInSftp) {
+            openInSftp(p);
+            return;
+          }
+          copyText(p)
+            .then(() => notify(t('toast_remote_path_copied') || '已复制远程路径', 'info'))
+            .catch(() => notify(t('copy_failed') || '复制失败', 'error'));
+          return;
+        }
+          revealItemInDir(p)
+          .then(() => { /* opened */ })
+          .catch(() => {
+            copyText(p)
+              .then(() => notify(t('toast_path_copied') || '已复制路径', 'info'))
+              .catch(() => notify(t('copy_failed') || '复制失败', 'error'));
+          });
+      };
+      // 匹配绝对路径(/a/b)、相对路径(./a、../a/b)、Windows 路径(C:\a\b)；排除 URL(http:// 等)。
+      // 不用 lookbehind（旧版 macOS Safari/WKWebView 不支持会直接抛错），改用 URL 特征过滤。
+      const FILE_PATH_RE = /(?:\/[^\s:"']+)+|(?:\.{1,2}\/[^\s:"']+)+|[A-Za-z]:\\[^\s:"']+/g;
+      try {
+        terminal.registerLinkProvider({
+          provideLinks: (y: number, cb: (links: any) => void) => {
+            try {
+              // xterm 以 1-based 行号调用 provideLinks：官方 WebLinkProvider 用
+              // `y - 1` 读 buffer（range.y 则直接用 1-based y）。这里少减 1 会把
+              // 下一行的文本当成本行的链接——悬停/点击全部错位一行。
+              const line = terminal.buffer.active.getLine(y - 1);
+              if (!line) { cb(undefined); return; }
+              const text = line.translateToString(true);
+              const links: any[] = [];
+              for (const m of text.matchAll(FILE_PATH_RE)) {
+                if (m[0].includes('://')) continue; // 排除 http:// 等 URL
+                // 剥掉句尾标点：叙述文本里的路径常以句号/逗号/括号收尾，
+                // 它们不属于路径（"见 /var/log/syslog。"）。
+                const path = m[0].replace(/[.,;)\]}）】」』、，。；！？]+$/, '');
+                if (!path) continue;
+                const start = m.index ?? 0;
+                const len = path.length;
+                if (start + len > terminal.cols) continue; // 跳过跨换行包裹的 token
+                // 相对路径（./x、../x）无法可靠定位远端目录，tooltip 如实提示"复制"
+                const isAbs = path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path);
+                links.push({
+                  range: { start: { x: start + 1, y }, end: { x: start + len, y } },
+                  text: path,
+                  activate: () => onPathActivate(path),
+                  tooltip:
+                    connectionTypeRef.current === 'ssh'
+                      ? (isAbs ? (t('tooltip_open_in_sftp') || '在文件传输中打开') : (t('tooltip_copy_path') || '复制路径'))
+                      : (t('tooltip_open_in_file_manager') || '在文件管理器中打开'),
+                });
+              }
+              cb(links.length ? links : undefined);
+            } catch {
+              cb(undefined);
+            }
+          },
+        });
+      } catch (err) {
+        console.warn('TerminalEmulator: registerLinkProvider failed', err);
+      }
 
       // CRITICAL FIX for "this._renderer.value.dimensions" undefined error:
       // xterm.js viewport's syncScrollArea is called synchronously during onResize/onScroll
@@ -428,7 +547,7 @@ export const TerminalEmulator = memo(
         if (mod && e.shiftKey && (e.key === 'C' || e.key === 'c')) {
           const selection = terminal.getSelection();
           if (selection) {
-            copyText(selection).catch((e) => notify(localizeBackendError(e)));
+            copyText(selection).catch((e) => notify(localizeBackendError(e), 'error'));
           }
           return false;
         }
@@ -438,7 +557,7 @@ export const TerminalEmulator = memo(
               terminal.paste(text);
               recordPastedCommand(text, sessionId);
             }
-          }).catch((e) => notify(localizeBackendError(e)));
+          }).catch((e) => notify(localizeBackendError(e), 'error'));
           return false;
         }
         return true;
@@ -469,7 +588,7 @@ export const TerminalEmulator = memo(
         try {
           fit.fit();
           if (sessionReadyRef.current) {
-            resizeTerminal(sessionId, term.rows, term.cols).catch((e) => notify(localizeBackendError(e)));
+            resizeTerminal(sessionId, term.rows, term.cols).catch((e) => { console.error('TerminalEmulator: initial fit resize', e); });
           }
         } catch (err) {
           console.warn('TerminalEmulator: initial fit() failed', err);
@@ -488,7 +607,7 @@ export const TerminalEmulator = memo(
         selectionChangeOffRef.current = terminal.onSelectionChange(() => {
           const selection = terminal.getSelection();
           if (selection) {
-            copyText(selection).catch((e) => notify(localizeBackendError(e)));
+            copyText(selection).catch((e) => { console.error('TerminalEmulator: copyOnSelect auto-copy', e); });
           }
         });
       }
@@ -502,7 +621,7 @@ export const TerminalEmulator = memo(
                 terminal.paste(text);
                 recordPastedCommand(text, sessionId);
               }
-            }).catch((e) => notify(localizeBackendError(e)));
+            }).catch((e) => notify(localizeBackendError(e), 'error'));
           }
         };
         containerRef.current.addEventListener('mousedown', handler);
@@ -525,7 +644,7 @@ export const TerminalEmulator = memo(
         }
       }).then((unlisten) => {
         dragDropUnlistenRef.current = unlisten;
-      }).catch((e) => notify(localizeBackendError(e)));
+      }).catch((e) => { console.error('TerminalEmulator: drag-drop listener', e); });
 
       terminal.onData((data) => {
         // PTY not spawned yet — drop input silently (writing would hit a missing
@@ -533,7 +652,7 @@ export const TerminalEmulator = memo(
         // parent has confirmed the backend session is alive.
         if (!sessionReadyRef.current) return;
         const bytes = textEncoderRef.current.encode(data);
-        writeToTerminal(sessionId, Array.from(bytes)).catch((e) => notify(localizeBackendError(e)));
+        writeToTerminal(sessionId, Array.from(bytes)).catch((e) => notify(localizeBackendError(e), 'error'));
 
         if (data === '\r') {
           // 从终端 buffer 读取实际行内容，比 lineBufferRef 更可靠
@@ -548,8 +667,8 @@ export const TerminalEmulator = memo(
           if (cmd) {
             lastCommandRef.current = cmd;
             getTerminalCwd(sessionId).then((cwd) => {
-              parseCommand(cmd, sessionId, cwd ?? undefined).catch((e) => notify(localizeBackendError(e)));
-            }).catch((e) => notify(localizeBackendError(e)));
+              parseCommand(cmd, sessionId, cwd ?? undefined).catch((e) => { console.error('TerminalEmulator: parseCommand on enter', e); });
+            }).catch((e) => { console.error('TerminalEmulator: getTerminalCwd on enter', e); });
           }
           lineBufferRef.current = '';
         } else if (data === '\x7f') {
@@ -583,7 +702,9 @@ export const TerminalEmulator = memo(
 
       resizeOffRef.current = terminal.onResize(({ cols, rows }) => {
         if (!sessionReadyRef.current) return;
-        resizeTerminal(sessionId, rows, cols).catch((e) => notify(localizeBackendError(e)));
+        // 全屏 TUI 期间 PTY 尺寸由程序自身管理，跳过推送，避免 alt-screen 内 resize 抖动。
+        if (altScreenRef.current) return;
+        resizeTerminal(sessionId, rows, cols).catch((e) => { console.error('TerminalEmulator: resize handler', e); });
       });
 
       terminal.onTitleChange((title) => {
@@ -603,7 +724,9 @@ export const TerminalEmulator = memo(
       let listenersRegistered = 0;
       const fireReadyOnce = () => {
         listenersRegistered += 1;
-        if (listenersRegistered === 3 && !readyFiredRef.current) {
+        // isDisposedRef：tab 可能在监听器注册完成前就被关掉，此时绝不能再
+        // 触发 onReady——否则父组件会为一个不存在的 tab 拉起孤儿 PTY。
+        if (listenersRegistered === 3 && !readyFiredRef.current && !isDisposedRef.current) {
           readyFiredRef.current = true;
           onReady?.(sessionId);
         }
@@ -616,6 +739,16 @@ export const TerminalEmulator = memo(
       // <3 and the backend PTY was never spawned — the "first remote tab sometimes
       // won't connect, opening a second one works" bug. Now each listener counts
       // exactly once via resolve, reject, OR a 300ms timeout.
+      // 悬挂兜底 timer 必须可清除：tab 在 300ms 内被关闭时，unmount 后再触发的
+      // countOnce 会让 onReady 穿越卸载边界（下方 cleanup 里统一 clearTimeout）。
+      const fallbackTimers: ReturnType<typeof setTimeout>[] = [];
+      // Per-run disposal flag. Under StrictMode the FIRST run's listen()
+      // promises resolve only after its cleanup already ran, and a shared
+      // ref cannot tell "stale run" from "current run" at that point — the
+      // late registrations would leak into the second run (duplicate
+      // handlers on the same event, one of them writing into an already
+      // disposed terminal). This closure-local flag isolates each run.
+      let runDisposed = false;
       const registerListener = (event: string, handler: (event: any) => void) => {
         let counted = false;
         const countOnce = () => {
@@ -626,12 +759,16 @@ export const TerminalEmulator = memo(
         };
         listen(event, handler as any)
           .then((unlisten) => {
+            if (runDisposed) {
+              unlisten();
+              return;
+            }
             unlisteners.push(unlisten);
             countOnce();
           })
-          .catch(() => countOnce());
+          .catch(() => { if (!runDisposed) countOnce(); });
         // 悬挂兜底：listen 永不 resolve 时，最多 300ms 后必计数，保证 onReady 触发
-        setTimeout(countOnce, 300);
+        fallbackTimers.push(setTimeout(countOnce, 300));
       };
 
       registerListener('terminal-output', (event) => {
@@ -665,7 +802,40 @@ export const TerminalEmulator = memo(
             outputChunksRef.current = 0;
             outputWindowStartRef.current = now;
           }
-          terminal.write(event.payload.data);
+          const data = event.payload.data;
+          // Track alternate-screen (full-screen TUI: vim/less/htop) enter/exit so we can
+          // 1) suppress fit()/resize while the TUI owns the screen, and
+          // 2) force a full repaint on exit to clear the WebGL renderer's ghost frame
+          //    (otherwise the old TUI frame stays painted → "duplicated interface" on exit).
+          // 序列可能被切在 chunk 边界：先拼上上一块留下的残缺前缀，再把本块
+          // 尾部新的残缺前缀留给下一块。
+          let scanData = altCarryRef.current + data;
+          altCarryRef.current = '';
+          for (let l = Math.min(8, scanData.length); l >= 1; l--) {
+            const suffix = scanData.slice(-l);
+            if (ALT_SEQ_PREFIX_RE.test(suffix)) {
+              altCarryRef.current = suffix;
+              scanData = scanData.slice(0, scanData.length - l);
+              break;
+            }
+          }
+          let altExit = false;
+          const altRe = /\x1b\[\?(?:47|1047|1049)([hl])/g;
+          let am: RegExpExecArray | null;
+          while ((am = altRe.exec(scanData)) !== null) {
+            if (am[1] === 'h') altScreenRef.current = true;
+            else { altScreenRef.current = false; altExit = true; }
+          }
+          terminal.write(data);
+          if (altExit) {
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              const t = terminalRef.current;
+              if (t) { try { t.refresh(0, t.rows - 1); } catch { /* noop */ } }
+            }));
+            // Re-sync size once the TUI releases the screen (container may have
+            // resized while we skipped fit() during the TUI session).
+            setTimeout(() => { if (!altScreenRef.current) handleResize(); }, 90);
+          }
         }
       });
 
@@ -685,9 +855,11 @@ export const TerminalEmulator = memo(
               command: lastCommandRef.current,
               exitCode: event.payload.exit_code,
               sessionId,
-            }).catch((e) => notify(localizeBackendError(e)));
+            }).catch((e) => { console.error('TerminalEmulator: auto-trigger-agent emit', e); });
           }
           terminal.write(`\r\n\x1b[90m${t('output.process_exited')}\x1b[0m\r\n`);
+          // 进程退出后强制整屏重绘，清除可能的 WebGL 残留帧。
+          try { terminal.refresh(0, terminal.rows - 1); } catch { /* noop */ }
           onExit?.(sessionId);
         }
       });
@@ -713,6 +885,7 @@ export const TerminalEmulator = memo(
 
       return () => {
         isDisposedRef.current = true;
+        runDisposed = true;
         if (resizeTimerRef.current) {
           clearTimeout(resizeTimerRef.current);
         }
@@ -728,6 +901,7 @@ export const TerminalEmulator = memo(
         dragDropUnlistenRef.current = null;
         resizeOffRef.current?.dispose();
         resizeOffRef.current = null;
+        for (const timer of fallbackTimers) clearTimeout(timer);
         for (const unlisten of unlistenersRef.current) {
           unlisten();
         }
@@ -766,7 +940,7 @@ export const TerminalEmulator = memo(
         selectionChangeOffRef.current = terminalRef.current.onSelectionChange(() => {
           const selection = terminalRef.current?.getSelection();
           if (selection) {
-            copyText(selection).catch((e) => notify(localizeBackendError(e)));
+            copyText(selection).catch((e) => { console.error('TerminalEmulator: copyOnSelect auto-copy (effect)', e); });
           }
         });
       }
@@ -787,7 +961,7 @@ export const TerminalEmulator = memo(
                 terminalRef.current?.paste(text);
                 recordPastedCommand(text, sessionId);
               }
-            }).catch((e) => notify(localizeBackendError(e)));
+            }).catch((e) => notify(localizeBackendError(e), 'error'));
           }
         };
         containerRef.current.addEventListener('mousedown', handler);
@@ -796,6 +970,8 @@ export const TerminalEmulator = memo(
     }, [pasteOnMiddleClick]);
 
     useEffect(() => {
+      // 全屏 TUI 运行期间即使变为可见也不重排（见 handleResize 注释）。
+      if (altScreenRef.current) return;
       if (visible && terminalRef.current && fitAddonRef.current && containerRef.current) {
         const term = terminalRef.current;
         const fit = fitAddonRef.current;
@@ -817,7 +993,7 @@ export const TerminalEmulator = memo(
                 const cols = term.cols;
                 const rows = term.rows;
                 if (sessionReadyRef.current) {
-                  resizeTerminal(sessionId, rows, cols).catch((e) => notify(localizeBackendError(e)));
+                  resizeTerminal(sessionId, rows, cols).catch((e) => { console.error('TerminalEmulator: visible fit resize', e); });
                 }
                 // Ensure terminal regains focus when becoming visible
                 term.focus();

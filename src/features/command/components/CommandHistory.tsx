@@ -329,7 +329,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
     setSaveMode('new');
     setSelectedExistingNoteId('');
     setMatchedNotes([]);
-    listNoteGroups().then(setGroups).catch((e) => notify(localizeBackendError(e)));
+    listNoteGroups().then(setGroups).catch((e) => notify(localizeBackendError(e), 'error'));
     setSaveDialogOpen(true);
 
     try {
@@ -347,7 +347,7 @@ export function CommandHistory({ onExecute }: CommandHistoryProps) {
     // 让用户自行选择目标分组下合适的分类，避免脏的 'command' 行扩散。
     setNewNoteCategory('');
     if (gid) {
-      listNoteCategoriesByGroup(gid).then(setCategories).catch((e) => notify(localizeBackendError(e)));
+      listNoteCategoriesByGroup(gid).then(setCategories).catch((e) => notify(localizeBackendError(e), 'error'));
     } else {
       setCategories([]);
     }

@@ -5,11 +5,11 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
 import { useSearchParams } from 'react-router-dom';
-import { invoke } from '@tauri-apps/api/core';
 import { SftpManager } from '../features/sftp/SftpManager';
 import type { SshConnectionInfo } from '../proto/connection';
 import { useFeatureGate, LockedScreen } from '../features/licensing';
 import { localizeBackendError } from '../core/backendError';
+import { takeCredentialsOnce } from '../core/services/window.service';
 
 export function SftpPage() {
   const { t } = useTranslation('fileTransfer');
@@ -26,6 +26,8 @@ export function SftpPage() {
   const username = searchParams.get('username') || '';
   const authMethod = searchParams.get('authMethod') || 'none';
   const keyPath = searchParams.get('privateKeyPath') || '';
+  // 终端路径点击跳转：窗口打开后直接定位到该远程目录（可选）。
+  const initialPath = searchParams.get('initialPath') || undefined;
 
   const { canUse } = useFeatureGate('sftp');
 
@@ -35,7 +37,7 @@ export function SftpPage() {
   useEffect(() => {
     let cancelled = false;
     if (token) {
-      invoke<SshConnectionInfo>('take_stashed_credentials', { token })
+      takeCredentialsOnce(token)
         .then((s) => {
           if (!cancelled) setSsh(s);
         })
@@ -102,7 +104,7 @@ export function SftpPage() {
         </Typography>
       </Box>
       <Box sx={{ flex: 1, overflow: 'hidden' }}>
-        <SftpManager ssh={ssh} />
+        <SftpManager ssh={ssh} initialPath={initialPath} />
       </Box>
     </Box>
   );

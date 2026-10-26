@@ -1,6 +1,7 @@
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { invoke } from '@tauri-apps/api/core';
 import { localizeBackendError } from '../backendError';
+import type { SshConnectionInfo } from '../../proto/connection';
 
 const openWindows = new Map<string, WebviewWindow>();
 
@@ -58,6 +59,8 @@ interface SshWindowParams {
    * 由 `stashSshCredentials` 填充，调用方不要手工设置。
    */
   token?: string;
+  /** SFTP 专属：窗口打开后直接定位到的远程目录（终端路径点击跳转）。 */
+  initialPath?: string;
 }
 
 /** 把前端窗口参数转成后端 `SshConnectionInfo`（snake_case），用于凭据暂存。 */
@@ -82,6 +85,35 @@ function toRustSsh(p: SshWindowParams) {
 async function stashSshCredentials(sshParams: SshWindowParams): Promise<string | undefined> {
   if (!sshParams.password && !sshParams.privateKeyPath) return undefined;
   return invoke<string>('stash_sftp_credentials', { ssh: toRustSsh(sshParams) });
+}
+
+/**
+ * One-time credential retrieval, safe under React 18 StrictMode.
+ *
+ * `take_stashed_credentials` consumes the token on the Rust side (take =
+ * remove from the stash). StrictMode mounts every component twice —
+ * effect → cleanup → effect — so a naive per-effect `invoke` fires the
+ * take TWICE: the first call consumes the token and the second gets
+ * "credentials expired". Worse, the first run's successful result is
+ * dropped by its own `cancelled` cleanup flag, so the child window shows
+ * that false error 100% of the time in dev (production builds don't
+ * double-invoke, which is how this hid for so long).
+ *
+ * Deduplicate at the PROMISE level, not the result level: StrictMode's
+ * second run fires before the first invoke resolves, so caching only the
+ * resolved value would still double-take. Every webview window is its own
+ * JS context, so this map is per-window — exactly the lifetime of a
+ * one-time token. A failed take (genuinely expired token) stays cached:
+ * a dead token cannot come back to life, so retrying is pointless.
+ */
+const inflightCredentialTakes = new Map<string, Promise<SshConnectionInfo>>();
+
+export function takeCredentialsOnce(token: string): Promise<SshConnectionInfo> {
+  const existing = inflightCredentialTakes.get(token);
+  if (existing) return existing;
+  const pending = invoke<SshConnectionInfo>('take_stashed_credentials', { token });
+  inflightCredentialTakes.set(token, pending);
+  return pending;
 }
 
 /**
@@ -125,6 +157,7 @@ function buildSshUrl(path: string, sshParams?: SshWindowParams): string {
   params.set('username', sshParams.username);
   params.set('authMethod', sshParams.authMethod);
   if (sshParams.connectionId) params.set('connectionId', sshParams.connectionId);
+  if (sshParams.initialPath) params.set('initialPath', sshParams.initialPath);
   // 安全铁律：密码/密钥路径绝不进 URL（devtools / 历史 / 潜在日志都会留痕）。
   // 凭据已由 stashSshCredentials 暂存到 Rust 侧，这里只传一次性 token，
   // 子窗口凭 token 调 take_stashed_credentials 一次性取回。
@@ -349,6 +382,9 @@ export interface OpenAiCopilotOptions {
   username?: string;
   /// 远程桌面安装模式：headless（无桌面版）/ basic（基础桌面版）/ full（全量安装）。
   installMode?: string;
+  /// 远端操作系统（设置指南检测值：linux / macos / windows / unknown）。
+  /// 注入 rdSetup 上下文，让 AI 直接走对应平台剧本，不必等 PHASE 0 探测。
+  osName?: string;
 }
 
 export async function openAiCopilotWindow(opts?: OpenAiCopilotOptions): Promise<WebviewWindow | null> {
@@ -371,6 +407,7 @@ export async function openAiCopilotWindow(opts?: OpenAiCopilotOptions): Promise<
   if (opts?.host) params.set('host', opts.host);
   if (opts?.username) params.set('username', opts.username);
   if (opts?.installMode) params.set('installMode', opts.installMode);
+  if (opts?.osName) params.set('osName', opts.osName);
   const query = params.toString();
   const url = query ? `/#/ai-copilot?${query}` : '/#/ai-copilot';
 

@@ -12,7 +12,6 @@ import { listen, emit } from '@tauri-apps/api/event';
 import { useTheme } from '@mui/material/styles';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
-import { useNotify } from '../core/notification';
 import { ChatMessagesArea, ChatInputArea, type FileAttachment } from '../components/chat/ChatComponents';
 import type { ToolCallDisplay } from '../components/chat/ChatComponents';
 import { useFeatureGate, LockedScreen } from '../features/licensing';
@@ -75,6 +74,9 @@ export function AiCopilotPage() {
   const rdHost = searchParams.get('host');
   const rdUsername = searchParams.get('username');
   const rdInstallMode = searchParams.get('installMode') || 'basic';
+  // 远端操作系统（设置指南检测值）：linux / macos / windows / unknown。
+  // 写入 rdSetup metadata，后端据此把 OS 家族注入 system prompt，AI 直接走对应平台剧本。
+  const rdOsName = searchParams.get('osName') || 'unknown';
   const hasRdContext = !!rdSessionId;
   // 远程桌面安装流程状态：null=未检测 / 'installed'=已装 / 'not_installed'=未装待用户确认
   const [rdStatus, setRdStatus] = useState<null | 'installed' | 'not_installed'>(null);
@@ -86,14 +88,13 @@ export function AiCopilotPage() {
   const boundModel = boundAgent ? models.find((m) => m.id === boundAgent.modelId) : null;
   // 绑定 id 残留但对应智能体已不存在（被删/改）时，给出明确提示，而非运行期崩溃
   const boundAgentMissing = boundAgentId != null && agents.length > 0 && !boundAgent;
-  const notify = useNotify().notify;
 
   // 远程桌面设置指南携带的上下文：建会话时写入 metadata，供后端 run_agent 注入 system prompt。
   // lang 字段让后端按用户界面语言选择提示词版本（智能体提示词国际化）。
   const buildRdMetadata = useCallback((): Record<string, unknown> | undefined => {
     if (!hasRdContext) return undefined;
-    return { rdSetup: { sessionId: rdSessionId as string, host: rdHost ?? '', username: rdUsername ?? '', installMode: rdInstallMode, lang: i18n.language || 'zh-CN' } };
-  }, [hasRdContext, rdSessionId, rdHost, rdUsername, rdInstallMode, i18n.language]);
+    return { rdSetup: { sessionId: rdSessionId as string, host: rdHost ?? '', username: rdUsername ?? '', installMode: rdInstallMode, osName: rdOsName, lang: i18n.language || 'zh-CN' } };
+  }, [hasRdContext, rdSessionId, rdHost, rdUsername, rdInstallMode, rdOsName, i18n.language]);
 
   const createConversationWithContext = useCallback(async (agentId: string, title: string): Promise<ConversationDto> => {
     // 所有会话都带界面语言（lang），后端据此锁定输出语言（对自定义 prompt 的智能体同样生效）；
@@ -215,7 +216,7 @@ export function AiCopilotPage() {
           if (firstUserMsg) {
             const autoTitle = firstUserMsg.content.replace(/\[(?:附件|Attachment):.*?\]\s*/g, '').trim().slice(0, 40);
             if (autoTitle) {
-              updateConversationTitle(conversationId, autoTitle).catch((e) => notify(localizeBackendError(e)));
+              updateConversationTitle(conversationId, autoTitle).catch((e) => { console.error('AiCopilotPage: conversation title update', e); });
               setConvList((prev) => prev.map((c) => c.id === conversationId ? { ...c, title: autoTitle } : c));
             }
           }
@@ -375,6 +376,11 @@ export function AiCopilotPage() {
     const m = lastAssistant.content.match(/RD_STATUS:\s*(installed|not_installed)/i);
     if (m) {
       setRdStatus(m[1].toLowerCase() === 'installed' ? 'installed' : 'not_installed');
+    } else {
+      // 最新一条助手消息没有检查结论标记：对话已经继续推进（用户绕开卡片
+      // 提问、或进入安装阶段后的中间回复），收起过期的确认框，避免陈旧的
+      // RD_STATUS 结论一直挂在输入框上方。
+      setRdStatus(null);
     }
   }, [messages, loading, hasRdContext]);
 

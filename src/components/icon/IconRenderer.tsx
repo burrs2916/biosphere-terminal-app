@@ -1,9 +1,7 @@
 import { useState, useEffect } from 'react';
 import Box from '@mui/material/Box';
 import * as iconService from '../../core/services/icon.service';
-import { useNotify } from '../../core/notification';
 import { isCustomIconValue, isMaterialIconValue, getMaterialIconName } from './iconUtils';
-import { localizeBackendError } from '../../core/backendError';
 
 interface IconRendererProps {
   value: string;
@@ -47,7 +45,6 @@ export function invalidateIconUrlCache() {
 
 export function IconRenderer({ value, size = 20, iconUrls: externalUrls, sx = {} }: IconRendererProps) {
   const [resolvedUrls, setResolvedUrls] = useState<Record<string, string>>(externalUrls || {});
-  const notify = useNotify().notify;
 
   useEffect(() => {
     if (externalUrls) {
@@ -71,7 +68,7 @@ export function IconRenderer({ value, size = 20, iconUrls: externalUrls, sx = {}
             setResolvedUrls(urls);
           }
         })
-        .catch((e) => notify(localizeBackendError(e)));
+        .catch((e) => { console.error('IconRenderer: icon url resolve', e); });
     }
   }, [value, externalUrls]);
 

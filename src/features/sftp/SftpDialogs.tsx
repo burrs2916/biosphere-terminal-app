@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Checkbox from '@mui/material/Checkbox';
@@ -92,6 +93,11 @@ interface SftpDialogsProps {
   batchRename: SftpEntry[] | null;
   /** All entry names currently in the directory, for collision checks. */
   existingNames: string[];
+  /**
+   * Inline error for whichever dialog is open (validation or IPC failure).
+   * Rendered next to the dialog's own input instead of a detached toast.
+   */
+  dialogError?: string | null;
 
   /** Every string arrives already translated and interpolated. */
   labels: {
@@ -169,6 +175,7 @@ export function SftpDialogs({
   chmodValue,
   batchRename,
   existingNames,
+  dialogError,
   labels,
   onRenameChange,
   onRenameCancel,
@@ -241,6 +248,8 @@ export function SftpDialogs({
             size="small"
             value={renameValue}
             onChange={(e) => onRenameChange(e.target.value)}
+            error={!!dialogError}
+            helperText={dialogError}
             onKeyDown={(e) => {
               e.stopPropagation();
               if (e.key === 'Enter') onRenameSubmit();
@@ -266,6 +275,8 @@ export function SftpDialogs({
             label={labels.folderName}
             value={newFolderName}
             onChange={(e) => onFolderChange(e.target.value)}
+            error={!!dialogError}
+            helperText={dialogError}
             onKeyDown={(e) => {
               e.stopPropagation();
               if (e.key === 'Enter') onFolderSubmit();
@@ -408,6 +419,11 @@ export function SftpDialogs({
               },
             }}
           />
+          {dialogError && (
+            <Alert severity="error" variant="standard" sx={{ mt: 1.25, fontSize: 12.5, py: 0.25 }}>
+              {dialogError}
+            </Alert>
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={onChmodCancel}>{labels.cancel}</Button>
@@ -456,6 +472,11 @@ export function SftpDialogs({
           <Typography sx={{ fontSize: 11.5, color: subtle, mt: 0.5 }}>
             {labels.batchRenameHint}
           </Typography>
+          {dialogError && (
+            <Alert severity="error" variant="standard" sx={{ mt: 1, fontSize: 12.5, py: 0.25 }}>
+              {dialogError}
+            </Alert>
+          )}
 
           <Box
             sx={{

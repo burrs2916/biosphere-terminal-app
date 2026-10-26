@@ -1,33 +1,25 @@
 //! Shared pty "expect" primitives for answering SSH authentication prompts.
 //!
-//! Three call sites drive an OpenSSH client over a pty and must recognise the
-//! same interactive prompts:
+//! Historical note — the three original call sites have all been migrated off
+//! the pty:
 //!
-//! 1. `interface/commands/connection.rs::test_ssh_password` — the "test
-//!    connection" button (password mode).
-//! 2. `app/terminal_service.rs` — the interactive terminal's saved-password
-//!    auto-fill.
-//! 3. `app/sftp_service.rs` — the pooled SFTP session (Windows) and the
-//!    ControlMaster feeder (macOS/Linux).
+//! 1. the "test connection" button (`commands/connection.rs`) now runs
+//!    `ssh_common::establish` — protocol-level auth, no prompt scraping;
+//! 2. SFTP is a native russh channel (`sftp_native`), no pty in the path;
+//! 3. SSH terminals are a native russh PTY channel (`terminal_native`).
 //!
-//! They used to carry three matchers of very different maturity. The two
-//! naive ones fed the *raw* pty byte stream into an `ends_with("password:")`
-//! check — and on Windows the ConPTY layer (conhost) injects VT escape
-//! sequences into that stream, so the buffer rarely ends with the bare prompt
-//! and the password was never fed. The user-visible symptom was a false
-//! "SSH 连接超时（主机不可达、网络不通，或认证长时间无响应）" from the test
-//! button while every other SSH client connected fine. This module is the
-//! single matcher all three now use.
+//! The only code still feeding this matcher is the ConPTY local-shell lane in
+//! `terminal_service.rs`, which keeps an `AuthResponder` armed for a saved
+//! password. With every SSH session on the native lane, that responder never
+//! sees a password prompt in practice — the machinery stays as a zero-cost
+//! safety net for the local fallback, not as a live SSH path.
 //!
 //! Locale note: OpenSSH localises its prompts to the client locale, so a
-//! Chinese system shows "user@host 的密码：". Every ssh child we spawn sets
-//! `LC_MESSAGES=C`, which pins the prompt to English "Password: ", but the
-//! classifier still recognises the Chinese form as defence in depth.
+//! Chinese system shows "user@host 的密码：". The classifier recognises the
+//! Chinese form as defence in depth.
 //!
 //! Nothing in here logs or returns the password: [`DiagBuf`] redacts it, so a
 //! ConPTY echo of what we typed can never reach debug.log or a UI string.
-
-use crate::core::platform::is_host_key_error;
 
 /// An interactive prompt OpenSSH can block on before or during authentication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,22 +192,16 @@ pub struct AuthResponder {
     /// Current partial line, ANSI-filtered. Cleared on every line break.
     pending: String,
     diag: DiagBuf,
-    /// Rolling filtered window scanned for host-key verification failures.
-    hostkey_buf: String,
     password: Option<String>,
     password_fed: bool,
     /// Set the moment a password prompt is seen, even when no password is
     /// available to feed — callers use it to report "needs a password".
     password_prompt_seen: bool,
-    host_key_answered: bool,
 }
 
 /// Bound for `pending`: prompts are short; a progress-bar line without a
 /// newline must not grow it without limit.
 const PENDING_MAX: usize = 256;
-
-/// Rolling window used to spot "REMOTE HOST IDENTIFICATION HAS CHANGED".
-const HOSTKEY_WINDOW: usize = 1024;
 
 impl AuthResponder {
     pub fn new(password: Option<String>) -> Self {
@@ -227,11 +213,9 @@ impl AuthResponder {
             ansi: AnsiFilter::new(),
             pending: String::with_capacity(PENDING_MAX),
             diag,
-            hostkey_buf: String::with_capacity(HOSTKEY_WINDOW),
             password,
             password_fed: false,
             password_prompt_seen: false,
-            host_key_answered: false,
         }
     }
 
@@ -241,17 +225,6 @@ impl AuthResponder {
 
         let mut filtered = String::with_capacity(chunk.len());
         self.ansi.push(chunk, &mut filtered);
-
-        // Host-key-change detection rides on the filtered stream (the error
-        // text is plain ASCII) so callers can ask after the loop.
-        self.hostkey_buf.push_str(&filtered);
-        if self.hostkey_buf.len() > HOSTKEY_WINDOW {
-            let mut cut = self.hostkey_buf.len() - HOSTKEY_WINDOW;
-            while !self.hostkey_buf.is_char_boundary(cut) {
-                cut += 1;
-            }
-            self.hostkey_buf.drain(..cut);
-        }
 
         for ch in filtered.chars() {
             if ch == '\n' || ch == '\r' {
@@ -287,7 +260,6 @@ impl AuthResponder {
                 }
             }
             Some(PendingPrompt::HostKey) => {
-                self.host_key_answered = true;
                 self.pending.clear();
                 AuthAction::AnswerHostKeyYes
             }
@@ -303,11 +275,6 @@ impl AuthResponder {
         }
     }
 
-    /// True once the transcript shows a host-key verification failure.
-    pub fn host_key_changed(&self) -> bool {
-        is_host_key_error(&self.hostkey_buf)
-    }
-
     /// Redacted single-line transcript, for debug.log / error messages.
     pub fn diag(&self) -> String {
         self.diag.snapshot()
@@ -321,11 +288,8 @@ impl AuthResponder {
     pub fn password_prompt_seen(&self) -> bool {
         self.password_prompt_seen
     }
-
-    pub fn host_key_answered(&self) -> bool {
-        self.host_key_answered
-    }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -377,7 +341,6 @@ mod tests {
              Are you sure you want to continue connecting (yes/no/[fingerprint])? ",
         );
         assert_eq!(action, AuthAction::AnswerHostKeyYes);
-        assert!(r.host_key_answered());
     }
 
     #[test]
@@ -451,13 +414,6 @@ mod tests {
     }
 
     #[test]
-    fn host_key_change_is_detected_on_the_filtered_stream() {
-        let mut r = AuthResponder::new(Some("pw".into()));
-        r.push("\x1b[1m@@@@ REMOTE HOST IDENTIFICATION HAS CHANGED! @@@@\x1b[0m\n");
-        assert!(r.host_key_changed());
-    }
-
-    #[test]
     fn motd_noise_does_not_look_like_a_prompt() {
         let mut r = AuthResponder::new(Some("pw".into()));
         let actions = feed_all(
@@ -476,13 +432,10 @@ mod tests {
     /// A regression to a private, ANSI-naive matcher is exactly the bug that
     /// produced the false "连接超时" on Windows.
     ///
-    /// SFTP is now a native russh channel (`sftp_native`), with no pty in the
-    /// path, so it is no longer a pty-expect call site and is excluded on
-    /// purpose. The SSH *test connection* path (`commands/connection.rs`) was
-    /// likewise migrated to protocol-level auth via `ssh_common::establish` —
-    /// no pty, no prompt scraping — so it is no longer a call site either. The
-    /// only remaining consumer is the ConPTY local-shell fallback in
-    /// `terminal_service.rs`, which still feeds a real ssh.exe's password prompt.
+    /// SFTP is a native russh channel (`sftp_native`) and the test-connection
+    /// path runs `ssh_common::establish` — neither is a pty-expect call site
+    /// anymore. The only remaining consumer is the ConPTY local-shell lane in
+    /// `terminal_service.rs`.
     #[test]
     fn all_call_sites_use_the_shared_module() {
         let call_sites = [include_str!("../../app/terminal_service.rs")];

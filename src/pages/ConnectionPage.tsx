@@ -17,15 +17,15 @@ export function ConnectionPage() {
       try {
         ssh = JSON.parse(conn.config_json);
       } catch {
-        notify(t('connection.config_parse_error'));
+        notify(t('connection.config_parse_error'), 'error');
         return;
       }
       useConnectIntent.getState().set({ connectionType: 'ssh', ssh, name: conn.name, connectionId: conn.id });
     } else {
       useConnectIntent.getState().set({ connectionType: 'local', name: conn.name });
     }
-    // 终端页是常驻组件，切到其视图（isTerminal = pathname === '/'）并由其订阅消费意图
-    notify(t('connection.connecting', { name: conn.name }));
+    // 终端页是常驻组件，切到其视图（isTerminal = pathname === '/'）并由其订阅消费意图；
+    // 连接中/成功/失败状态由 TerminalPage 的实时状态机驱动（状态栏 + Tab 圆点），无需此处弹窗。
     navigate('/');
   };
 

@@ -14,6 +14,9 @@ import {
   MonitorIcon,
   PlugsConnectedIcon,
   FolderIcon,
+  FolderOpenIcon,
+  SelectionIcon,
+  UploadSimpleIcon,
 } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '@mui/material/styles';
@@ -32,6 +35,12 @@ interface TerminalToolbarProps {
   findOpen?: boolean;
   isSshSession?: boolean;
   onOpenConnections?: () => void;
+  onSelectAll?: () => void;
+  /** Current working directory of the active local session — enables "open folder". */
+  cwd?: string;
+  onRevealCwd?: () => void;
+  /** 选文件放入当前目录：本地复制进 cwd，SSH 上传到远端。 */
+  onUploadToCwd?: () => void;
 }
 
 export function TerminalToolbar({
@@ -48,6 +57,10 @@ export function TerminalToolbar({
   findOpen,
   isSshSession,
   onOpenConnections,
+  onSelectAll,
+  cwd,
+  onRevealCwd,
+  onUploadToCwd,
 }: TerminalToolbarProps) {
   const { t } = useTranslation('terminal');
   const theme = useTheme();
@@ -116,6 +129,29 @@ export function TerminalToolbar({
               color={findOpen ? '#6C63FF' : isDark ? '#8B949E' : '#6B7280'}
               weight={findOpen ? 'fill' : 'regular'}
             />
+          </IconButton>
+        </Tooltip>
+        <Tooltip title={t('select_all')}>
+          <IconButton size="small" onClick={onSelectAll}>
+            <SelectionIcon size={16} color={isDark ? '#8B949E' : '#6B7280'} />
+          </IconButton>
+        </Tooltip>
+        {!isSshSession && (
+          <Tooltip title={t('reveal_cwd')}>
+            <IconButton size="small" onClick={onRevealCwd} disabled={!cwd}>
+              <FolderOpenIcon size={16} color={isDark ? '#8B949E' : '#6B7280'} />
+            </IconButton>
+          </Tooltip>
+        )}
+        {/* 上传到当前目录：本地 = 复制进 cwd；SSH = 上传到远端。
+            本地会话未知 cwd 时禁用；SSH 始终可用（落远端 home）。 */}
+        <Tooltip title={t('upload_to_cwd')}>
+          <IconButton
+            size="small"
+            onClick={onUploadToCwd}
+            disabled={!isSshSession && !cwd}
+          >
+            <UploadSimpleIcon size={16} color={isDark ? '#8B949E' : '#6B7280'} />
           </IconButton>
         </Tooltip>
       </Box>

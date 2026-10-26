@@ -765,6 +765,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             interface::commands::terminal::resize_terminal,
             interface::commands::terminal::relay_execute_command,
             interface::commands::terminal::get_terminal_cwd,
+            interface::commands::terminal::local_copy_files,
             interface::commands::terminal::append_terminal_log,
             interface::commands::session::list_sessions,
             interface::commands::session::create_session,
@@ -886,7 +887,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             // connections. The sftp window already disconnects on close.
             app.run(move |app: &tauri::AppHandle, event: tauri::RunEvent| {
                 if let tauri::RunEvent::Exit = event {
-                    app.state::<SftpService>().shutdown_all();
+                    // NOTE: the service is managed as `Arc<SftpService>`
+                    // (see the manage block in setup). Tauri's StateManager
+                    // keys state by the *exact* TypeId with no Arc
+                    // unwrapping: looking up the bare inner type instead of
+                    // the Arc wrapper panics — and a panic inside this
+                    // event-loop callback unwinds the main thread and
+                    // freezes the whole app. Use the Arc type, and
+                    // `try_state` so exit can never panic.
+                    if let Some(sftp) = app.try_state::<Arc<SftpService>>() {
+                        sftp.shutdown_all();
+                    }
                 }
             });
         });
@@ -925,4 +936,91 @@ fn truncate_debug_logs(paths: &DebugLogPaths) {
 #[allow(dead_code)]
 fn write_debug_log(path: &std::path::Path, message: &str) -> std::io::Result<()> {
     infra::logging::debug_log::write_line(path, message)
+}
+
+#[cfg(test)]
+mod state_type_guardrail_tests {
+    /// Tauri's `StateManager` keys managed state by the *exact* `TypeId` of
+    /// the value passed to `manage()` — there is no `Arc` unwrapping
+    /// (`tauri-2.11.1/src/state.rs`: `set::<T>` / `try_get::<T>` both use
+    /// `TypeId::of::<T>()`). Looking up `state::<T>()` / `try_state::<T>()` /
+    /// `State<'_, T>` when `Arc<T>` was managed is a guaranteed runtime
+    /// panic. Inside the `RunEvent::Exit` handler that panic unwinds the
+    /// tao event-loop callback, killing the main thread while the process
+    /// stays alive — every IPC invoke then hangs forever (the whole app
+    /// looks frozen, all connections stuck at "connecting").
+    ///
+    /// This guardrail scans the crate for that exact mistake: any bare
+    /// state lookup of a type that is constructed as `Arc::new(<T>::...)`.
+    #[test]
+    fn no_bare_state_lookup_for_arc_managed_types() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+                    out.push(path);
+                }
+            }
+        }
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        assert!(!files.is_empty(), "guardrail found no source files under {root:?}");
+
+        // Types constructed as `Arc::new(<T>::...)` anywhere in the crate —
+        // these are (or mirror) the Arc-managed service types.
+        let mut arc_types: Vec<String> = Vec::new();
+        for file in &files {
+            let src = std::fs::read_to_string(file).unwrap_or_default();
+            let mut rest = src.as_str();
+            while let Some(i) = rest.find("Arc::new(") {
+                let after = &rest[i + "Arc::new(".len()..];
+                let end = after.find("::").unwrap_or(after.len());
+                let name = &after[..end];
+                if !name.is_empty()
+                    && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && name.starts_with(|c: char| c.is_uppercase())
+                {
+                    arc_types.push(name.to_string());
+                }
+                rest = &after[end..];
+            }
+        }
+        arc_types.sort();
+        arc_types.dedup();
+
+        // Whitespace-stripped contents make the patterns layout-independent.
+        let mut violations: Vec<String> = Vec::new();
+        for file in &files {
+            let src = std::fs::read_to_string(file).unwrap_or_default();
+            let squeezed: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+            for t in &arc_types {
+                for pat in [
+                    format!("state::<{t}>"),
+                    format!("try_state::<{t}>"),
+                    format!("State<'_,{t}>"),
+                ] {
+                    if squeezed.contains(&pat) {
+                        violations.push(format!(
+                            "{}: uses `{pat}` but `{t}` is Arc-managed (TypeId mismatch = runtime panic)",
+                            file.display()
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "bare state lookup of Arc-managed type(s) — every lookup must use the Arc-wrapped type:\n{}",
+            violations.join("\n")
+        );
+    }
 }

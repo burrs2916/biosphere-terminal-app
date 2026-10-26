@@ -17,15 +17,15 @@ export function CommandPage() {
   const handleExecute = useCallback(
     (command: string) => {
       if (!activeSessionId) {
-        notify(t('no_active_terminal'));
+        notify(t('no_active_terminal'), 'warning');
         return;
       }
       const bytes = new TextEncoder().encode(command + '\n');
-      writeToTerminal(activeSessionId, Array.from(bytes)).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+      writeToTerminal(activeSessionId, Array.from(bytes)).catch((e) => { console.error(e); notify(localizeBackendError(e), 'error'); });
       // 记录命令历史
       getTerminalCwd(activeSessionId).then((cwd) => {
-        parseCommand(command, activeSessionId, cwd ?? undefined).catch((e) => notify(localizeBackendError(e)));
-      }).catch((e) => notify(localizeBackendError(e)));
+        parseCommand(command, activeSessionId, cwd ?? undefined).catch((e) => { console.error('CommandPage: parseCommand history', e); });
+      }).catch((e) => { console.error('CommandPage: getTerminalCwd', e); });
     },
     [activeSessionId, notify, t],
   );

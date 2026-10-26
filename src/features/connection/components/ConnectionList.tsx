@@ -119,7 +119,7 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
   const load = () => {
     listConnections()
       .then((list) => { setConnections(list); setCount(list.length); })
-      .catch((e) => notify(localizeBackendError(e)));
+      .catch((e) => notify(localizeBackendError(e), 'error'));
   };
 
   useEffect(() => { load(); }, []);
@@ -198,10 +198,9 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
     };
     try {
       await saveConnection(cloned);
-      notify(t('connection.cloned', { name: cloned.name }));
       load();
     } catch (err) {
-      notify(localizeBackendError(err));
+      notify(localizeBackendError(err), 'error');
     }
   };
 
@@ -283,9 +282,8 @@ export function ConnectionList({ onConnect }: ConnectionListProps) {
       }
       clearSelection();
       load();
-      notify(t('connection.delete_selected') + ` (${ids.length})`);
     } catch (err) {
-      notify(localizeBackendError(err));
+      notify(localizeBackendError(err), 'error');
     }
   };
 

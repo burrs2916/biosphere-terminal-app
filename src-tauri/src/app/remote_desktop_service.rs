@@ -87,6 +87,71 @@ impl RemoteDesktopService {
             ssh.host, ssh.username, ssh.auth_method, ssh.password.is_some()
         );
 
+        // Round 1 — identify the remote OS family BEFORE probing. `uname -s`
+        // prints Linux/Darwin on Unix; on Windows OpenSSH (cmd.exe default
+        // shell) it fails with a localized "not recognized" error, which is
+        // itself the signal. Without this split the Unix-only probe chain
+        // below breaks on Windows: cmd has no `;` command separator and no
+        // which/ss/test, so the whole line degenerates into `cat` arguments.
+        let uname_out = run_ssh_command(ssh, "uname -s", 30)
+            .await
+            .unwrap_or_default();
+        let uname_l = uname_out.trim().to_lowercase();
+        let is_windows = !uname_l.contains("linux")
+            && !uname_l.contains("darwin")
+            && (uname_l.contains("not recognized")
+                || uname_l.contains("不是内部")
+                || uname_l.contains("无法"));
+
+        if is_windows {
+            // Round 2 (Windows) — cmd-compatible probes only: `&` is cmd's
+            // command separator, findstr/netstat/tasklist/ver are built in.
+            // No `;` chains, no /dev/null redirection, no which/test.
+            let win_out = run_ssh_command(
+                ssh,
+                "ver& netstat -an | findstr /R \":590\"& tasklist | findstr /I \"vnc\"",
+                30,
+            )
+            .await
+            .map_err(|e| format!("SSH connection failed: {}", e))?;
+
+            let port_listening = win_out.lines().any(|l| l.contains(":590"));
+            // A running VNC process (winvnc.exe / tvnserver.exe / …) proves the
+            // server exists; the port line proves it is listening.
+            let vnc_artifacts: Vec<&str> = win_out
+                .lines()
+                .filter(|l| {
+                    let ll = l.to_lowercase();
+                    ll.contains("vnc") && !ll.contains(":590")
+                })
+                .collect();
+            let vnc_installed = !vnc_artifacts.is_empty();
+            let detected_port = if win_out.contains(":5901") {
+                5901
+            } else if win_out.contains(":5900") {
+                5900
+            } else {
+                vnc_port
+            };
+
+            tracing::info!(
+                "[remote-desktop-setup] Windows detection: vnc_installed={}, port_listening={}, port={}",
+                vnc_installed, port_listening, detected_port
+            );
+
+            return Ok(VncSetupResult {
+                vnc_installed,
+                vnc_running: port_listening || vnc_installed,
+                vnc_port: detected_port,
+                display: None,
+                // Windows VNC password management (UltraVNC/TightVNC auth
+                // plugins) is out of scope for the auto flow — the UI routes
+                // Windows hosts to manual setup anyway.
+                needs_password: false,
+                os_name: "windows".to_string(),
+            });
+        }
+
         let ssh_output = run_ssh_command(ssh, "which tigervncserver x11vnc vncserver Xvnc Xtightvnc 2>/dev/null; echo SEP123456; ( grep -E '^(ID|ID_LIKE)=' /etc/os-release 2>/dev/null | tr 'A-Z' 'a-z' ) ; echo SEP123456; vncserver -list 2>/dev/null; echo SEP123456; ( if uname -s 2>/dev/null | grep -qi darwin; then netstat -an -f inet -p tcp 2>/dev/null | grep -E ':590[0-9]' || lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -E ':590[0-9]'; else ss -tlnp 2>/dev/null | grep -E ':590[0-9]' || netstat -tlnp 2>/dev/null | grep -E ':590[0-9]'; fi ) || true; echo SEP123456; test -f ~/.vnc/passwd && echo PASSWD_EXISTS || echo NO_PASSWD; echo SEP123456; uname -s 2>/dev/null || echo UNKNOWN_UNAME; echo SEP123456; which startxfce4 gnome-session xterm 2>/dev/null || true", 30)
             .await
             .map_err(|e| format!("SSH connection failed: {}", e))?;

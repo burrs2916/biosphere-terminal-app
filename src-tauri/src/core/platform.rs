@@ -2,7 +2,6 @@
 //!
 //! Targets macOS (parity baseline) and modern Windows 10/11.
 
-use crate::infra::logging::debug_log;
 use std::path::PathBuf;
 
 /// Return the default interactive shell to spawn for the local terminal.
@@ -26,80 +25,6 @@ pub fn default_shell() -> String {
     }
 
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-}
-
-/// Resolve the ssh client binary to use for SSH terminals and remote-desktop tunnels.
-///
-/// On Windows the OpenSSH client lives at C:\Windows\System32\OpenSSH\ssh.exe on
-/// modern Win10 1809+ and Win11. We probe PATH first, then the well-known
-/// system location, and finally return a structured error so the UI can guide
-/// the user to enable the optional feature.
-pub fn resolve_ssh_binary() -> Result<String, String> {
-    let exe = if cfg!(target_os = "windows") { "ssh.exe" } else { "ssh" };
-
-    if let Some(p) = find_executable(exe) {
-        let resolved = p.to_string_lossy().into_owned();
-        debug_log::term(
-            "DEBUG",
-            "ssh-resolve",
-            "path-hit",
-            &format!("ssh_bin={}", resolved),
-        );
-        return Ok(resolved);
-    }
-
-    // Windows-only fallbacks. When the app is launched by double-click (not from a
-    // developer shell) the inherited PATH often omits the OpenSSH / Git dirs, so
-    // `find_executable` above fails even though ssh is installed. Probe the
-    // well-known install locations directly. `SysNative` is the 64-bit view of
-    // System32 for a 32-bit host process, so it also covers the WOW64 redirect
-    // case where `C:\Windows\System32\OpenSSH` would resolve to SysWOW64 (missing).
-    #[cfg(target_os = "windows")]
-    {
-        let system_root =
-            std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-        let known: [&str; 5] = [
-            &format!("{}\\System32\\OpenSSH\\ssh.exe", system_root),
-            &format!("{}\\SysNative\\OpenSSH\\ssh.exe", system_root),
-            r"C:\Program Files\OpenSSH-Win64\ssh.exe",
-            r"C:\Program Files\Git\usr\bin\ssh.exe",
-            r"C:\Program Files (x86)\Git\usr\bin\ssh.exe",
-        ];
-        for candidate in known {
-            let p = std::path::Path::new(candidate);
-            if p.is_file() {
-                debug_log::term(
-                    "DEBUG",
-                    "ssh-resolve",
-                    "known-path-hit",
-                    &format!("ssh_bin={}", candidate),
-                );
-                return Ok(candidate.to_string());
-            }
-        }
-    }
-
-    debug_log::term(
-        "ERROR",
-        "ssh-resolve",
-        "not-found",
-        "ssh not found on PATH or known locations",
-    );
-    Err(ssh_missing_hint())
-}
-
-fn ssh_missing_hint() -> String {
-    if cfg!(target_os = "windows") {
-        "SSH client not found.\n\n\
-         Please enable OpenSSH Client on Windows:\n\
-         1. Open Settings → Apps → Optional features\n\
-         2. Add the 'OpenSSH Client' feature\n\n\
-         Or run as Administrator in PowerShell:\n\
-         Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0"
-            .to_string()
-    } else {
-        "SSH client (ssh) not found in PATH. Please install OpenSSH.".to_string()
-    }
 }
 
 /// 从 `~/.ssh/known_hosts` 删除指定主机的旧 host key 记录。
@@ -132,18 +57,6 @@ pub fn clear_known_host(host: &str, port: u16) -> std::result::Result<(), String
             status.code().unwrap_or(-1)
         ))
     }
-}
-
-/// 判断一段 SSH 输出是否为「主机密钥变更」导致的中断。
-///
-/// `StrictHostKeyChecking=accept-new` 只对「全新」主机自动接受，对「已存在但
-/// key 变了」的主机（典型场景：云服务器重装系统）直接拒绝并退出，输出中会出现
-/// 下面两类文本之一。连接链路在检测到后调用 [`clear_known_host`] 清掉旧记录再
-/// 重试一次，行为需与 terminal_service / test_connection 保持一致。
-pub fn is_host_key_error(output: &str) -> bool {
-    let low = output.to_lowercase();
-    low.contains("host key verification failed")
-        || low.contains("remote host identification has changed")
 }
 
 /// known_hosts 条目格式：IPv6 恒加方括号；非 22 端口为 `[host]:port`。
@@ -198,7 +111,7 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_host_key_error, known_hosts_entry};
+    use super::known_hosts_entry;
 
     #[test]
     fn known_hosts_entry_formats() {
@@ -209,24 +122,5 @@ mod tests {
         // IPv6 恒加括号
         assert_eq!(known_hosts_entry("2001:db8::1", 22), "[2001:db8::1]");
         assert_eq!(known_hosts_entry("2001:db8::1", 2222), "[2001:db8::1]:2222");
-    }
-
-    #[test]
-    fn is_host_key_error_detects_known_variants() {
-        assert!(is_host_key_error(
-            "@@@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @@@\n\
-             Host key verification failed."
-        ));
-        assert!(is_host_key_error(
-            "Host key verification failed."
-        ));
-        assert!(is_host_key_error(
-            "REMOTE HOST IDENTIFICATION HAS CHANGED!"
-        ));
-        // 普通认证失败不应误判为 host key 问题
-        assert!(!is_host_key_error(
-            "Permission denied (publickey,password)."
-        ));
-        assert!(!is_host_key_error(""));
     }
 }

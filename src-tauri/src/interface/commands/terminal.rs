@@ -151,6 +151,38 @@ pub async fn get_terminal_cwd(
     }
 }
 
+/// 把本地文件复制到指定目录（"上传到当前目录"的本地会话路径）。
+///
+/// 纯文件 IO，阻塞 —— 必须走 `spawn_blocking`，绝不留在主线程
+/// （同步 command 的任何阻塞调用都会钉死整个 app，见模块头注释）。
+/// 逐文件复制，同名覆盖；源必须是已存在的普通文件。
+#[tauri::command]
+pub async fn local_copy_files(
+    local_paths: Vec<String>,
+    dest_dir: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let dest = std::path::Path::new(&dest_dir);
+        if !dest.is_dir() {
+            return Err(format!("目标目录不存在: {}", dest_dir));
+        }
+        for src in &local_paths {
+            let p = std::path::Path::new(src);
+            if !p.is_file() {
+                return Err(format!("源不是文件或不存在: {}", src));
+            }
+            let name = p
+                .file_name()
+                .ok_or_else(|| format!("无效的文件路径: {}", src))?;
+            let to = dest.join(name);
+            std::fs::copy(p, &to).map_err(|e| format!("复制失败 {}: {}", src, e))?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("本地复制任务异常: {}", e))?
+}
+
 /// Append a frontend-side Terminal diagnostic entry to `debug.log`.
 ///
 /// The frontend half of a terminal session (WebGL renderer setup, output

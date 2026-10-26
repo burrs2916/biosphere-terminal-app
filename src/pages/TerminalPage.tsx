@@ -8,6 +8,7 @@ import DialogContent from '@mui/material/DialogContent';
 import DialogContentText from '@mui/material/DialogContentText';
 import DialogActions from '@mui/material/DialogActions';
 import Button from '@mui/material/Button';
+import CircularProgress from '@mui/material/CircularProgress';
 import { useTheme } from '@mui/material/styles';
 import {
   PlusIcon,
@@ -19,8 +20,10 @@ import {
   ConnectionPicker,
   TerminalContextMenu,
   FindBar,
+  initialConn,
+  reduceConn,
 } from '../features/terminal';
-import type { TerminalEmulatorHandle, ConnectionPickerResult } from '../features/terminal';
+import type { TerminalEmulatorHandle, ConnectionPickerResult, ConnSnapshot } from '../features/terminal';
 import { TabBar } from '../features/session';
 import { CommandPalette } from '../features/command';
 import { spawnTerminal, killTerminal, writeToTerminal, getTerminalCwd } from '../core/services/terminal.service';
@@ -28,11 +31,17 @@ import { copyText, pasteText } from '../core/services/clipboard.service';
 import { parseCommand } from '../core/services/command.service';
 import { generateId } from '../core/utils';
 import type { PtyConfig } from '../proto';
+import type { SshConnectionInfo } from '../proto/connection';
+import { sftpUpload, sftpList } from '../core/services/sftp.service';
+import { basename, newTransferId, uniqueRemoteName } from '../features/sftp/utils';
+import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
 import { openNotesReferenceWindow, openAiCopilotWindow, openRemoteDesktopWindow, openSftpWindow } from '../core/services/window.service';
 import { useConnectIntent } from '../features/terminal/connectIntent';
 import { localizeBackendError } from '../core/backendError';
 import { termTimed } from '../core/terminalLog';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { useSettingsStore } from '../engine';
 import { useNotify } from '../core/notification';
 import { useTranslation } from 'react-i18next';
@@ -40,13 +49,26 @@ import { useLicenseStore } from '../features/licensing/licenseStore';
 import { useUpgradeDialogStore } from '../features/licensing/upgradeDialogStore';
 import type { ProFeature } from '../proto/licensing';
 
+/** 取远程路径的父目录（点击的多是文件路径，跳转目标应是它所在的目录）。 */
+function parentOfRemotePath(p: string): string {
+  const trimmed = p.replace(/[\\/]+$/, '');
+  const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  if (idx < 0) return p; // 无分隔符：原样返回（调用方已保证是绝对路径）
+  // 盘符根：C:\file → C:\
+  if (/^[A-Za-z]:/.test(trimmed) && idx <= 2) return trimmed.slice(0, 3);
+  if (idx === 0) return '/'; // /file → /
+  return trimmed.slice(0, idx);
+}
+
 interface Tab {
   id: string;
   title: string;
   isActive: boolean;
   connectionType: 'local' | 'ssh';
   ssh?: { host: string; port: number; username: string; authMethod: string; privateKeyPath?: string; password?: string };
-  disconnected?: boolean;
+  /** Real connection phase, driven by the spawn lifecycle + session events.
+   *  Single source of truth: the pure reducer in connectionStatus.ts. */
+  conn: ConnSnapshot;
   profileId?: string;
   /** 来自既有 SSH 连接的 id，用于在连接管理页标记"使用中" */
   connectionId?: string;
@@ -107,15 +129,23 @@ export function TerminalPage() {
   // `get_terminal_cwd` IPC. On Windows that call is an OpenProcess plus two
   // ReadProcessMemory calls against the target's PEB, so it is far from free.
   const activeTabId = tabs.find((t) => t.isActive)?.id ?? null;
-  const activeTabDisconnected = tabs.find((t) => t.isActive)?.disconnected ?? false;
+  const activeTabDisconnected = tabs.find((t) => t.isActive)?.conn.status === 'disconnected';
   // Last directory pushed into `activeCwd`. A poll that returns the same
   // directory must not trigger a React re-render of the whole page.
   const lastCwdRef = useRef<string | null>(null);
+  // Previous active tab id, so switching/creating a tab can drop the stale cwd.
+  const lastActiveTabIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!activeTabId) {
+    // Switching or creating the active tab must drop the previous tab's cwd
+    // immediately; otherwise the status bar shows a stale directory until the
+    // new tab's first poll lands.
+    if (lastActiveTabIdRef.current !== activeTabId) {
+      lastActiveTabIdRef.current = activeTabId;
       lastCwdRef.current = null;
       setActiveCwd(null);
+    }
+    if (!activeTabId) {
       return;
     }
     // Don't poll cwd until the backend session is actually spawned (otherwise
@@ -152,6 +182,13 @@ export function TerminalPage() {
   const handleSpawnReady = useCallback(async (id: string) => {
     const cfg = configStashRef.current.get(id);
     if (!cfg) return;
+    // tab 已被关闭（如建 tab 后 300ms 悬挂兜底晚到的 onReady）：丢弃待启动
+    // 配置，绝不为不存在的 tab 拉起 PTY——否则 kill 落空、spawn 成功，
+    // 留下一个无 UI 引用的孤儿会话直到进程退出。
+    if (!tabsRef.current.some((t) => t.id === id)) {
+      configStashRef.current.delete(id);
+      return;
+    }
     configStashRef.current.delete(id);
     // Logged on the frontend side as well: on Windows the backend can answer
     // "the PTY is up" while the window is already unresponsive, so the gap
@@ -166,10 +203,24 @@ export function TerminalPage() {
       );
     } catch (e) {
       console.error(e);
-      notify(localizeBackendError(e));
+      // Connect/auth failed. For native SSH the russh handshake runs
+      // synchronously inside spawn and fails *before* a session is registered,
+      // so no terminal-closed event will ever arrive — flip the tab ourselves
+      // so the status bar and tab marker stop showing a false "connected".
+      // The failure reason travels with the snapshot so the overlay can show
+      // exactly what went wrong instead of a bare "disconnected".
+      const error = localizeBackendError(e);
+      setTabs((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, conn: reduceConn(t.conn, { kind: 'spawn_error', error }) } : t)),
+      );
       return;
     }
     terminalRefs.current.get(id)?.syncBackendSize();
+    // spawnTerminal resolving means the transport is up (for native SSH the
+    // handshake completed inside the spawn call) — promote to connected.
+    setTabs((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, conn: reduceConn(t.conn, { kind: 'spawn_ok' }) } : t)),
+    );
     // Mark this session as spawned so the cwd poll (which is gated on
     // spawnedIds) starts only after the backend session actually exists.
     setSpawnedIds((prev) => {
@@ -249,6 +300,7 @@ export function TerminalPage() {
         title,
         isActive: true,
         connectionType: result.connectionType,
+        conn: initialConn(result.connectionType === 'ssh'),
         connectionId: result.connectionId,
         ssh: result.ssh ? {
           host: result.ssh.host,
@@ -280,7 +332,9 @@ export function TerminalPage() {
 
   const doCloseTab = useCallback(
     (id: string) => {
-      killTerminal(id).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+      // 若 onReady 尚未到达，待启动配置一并作废（防孤儿 PTY）。
+      configStashRef.current.delete(id);
+      killTerminal(id).catch((e) => { console.error(e); notify(localizeBackendError(e), 'error'); });
       terminalRefs.current.delete(id);
       setTabs((prev) => {
         const closing = prev.find((t) => t.id === id);
@@ -328,7 +382,7 @@ export function TerminalPage() {
       const tab = tabsRef.current.find((t) => t.id === sessionId);
       if (tab?.connectionType === 'ssh') {
         setTabs((prev) =>
-          prev.map((t) => (t.id === sessionId ? { ...t, disconnected: true } : t)),
+          prev.map((t) => (t.id === sessionId ? { ...t, conn: reduceConn(t.conn, { kind: 'closed' }) } : t)),
         );
       } else {
         doCloseTab(sessionId);
@@ -340,7 +394,9 @@ export function TerminalPage() {
   const handleReconnect = useCallback(
     (tab: Tab) => {
       if (!tab.ssh) return;
-      killTerminal(tab.id).catch((e) => notify(localizeBackendError(e)));
+      killTerminal(tab.id).catch((e) => notify(localizeBackendError(e), 'error'));
+      // 旧 id 的待启动配置一并作废（tab id 即将被替换）。
+      configStashRef.current.delete(tab.id);
       terminalRefs.current.delete(tab.id);
       const newId = generateId();
       const size = estimateTerminalSize();
@@ -361,7 +417,7 @@ export function TerminalPage() {
       // 暂存配置，等新 TerminalEmulator 的 onReady 后再 spawn（同 handleConnect 的时序修复）。
       configStashRef.current.set(newId, config);
       setTabs((prev) =>
-        prev.map((t) => (t.id === tab.id ? { ...t, id: newId, disconnected: false } : t)),
+        prev.map((t) => (t.id === tab.id ? { ...t, id: newId, conn: initialConn(true) } : t)),
       );
     },
     [shell, estimateTerminalSize],
@@ -372,10 +428,10 @@ export function TerminalPage() {
       const activeTab = tabs.find((t) => t.isActive);
       if (activeTab) {
         const bytes = new TextEncoder().encode(command + '\n');
-        writeToTerminal(activeTab.id, Array.from(bytes)).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+        writeToTerminal(activeTab.id, Array.from(bytes)).catch((e) => { console.error(e); notify(localizeBackendError(e), 'error'); });
         getTerminalCwd(activeTab.id).then((cwd) => {
-          parseCommand(command, activeTab.id, cwd ?? undefined).catch((e) => notify(localizeBackendError(e)));
-        }).catch((e) => notify(localizeBackendError(e)));
+          parseCommand(command, activeTab.id, cwd ?? undefined).catch((e) => { console.error('TerminalPage: parseCommand history (command palette)', e); });
+        }).catch((e) => { console.error('TerminalPage: getTerminalCwd (command palette)', e); });
       }
       setPaletteOpen(false);
     },
@@ -384,13 +440,13 @@ export function TerminalPage() {
 
   const handleOpenNotes = useCallback(() => {
     guardProFeature('note_reference', () => {
-      openNotesReferenceWindow().catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+      openNotesReferenceWindow().catch((e) => { console.error(e); notify(localizeBackendError(e), 'error'); });
     });
   }, [guardProFeature, notify]);
 
   const handleOpenAiCopilot = useCallback(() => {
     guardProFeature('ai_copilot', () => {
-      openAiCopilotWindow().catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+      openAiCopilotWindow().catch((e) => { console.error(e); notify(localizeBackendError(e), 'error'); });
     });
   }, [guardProFeature, notify]);
 
@@ -406,7 +462,7 @@ export function TerminalPage() {
         password: activeTab.ssh.password,
         connectionId: activeTab.connectionId,
       } : undefined;
-      openRemoteDesktopWindow(sshParams, (msg) => notify(msg)).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+      openRemoteDesktopWindow(sshParams, (msg) => notify(msg)).catch((e) => { console.error(e); notify(localizeBackendError(e), 'error'); });
     });
   }, [guardProFeature, notify]);
 
@@ -421,9 +477,103 @@ export function TerminalPage() {
         privateKeyPath: activeTab.ssh.privateKeyPath,
         password: activeTab.ssh.password,
       } : undefined;
-      openSftpWindow(sshParams, (msg) => notify(msg)).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+      openSftpWindow(sshParams, (msg) => notify(msg)).catch((e) => { console.error(e); notify(localizeBackendError(e), 'error'); });
     });
   }, [guardProFeature, notify]);
+
+  // SSH 会话点击终端输出里的路径：
+  // - 绝对路径 → 打开文件传输窗口，定位到其父目录。输出里大多是文件路径
+  //   （日志/配置），对文件 read_dir 会直接报错，因此对齐本地
+  //   revealItemInDir 的"展示所在目录"语义；
+  // - 相对路径（./、../ 等）→ 远端按 home 解析，多半不是终端实际 cwd，
+  //   跳转会落到不存在的目录，回退为复制路径。
+  const handleRemotePathActivate = useCallback((p: string) => {
+    const isAbsolute = p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p);
+    if (!isAbsolute) {
+      copyText(p)
+        .then(() => notify(t('toast_remote_path_copied') || '已复制远程路径', 'info'))
+        .catch(() => notify(t('copy_failed') || '复制失败', 'error'));
+      return;
+    }
+    const targetDir = parentOfRemotePath(p);
+    guardProFeature('sftp', () => {
+      const activeTab = tabsRef.current.find((t) => t.isActive);
+      if (!activeTab?.ssh) return;
+      const sshParams = {
+        host: activeTab.ssh.host,
+        port: activeTab.ssh.port,
+        username: activeTab.ssh.username,
+        authMethod: activeTab.ssh.authMethod,
+        privateKeyPath: activeTab.ssh.privateKeyPath,
+        password: activeTab.ssh.password,
+        initialPath: targetDir,
+      };
+      openSftpWindow(sshParams, (msg) => notify(msg)).catch((e) => { console.error(e); notify(localizeBackendError(e), 'error'); });
+    });
+  }, [guardProFeature, notify, t]);
+
+  // 「上传到当前目录」：本地会话把所选文件复制进 cwd；SSH 会话上传到远端
+  // （远端 cwd 未跟踪，落在远端 home）。SSH 上传前先列目标目录做重名去重，
+  // 生成 remoteNames 传给后端——后端按 CREATE|TRUNCATE 覆盖写，不去重会
+  // 静默覆盖远端同名文件。SFTP 属 Pro 能力，SSH 分支在选择文件前先过授权门。
+  const handleUploadToCwd = useCallback(() => {
+    const activeTab = tabsRef.current.find((t) => t.isActive);
+    if (!activeTab) return;
+    const isSsh = activeTab.connectionType === 'ssh' && !!activeTab.ssh;
+    if (!isSsh && !activeCwd) {
+      notify(t('no_cwd') || '当前工作目录未知', 'warning');
+      return;
+    }
+    const startTransfer = (paths: string[]) => {
+      if (isSsh && activeTab.ssh) {
+        const ssh: SshConnectionInfo = {
+          host: activeTab.ssh.host,
+          port: activeTab.ssh.port,
+          username: activeTab.ssh.username,
+          auth_method: activeTab.ssh.authMethod as 'none' | 'password' | 'private_key',
+          private_key_path: activeTab.ssh.privateKeyPath,
+          password: activeTab.ssh.password,
+        };
+        // 大文件期间终端页没有进度 UI，先给一条"上传中"提示，完成/失败再补一条。
+        notify(t('upload_to_cwd_started', { count: paths.length }) || '正在上传…', 'info');
+        // 列远端目录拿现有文件名，逐个生成不冲突的远端名（report.pdf → report (1).pdf）。
+        // 若列目录失败（权限/网络），降级为「无去重」上传，但必须明确告知用户，
+        // 否则成功提示会掩盖「远端同名文件被静默覆盖」的风险。
+        sftpList(ssh, '.')
+          .then((listing) => {
+            const taken = new Set((listing?.entries ?? []).map((e) => e.name));
+            const remoteNames = paths.map((p) => uniqueRemoteName(basename(p), taken));
+            return sftpUpload(ssh, paths, '.', newTransferId(), remoteNames);
+          })
+          .catch(() => {
+            notify(t('upload_dedup_failed') || '无法读取远端目录，已跳过同名去重，重名文件可能被覆盖', 'warning');
+            return sftpUpload(ssh, paths, '.', newTransferId(), undefined);
+          })
+          .then(() => notify(t('upload_to_cwd_done') || '文件已传输到当前目录', 'success'))
+          .catch((e) => notify(localizeBackendError(e), 'error'));
+      } else {
+        invoke('local_copy_files', { localPaths: paths, destDir: activeCwd })
+          .then(() => notify(t('upload_to_cwd_done') || '文件已复制到当前目录', 'success'))
+          .catch((e) => notify(localizeBackendError(e), 'error'));
+      }
+    };
+    const startPick = () => {
+      openFileDialog({ multiple: true, title: t('upload_to_cwd') || '上传到当前目录' })
+        .then((picked) => {
+          if (!picked) return;
+          const paths = Array.isArray(picked) ? picked : [picked];
+          if (paths.length === 0) return;
+          startTransfer(paths);
+        })
+        .catch(() => { /* 对话框取消/失败静默 */ });
+    };
+    // Pro 门在选择文件之前过：先选完文件再被告知要升级，体验是倒置的。
+    if (isSsh) {
+      guardProFeature('sftp', startPick);
+    } else {
+      startPick();
+    }
+  }, [activeCwd, guardProFeature, notify, t]);
 
   const handleClearBuffer = useCallback(() => {
     getActiveTerminal()?.clearBuffer();
@@ -451,7 +601,7 @@ export function TerminalPage() {
     if (!terminal) return;
     const selection = terminal.getSelection();
     if (selection) {
-      copyText(selection).catch((e) => notify(localizeBackendError(e)));
+      copyText(selection).catch((e) => notify(localizeBackendError(e), 'error'));
     }
   }, [getActiveTerminal]);
 
@@ -468,12 +618,12 @@ export function TerminalPage() {
           const firstLine = text.split('\n').map((l) => l.trim()).find(Boolean);
           if (firstLine) {
             getTerminalCwd(activeTab.id).then((cwd) => {
-              parseCommand(firstLine, activeTab.id, cwd ?? undefined).catch((e) => notify(localizeBackendError(e)));
-            }).catch((e) => notify(localizeBackendError(e)));
+              parseCommand(firstLine, activeTab.id, cwd ?? undefined).catch((e) => { console.error('TerminalPage: parseCommand history (paste)', e); });
+            }).catch((e) => { console.error('TerminalPage: getTerminalCwd (paste)', e); });
           }
         }
       }
-    }).catch((e) => notify(localizeBackendError(e)));
+    }).catch((e) => notify(localizeBackendError(e), 'error'));
   }, [getActiveTerminal]);
 
   const handleFind = useCallback(() => {
@@ -495,6 +645,14 @@ export function TerminalPage() {
   const handleSelectAll = useCallback(() => {
     getActiveTerminal()?.selectAll();
   }, [getActiveTerminal]);
+
+  const handleRevealCwd = useCallback(() => {
+    if (!activeCwd) {
+      notify(t('no_cwd') || '当前工作目录未知', 'warning');
+      return;
+    }
+    revealItemInDir(activeCwd).catch((e) => notify(localizeBackendError(e), 'error'));
+  }, [activeCwd, notify, t]);
 
   const handleScrollToBottom = useCallback(() => {
     getActiveTerminal()?.scrollToBottom();
@@ -581,15 +739,15 @@ export function TerminalPage() {
         const lines = command.split('\n').filter((l: string) => l.trim());
         for (const line of lines) {
           const bytes = new TextEncoder().encode(line + '\n');
-          writeToTerminal(activeTab.id, Array.from(bytes)).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+          writeToTerminal(activeTab.id, Array.from(bytes)).catch((e) => { console.error(e); notify(localizeBackendError(e), 'error'); });
           getTerminalCwd(activeTab.id).then((cwd) => {
-            parseCommand(line, activeTab.id, cwd ?? undefined).catch((e) => notify(localizeBackendError(e)));
-          }).catch((e) => notify(localizeBackendError(e)));
+            parseCommand(line, activeTab.id, cwd ?? undefined).catch((e) => { console.error('TerminalPage: parseCommand history (execute-command)', e); });
+          }).catch((e) => { console.error('TerminalPage: getTerminalCwd (execute-command)', e); });
         }
       }
     }).then((fn) => {
       unlisten = fn;
-    }).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+    }).catch((e) => { console.error(e); });
 
     return () => {
       if (unlisten) unlisten();
@@ -776,6 +934,10 @@ export function TerminalPage() {
         onCopy={handleCopy}
         onPaste={handlePaste}
         onFind={handleFind}
+        onSelectAll={handleSelectAll}
+        cwd={activeCwd ?? undefined}
+        onRevealCwd={handleRevealCwd}
+        onUploadToCwd={handleUploadToCwd}
         findOpen={findOpen}
         isSshSession={!!activeTab?.ssh}
         onOpenConnections={() => navigate('/connections')}
@@ -811,8 +973,32 @@ export function TerminalPage() {
               onFindResultsChange={handleFindResultsChange}
               visible={tab.isActive}
               profileId={tab.profileId}
+              connectionType={tab.connectionType}
+              onRemotePathActivate={handleRemotePathActivate}
             />
-            {tab.disconnected && (
+            {tab.isActive && tab.conn.status === 'connecting' && (
+              <Box
+                sx={{
+                  position: 'absolute',
+                  inset: 0,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  bgcolor: isDark ? 'rgba(13,17,23,0.6)' : 'rgba(255,255,255,0.6)',
+                  zIndex: 8,
+                  gap: 2,
+                }}
+              >
+                <CircularProgress size={28} />
+                <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                  {tab.connectionType === 'ssh' && tab.ssh
+                    ? t('connecting_to', { host: `${tab.ssh.username}@${tab.ssh.host}` })
+                    : t('status_connecting')}
+                </Typography>
+              </Box>
+            )}
+            {tab.conn.status === 'disconnected' && (
               <Box
                 sx={{
                   position: 'absolute',
@@ -827,7 +1013,7 @@ export function TerminalPage() {
                 }}
               >
                 <Typography variant="body1" sx={{ color: 'text.secondary' }}>
-                  {t('disconnected')}
+                  {tab.conn.error ?? t('disconnected')}
                 </Typography>
                 <Button
                   variant="contained"
@@ -843,7 +1029,7 @@ export function TerminalPage() {
       </Box>
       <TerminalStatusBar
         sessionName={activeTab?.title}
-        connected={!!activeTab && !activeTab.disconnected}
+        connStatus={activeTab?.conn.status ?? 'disconnected'}
         cwd={activeCwd ?? undefined}
       />
       <TerminalContextMenu

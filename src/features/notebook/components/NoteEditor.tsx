@@ -142,6 +142,10 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
   const [category, setCategory] = useState('');
   const [tags, setTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState('');
+  // Inline errors for the category/tag inputs — shown under the field itself
+  // instead of a detached toast (L0 feedback: error sits next to its cause).
+  const [categoryError, setCategoryError] = useState<string | null>(null);
+  const [tagError, setTagError] = useState<string | null>(null);
   const [isNew, setIsNew] = useState(false);
   // 新建笔记首次保存后持有新 id，避免 note prop 未更新时后续保存静默丢失（P0-1）
   const [createdId, setCreatedId] = useState<string | null>(null);
@@ -207,7 +211,6 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
       }
       const bytes = new TextEncoder().encode(command + '\n');
       writeToTerminal(activeSessionId, Array.from(bytes))
-        .then(() => notify(t('ref.sent'), 'success'))
         .catch((e) => notify(localizeBackendError(e), 'error'));
     },
     [activeSessionId, notify, t],
@@ -219,7 +222,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
     async (linkId: string) => {
       try {
         await unlinkCommandNote(linkId);
-        notify(t('notebook.linked_command_unlinked'), 'success');
+        // Silent success: the link row disappears from the refreshed list.
       } catch (e) {
         notify(localizeBackendError(e), 'error');
       }
@@ -687,21 +690,22 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
     if (!name || !groupId) return;
     // 客户端去重：避免对后端幂等语义产生依赖（后端会复用既有行），用户也能立刻知道为什么没新增
     if (categories.some((c) => c.name.toLowerCase() === name.toLowerCase())) {
-      notify(t('category.duplicate') || `该分组下已存在同名分类「${name}」`, 'warning');
+      setCategoryError(t('category.duplicate') || `该分组下已存在同名分类「${name}」`);
       return;
     }
     const result = await createCategory({ name, groupId, sortOrder: categories.length });
     if (result) {
+      setCategoryError(null);
       setCategory(result.name);
       setNewCategoryName('');
       setShowNewCategoryInput(false);
       // 新建分类并选中的改动需落盘：否则只活在本地 state，外部 notes-changed 重载会静默回退（同 Fix 1）。
       scheduleMetaSave();
-      notify(t('category.create_success') || '分类已创建', 'success');
+      // 成功静默：新分类即刻出现在下拉与列表中，UI 变化即反馈。
     } else {
-      // R23 镜像：创建失败时读取 store.error 并 toast，便于用户定位问题（之前是 silent fail）
+      // R23 镜像：创建失败时读取 store.error 并内联在输入框下，用户无需寻找 toast
       const err = useNotebookStore.getState().error;
-      notify(err || t('category.create_failed') || '分类创建失败', 'error');
+      setCategoryError(err || t('category.create_failed') || '分类创建失败');
     }
   };
 
@@ -726,16 +730,14 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
       cancelCreateTag();
       return;
     }
-    // 客户端去重 + 反馈：之前是 silent 清空，用户感受不到「我刚按了键」。
-    // B：复盘——既然 store.createTag 走后端幂等（即同名同组不报错），用户更容易在 UI 层就被告知
-    // "已存在"，而不是输入后无反应。
+    // 客户端去重 + 内联反馈：输入框保持打开，错误显示在框下（比关框+toast 更就近）。
     if (tags.includes(name)) {
-      notify(t('editor.tag_duplicate', { name }) || `标签「${name}」已存在`, 'warning');
-      cancelCreateTag();
+      setTagError(t('editor.tag_duplicate', { name }) || `标签「${name}」已存在`);
       return;
     }
     setTags([...tags, name]);
     setTagInput('');
+    setTagError(null);
     setShowTagInput(false);
     scheduleMetaSave();
     // 注册到标签库（仅当在分组内且该标签尚不存在），让其他笔记可复用、且出现在分组管理/筛选中
@@ -746,10 +748,10 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
       if (!exists) {
         try {
           await createTag({ name, groupId, sortOrder: (storeTags || []).length });
-          notify(t('editor.tag_create_success', { name }) || `标签「${name}」已创建`, 'success');
+          // 成功静默：标签 chip 已出现在上方列表。
         } catch (e) {
-          // B：后端失败 → notify，用户不感知是"标签加上了但没注册到库"还是"全部失败"
-          // （store.addTag 已经在 setTags 时加到本地，所以正文/筛选仍可用，但库内没这条 → 下次新建时不会出现在 tagLibrary 提示里）。
+          // B：后端失败 → toast（此时输入框已关闭，无内联位置；本地标签仍在，
+          // 但库内缺条 → 下次新建不会出现在 tagLibrary 提示里，必须告知）。
           notify(
             (useNotebookStore.getState().error || localizeBackendError(e) || t('editor.tag_create_failed') || '标签注册失败'),
             'error',
@@ -921,8 +923,8 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
     // 否则 AI 改写的正文只依靠卸载/关窗 flush 落盘——若应用被切到后台而非关闭、
     // 或编辑器未卸载，脏内容不会自动持久化，崩溃即丢失。
     scheduleMetaSave();
-    notify(t('editor.ai_optimize_done'), 'success');
-  }, [editor, aiResultJson, notify, t, scheduleMetaSave]);
+    // 成功静默：AI 改写的正文已呈现在编辑器中。
+  }, [editor, aiResultJson, scheduleMetaSave]);
 
   const handleAiUndo = useCallback(() => {
     if (!editor || aiUndoRef.current == null) return;
@@ -939,8 +941,8 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
     setTags((prev) => (prev.includes(clean) ? prev : [...prev, clean]));
     // AI 建议标签加入后必须落盘：否则仅活在本地 state，关窗 flush 因 dirtyRef=false 跳过而静默丢失（R17 修复）。
     scheduleMetaSave();
-    notify(t('editor.ai_tag_added'), 'success');
-  }, [notify, t, scheduleMetaSave]);
+    // 成功静默：标签 chip 已加入列表。
+  }, [scheduleMetaSave]);
 
   const handleAddAllTags = useCallback(() => {
     setTags((prev) => {
@@ -950,8 +952,8 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
     });
     // AI 建议标签批量加入后必须落盘（同 handleAddTagFromAi，R17 修复）。
     scheduleMetaSave();
-    notify(t('editor.ai_tag_added'), 'success');
-  }, [aiSuggestedTags, notify, t, scheduleMetaSave]);
+    // 成功静默：标签 chip 已批量加入列表。
+  }, [aiSuggestedTags, scheduleMetaSave]);
 
   const handleAiCancel = useCallback(async () => {
     if (aiConvIdRef.current) {
@@ -1456,8 +1458,10 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
               size="small"
               placeholder={t('category.new_name') || ''}
               value={newCategoryName}
-              onChange={(e) => setNewCategoryName(e.target.value)}
+              onChange={(e) => { setNewCategoryName(e.target.value); setCategoryError(null); }}
               onKeyDown={handleNewCategoryKeyDown}
+              error={!!categoryError}
+              helperText={categoryError}
               autoFocus
               sx={{ flex: 1, '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
             />
@@ -1479,7 +1483,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
           <Button
             size="small"
             startIcon={<PlusIcon size={14} />}
-            onClick={() => { setShowNewCategoryInput(true); setNewCategoryName(''); }}
+            onClick={() => { setShowNewCategoryInput(true); setNewCategoryName(''); setCategoryError(null); }}
             sx={{
               flexShrink: 0,
               fontSize: 12,
@@ -1569,8 +1573,10 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
                 size="small"
                 placeholder={t('editor.add_tag_hint') || ''}
                 value={tagInput}
-                onChange={(e) => setTagInput(e.target.value)}
+                onChange={(e) => { setTagInput(e.target.value); setTagError(null); }}
                 onKeyDown={handleTagKeyDown}
+                error={!!tagError}
+                helperText={tagError}
                 autoFocus
                 sx={{ width: 120, '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
               />
@@ -1587,7 +1593,7 @@ export function NoteEditor({ note, onClose, onSaved, defaultGroupId, defaultCate
           <Button
             size="small"
             startIcon={<PlusIcon size={12} />}
-            onClick={() => setShowTagInput(true)}
+            onClick={() => { setShowTagInput(true); setTagError(null); }}
             sx={{
               fontSize: 11,
               textTransform: 'none',

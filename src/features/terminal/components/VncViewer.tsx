@@ -125,8 +125,12 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
             return;
           }
           setConnectionState(prev => {
-            // Keep needs_password state so user can still enter password on retry
-            if (prev === 'needs_password') return 'error';
+            // Keep needs_password state so user can still enter password on retry:
+            // a clean drop while the password overlay is up leaves the overlay in
+            // place — submitting the password reconnects with it (see
+            // submitPendingPassword's reconnect path). Only a dirty drop (dead
+            // tunnel / server refusal) escalates to the error state.
+            if (prev === 'needs_password') return clean ? 'needs_password' : 'error';
             return clean ? 'disconnected' : 'error';
           });
           if (!clean) {
@@ -134,9 +138,7 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
             if (reason) {
               setErrorMessage(`${t('connection_lost')}: ${reason}`);
             } else {
-              setErrorMessage(t('connection_lost_detailed', {
-                defaultValue: 'Connection lost. Possible causes:\n• VNC server not running\n• SSH tunnel disconnected\n• Network issue'
-              }));
+              setErrorMessage(t('connection_lost_detailed'));
             }
           }
           rfbRef.current = null;
@@ -286,7 +288,7 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
           {desktopName || t('remote_desktop')}
           {connectionState === 'connecting' && ` — ${t('connecting')}`}
           {connectionState === 'error' && ` — ${t('error')}`}
-          {connectionState === 'needs_password' && ' — Password Required'}
+          {connectionState === 'needs_password' && ` — ${t('credentials_required')}`}
         </Typography>
 
         {connectionState === 'connected' && (
@@ -379,7 +381,7 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
               }}
               sx={{ mt: 1, textTransform: 'none', borderColor: isDark ? '#30363d' : '#d0d7de', color: textColor }}
             >
-              Retry
+              {t('retry')}
             </Button>
           </Box>
         )}
@@ -420,11 +422,11 @@ export function VncViewer({ wsUrl, vncPassword, onClose }: VncViewerProps) {
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
               <WarningIcon size={24} weight="fill" color="#FFB74D" />
               <Typography variant="body2" sx={{ color: textColor, fontWeight: 600 }}>
-                VNC Password Required
+                {t('credentials_required')}
               </Typography>
             </Box>
             <Typography variant="caption" sx={{ color: 'text.secondary', maxWidth: 360, textAlign: 'center' }}>
-              Enter the VNC password you set via vncpasswd on the remote server.
+              {t('password_required_desc')}
             </Typography>
             <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
               <TextField

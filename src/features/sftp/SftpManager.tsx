@@ -91,9 +91,11 @@ interface DropTarget {
 
 interface SftpManagerProps {
   ssh: SshConnectionInfo;
+  /** 打开后直接定位到的远程目录（终端路径点击跳转）；缺省从远端 home 开始。 */
+  initialPath?: string;
 }
 
-export function SftpManager({ ssh }: SftpManagerProps) {
+export function SftpManager({ ssh, initialPath }: SftpManagerProps) {
   const { t } = useTranslation('fileTransfer');
   const theme = useTheme();
   const isDark = theme.palette.mode === 'dark';
@@ -101,7 +103,7 @@ export function SftpManager({ ssh }: SftpManagerProps) {
   const compact = useMediaQuery('(max-width:720px)');
   const wide = useMediaQuery('(min-width:940px)');
 
-  const s = useSftpBrowser(ssh);
+  const s = useSftpBrowser(ssh, initialPath);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -455,7 +457,7 @@ export function SftpManager({ ssh }: SftpManagerProps) {
         onRefresh={s.refresh}
         onUpload={(mode) => void s.pickAndUpload(mode)}
         onDownload={(ask) => void s.downloadEntries(s.selectedEntries, ask)}
-        onNewFolder={() => s.setNewFolderOpen(true)}
+        onNewFolder={() => s.openNewFolder()}
         onRename={() => {
           const f = s.entries.find((x) => s.selected.has(x.name));
           if (f) s.startRename(f);
@@ -1015,7 +1017,7 @@ export function SftpManager({ ssh }: SftpManagerProps) {
           dense
           onClick={() => {
             setBgMenu(null);
-            s.setNewFolderOpen(true);
+            s.openNewFolder();
           }}
         >
           <ListItemIcon sx={{ minWidth: 26 }}>
@@ -1030,7 +1032,7 @@ export function SftpManager({ ssh }: SftpManagerProps) {
           onClick={() => {
             setBgMenu(null);
             s.setNewFileName('');
-            s.setNewFileOpen(true);
+            s.openNewFile();
           }}
         >
           <ListItemIcon sx={{ minWidth: 26 }}>
@@ -1115,7 +1117,9 @@ export function SftpManager({ ssh }: SftpManagerProps) {
             margin="dense"
             label={t('file_name')}
             value={s.newFileName}
-            onChange={(e) => s.setNewFileName(e.target.value)}
+            onChange={(e) => s.handleNewFileNameChange(e.target.value)}
+            error={!!s.dialogError}
+            helperText={s.dialogError}
             onKeyDown={(e) => {
               e.stopPropagation();
               if (e.key === 'Enter') {
@@ -1153,6 +1157,7 @@ export function SftpManager({ ssh }: SftpManagerProps) {
         chmodValue={s.chmodValue}
         batchRename={s.batchRename}
         existingNames={s.entries.map((e) => e.name)}
+        dialogError={s.dialogError}
         labels={{
           cancel: t('cancel'),
           ok: t('ok'),
@@ -1198,10 +1203,10 @@ export function SftpManager({ ssh }: SftpManagerProps) {
                 : t('delete_count_confirm', { count: s.confirm.names.length })
               : '',
         }}
-        onRenameChange={s.setRenameValue}
+        onRenameChange={s.handleRenameChange}
         onRenameCancel={() => s.setRenaming(null)}
         onRenameSubmit={() => void s.submitRename()}
-        onFolderChange={s.setNewFolderName}
+        onFolderChange={s.handleNewFolderChange}
         onFolderCancel={() => s.setNewFolderOpen(false)}
         onFolderSubmit={() => void s.submitNewFolder()}
         onConfirmCancel={() => s.setConfirm(null)}

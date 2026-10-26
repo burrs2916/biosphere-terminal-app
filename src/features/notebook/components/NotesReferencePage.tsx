@@ -224,8 +224,8 @@ export function NotesReferencePage() {
   const [loadingContent, setLoadingContent] = useState(false);
 
   useEffect(() => {
-    listNoteGroups().then(setGroups).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
-    listNotes().then(setNotes).catch((e) => { console.error(e); notify(localizeBackendError(e)); });
+    listNoteGroups().then(setGroups).catch((e) => { console.error(e); notify(localizeBackendError(e), 'error'); });
+    listNotes().then(setNotes).catch((e) => { console.error(e); notify(localizeBackendError(e), 'error'); });
   }, []);
 
   // 订阅后端写操作后广播的 notes-changed：AI 在进程内直接增删改/重归类笔记后，

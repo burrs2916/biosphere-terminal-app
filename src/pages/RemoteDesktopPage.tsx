@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import TextField from '@mui/material/TextField';
@@ -16,7 +15,6 @@ import {
   LightningIcon,
   InfoIcon,
   TerminalIcon,
-  DesktopIcon,
   CheckCircleIcon,
   XCircleIcon,
   WarningIcon,
@@ -40,11 +38,10 @@ import { TerminalEmulator } from '../features/terminal';
 import type { TerminalEmulatorHandle } from '../features/terminal';
 import type { PtyConfig } from '../proto';
 import { useFeatureGate, LockedScreen } from '../features/licensing';
-import { openAiCopilotWindow } from '../core/services/window.service';
+import { openAiCopilotWindow, takeCredentialsOnce } from '../core/services/window.service';
 import { ensureRemoteDesktopSetupAgent } from '../core/services/agent.service';
 
 type Step = 'config' | 'connecting' | 'setup' | 'viewer';
-type Mode = 'x11' | 'vnc';
 type VncStatus = 'checking' | 'installed' | 'not_installed' | 'error';
 
 export function RemoteDesktopPage() {
@@ -54,27 +51,16 @@ export function RemoteDesktopPage() {
   const [searchParams] = useSearchParams();
   const notify = useNotify().notify;
 
-  // X11 转发仅 macOS 可用（需 XQuartz）；Windows 无系统 X Server，禁用该模式。
-  const isWindows = typeof navigator !== 'undefined'
-    && /Windows|Win32|Win64/i.test(`${navigator.userAgent} ${navigator.platform || ''}`);
-
   const hostParam = searchParams.get('host') || '';
   const portParam = searchParams.get('port') || '22';
   const usernameParam = searchParams.get('username') || '';
   const authMethodParam = searchParams.get('authMethod') || 'none';
   const keyPathParam = searchParams.get('privateKeyPath') || '';
   const passwordParam = searchParams.get('password') || '';
-  const modeParam = searchParams.get('mode') || '';
   // 安全铁律：密码/密钥不进 URL，URL 只带一次性 token，凭据从 Rust 侧 CredentialStash 取回。
   const token = searchParams.get('token') || '';
 
   const [step, setStep] = useState<Step>('config');
-  const [mode, setMode] = useState<Mode>((modeParam || 'vnc') as Mode);
-
-  // Windows 无 X Server：强制回退 VNC 模式，避免用户选 X11 后连接失败。
-  useEffect(() => {
-    if (isWindows && mode === 'x11') setMode('vnc');
-  }, [isWindows, mode]);
   const [host, setHost] = useState(hostParam);
   const [port, setPort] = useState(portParam);
   const [username, setUsername] = useState(usernameParam);
@@ -92,13 +78,20 @@ export function RemoteDesktopPage() {
   // VNC 状态检测
   const [vncStatus, setVncStatus] = useState<VncStatus>('checking');
   const [vncStatusMessage, setVncStatusMessage] = useState('');
+  // Inline failure shown under the connect button (connect/spawn/createRemoteDesktop
+  // failures) — the page already owns this area, so no detached toast is needed.
+  const [connectError, setConnectError] = useState<string | null>(null);
   const [vncDetectedPort, setVncDetectedPort] = useState<number | null>(null);
+  // 探测结论：服务器是否要求 VNC 密码。false（如未设 passwd 的 TigerVNC /
+  // 其他服务端）时连接按钮不强制输入密码，避免无密码服务器被强迫填一项。
+  const [vncNeedsPassword, setVncNeedsPassword] = useState(true);
+  // 远端操作系统家族（检测端 setup_vnc 的 uname 分流结果）。
+  const [remoteOs, setRemoteOs] = useState<string>('unknown');
 
   const terminalRef = useRef<TerminalEmulatorHandle | null>(null);
   const setupTerminalIdRef = useRef<string | null>(null);
   const sessionRef = useRef<RemoteDesktopSession | null>(null);
   const sshRef = useRef<SshConnectionInfo | null>(null);
-  const x11TerminalIdRef = useRef<string | null>(null);
   // 暂存待 spawn 的终端配置：spawnTerminal 延迟到 TerminalEmulator 的 onReady
   // 之后执行，确保监听器先注册，避免首屏输出竞态丢失（与 TerminalPage 同一修复）。
   const pendingSpawnRef = useRef<Record<string, PtyConfig>>({});
@@ -113,7 +106,7 @@ export function RemoteDesktopPage() {
       return;
     }
     let cancelled = false;
-    invoke<SshConnectionInfo>('take_stashed_credentials', { token })
+    takeCredentialsOnce(token)
       .then((s) => {
         if (cancelled) return;
         setHost(s.host);
@@ -152,93 +145,75 @@ export function RemoteDesktopPage() {
   // and defeat the `React.memo` on TerminalEmulator.
   const ignoreTitleChange = useCallback(() => {}, []);
 
-  // 检测 VNC 状态
+  // VNC 状态检测
   const checkVncStatus = useCallback(async () => {
     if (!sshRef.current) return null;
     setVncStatus('checking');
-    setVncStatusMessage(t('checking_vnc_status', { defaultValue: 'Verifying VNC server status on remote host...' }));
+    setVncStatusMessage(t('checking_vnc_status'));
     try {
       const result = await setupRemoteDesktop(sshRef.current, parseInt(vncPort) || 5900);
+      // 远端 OS 家族（检测端 uname 分流）：linux / macos / windows / unknown。
+      // Windows 远端没有 AI 自动安装剧本，UI 分流为手动指引（见下方卡片分支）。
+      setRemoteOs(result.osName || 'unknown');
       if (result.vncInstalled && result.vncRunning) {
         setVncStatus('installed');
         setVncDetectedPort(result.vncPort);
+        setVncNeedsPassword(result.needsPassword);
         setVncStatusMessage(
           result.needsPassword
-            ? t('vnc_running_need_password', { defaultValue: 'VNC server is running on port {port}. Enter the VNC password to connect.' })
-            : t('vnc_running_no_password', { defaultValue: 'VNC server is running on port {port} with no password required.' })
+            ? t('vnc_running_need_password', { port: result.vncPort })
+            : t('vnc_running_no_password', { port: result.vncPort })
         );
       } else if (result.vncInstalled && !result.vncRunning) {
         setVncStatus('not_installed');
-        setVncStatusMessage(t('vnc_installed_not_running', { defaultValue: 'VNC is installed but not running. Start it in the terminal or use the AI Assistant for help.' }));
+        setVncStatusMessage(t('vnc_installed_not_running'));
       } else {
         setVncStatus('not_installed');
-        setVncStatusMessage(t('vnc_not_installed', { defaultValue: 'VNC server is not installed on the remote host. Use the AI Assistant below to install it.' }));
+        setVncStatusMessage(t('vnc_not_installed'));
       }
       return result;
     } catch (err: any) {
       setVncStatus('error');
-      setVncStatusMessage(localizeBackendError(err) || t('vnc_check_failed', { defaultValue: 'Failed to check VNC status.' }));
-      notify(localizeBackendError(err) || t('connection_failed'));
+      setVncStatusMessage(localizeBackendError(err) || t('vnc_check_failed'));
+      // No toast: the status message above already carries the failure inline.
       return null;
     }
-  }, [vncPort, notify, t]);
+  }, [vncPort, t]);
 
   const handleConnect = useCallback(async () => {
+    setConnectError(null);
     if (!host || !username) {
-      notify(t('fill_required_fields'));
+      setConnectError(t('fill_required_fields'));
       return;
     }
 
     const ssh = getSshConfig();
     sshRef.current = ssh;
 
-    if (mode === 'vnc') {
-      setStep('connecting');
+    setStep('connecting');
 
-      try {
-        // 启动终端会话（左侧终端，给用户和 AI 助手用）。
-        // 注意：spawnTerminal 不在此处调用，改为暂存配置，由 TerminalEmulator
-        // 的 onReady 回调（handleSpawnReady）在监听器注册完成后触发，避免首屏
-        // 输出竞态丢失。VNC 状态检测也顺延到 spawn 完成后执行。
-        const setupSessionId = `vnc-setup-${Date.now()}`;
-        setupTerminalIdRef.current = setupSessionId;
+    try {
+      // 启动终端会话（左侧终端，给用户和 AI 助手用）。
+      // 注意：spawnTerminal 不在此处调用，改为暂存配置，由 TerminalEmulator
+      // 的 onReady 回调（handleSpawnReady）在监听器注册完成后触发，避免首屏
+      // 输出竞态丢失。VNC 状态检测也顺延到 spawn 完成后执行。
+      const setupSessionId = `vnc-setup-${Date.now()}`;
+      setupTerminalIdRef.current = setupSessionId;
 
-        const config: PtyConfig = {
-          rows: 24,
-          cols: 80,
-          connection_type: 'ssh',
-          ssh,
-        };
+      const config: PtyConfig = {
+        rows: 24,
+        cols: 80,
+        connection_type: 'ssh',
+        ssh,
+      };
 
-        pendingSpawnRef.current[setupSessionId] = config;
-        setStep('setup');
-      } catch (err: any) {
-        notify(localizeBackendError(err) || t('connection_failed'));
-        setStep('config');
-      }
-    } else {
-      // X11 模式
-      setStep('connecting');
-      try {
-        const sessionId = `x11-${Date.now()}`;
-        x11TerminalIdRef.current = sessionId;
-
-        const config: PtyConfig = {
-          rows: 24,
-          cols: 80,
-          connection_type: 'ssh',
-          ssh,
-          x11_forwarding: true,
-        };
-
-        pendingSpawnRef.current[sessionId] = config;
-        setStep('viewer');
-      } catch (err: any) {
-        notify(localizeBackendError(err) || t('connection_failed'));
-        setStep('config');
-      }
+      pendingSpawnRef.current[setupSessionId] = config;
+      setStep('setup');
+    } catch (err: any) {
+      setConnectError(localizeBackendError(err) || t('connection_failed'));
+      setStep('config');
     }
-  }, [host, port, username, authMethod, privateKeyPath, password, vncPort, mode, notify, t, getSshConfig]);
+  }, [host, port, username, authMethod, privateKeyPath, password, vncPort, t, getSshConfig]);
 
   // 由 TerminalEmulator 的 onReady 触发：此时监听器已注册，再 spawn 可保证首屏
   // 输出不丢失。VNC 安装终端 spawn 完成后继续等待 SSH banner 并检测 VNC 状态。
@@ -254,7 +229,7 @@ export function RemoteDesktopPage() {
         { sessionId, connType: config.connection_type ?? 'local', page: 'remote-desktop' },
       );
     } catch (err: any) {
-      notify(localizeBackendError(err) || t('connection_failed'));
+      setConnectError(localizeBackendError(err) || t('connection_failed'));
       setStep('config');
       return;
     }
@@ -262,15 +237,15 @@ export function RemoteDesktopPage() {
     // （在此之前 resizeTerminal 会返回 "session not found" 弹框）。
     terminalRef.current?.syncBackendSize();
     if (sessionId === setupTerminalIdRef.current) {
-      // 等 SSH banner 结束后再检测 VNC 状态（保持原逻辑时序）
-      await new Promise(r => setTimeout(r, 1500));
+      // VNC 状态探测是独立的 SSH exec 连接（ssh_common::establish 每次新建
+      // Handle，与左侧终端的 banner / 就绪状态无关），无需固定等待即可开始。
       try {
         await checkVncStatus();
       } catch (err: any) {
-        notify(localizeBackendError(err) || t('connection_failed'));
+        setConnectError(localizeBackendError(err) || t('connection_failed'));
       }
     }
-  }, [notify, t, checkVncStatus]);
+  }, [t, checkVncStatus]);
 
   const handleConnectVnc = useCallback(async () => {
     if (!sshRef.current) return;
@@ -292,9 +267,9 @@ export function RemoteDesktopPage() {
 
       setStep('viewer');
     } catch (err: any) {
-      notify(localizeBackendError(err) || t('connection_failed'));
+      setConnectError(localizeBackendError(err) || t('connection_failed'));
     }
-  }, [vncDetectedPort, vncPort, notify, t]);
+  }, [vncDetectedPort, vncPort, t]);
 
   const handleClose = useCallback(async () => {
     if (session) {
@@ -310,17 +285,13 @@ export function RemoteDesktopPage() {
       }
       setupTerminalIdRef.current = null;
     }
-    if (x11TerminalIdRef.current) {
-      try { await killTerminal(x11TerminalIdRef.current); } catch (e) {
-        console.error('[remote-desktop] x11 terminal close failed:', e);
-      }
-      x11TerminalIdRef.current = null;
-    }
     setSession(null);
     sessionRef.current = null;
     setVncStatus('checking');
     setVncStatusMessage('');
     setVncDetectedPort(null);
+    setVncNeedsPassword(true);
+    setRemoteOs('unknown');
     setStep('config');
   }, [session]);
 
@@ -335,12 +306,13 @@ export function RemoteDesktopPage() {
         host: ssh?.host,
         username: ssh?.username,
         installMode,
+        osName: remoteOs,
       });
     } catch (e) {
       console.error('[remote-desktop] open AI assistant failed:', e);
-      notify(localizeBackendError(e) || t('open_ai_assistant_failed', { defaultValue: '无法打开 AI 助手，请检查是否已配置 AI 模型' }));
+      notify(localizeBackendError(e) || t('open_ai_assistant_failed'), 'error');
     }
-  }, [notify, installMode, i18n.language, t]);
+  }, [notify, installMode, remoteOs, i18n.language, t]);
 
   const handleRecheck = useCallback(async () => {
     await checkVncStatus();
@@ -372,9 +344,6 @@ export function RemoteDesktopPage() {
       if (setupTerminalIdRef.current) {
         killTerminal(setupTerminalIdRef.current).catch(() => {});
       }
-      if (x11TerminalIdRef.current) {
-        killTerminal(x11TerminalIdRef.current).catch(() => {});
-      }
     };
   }, []);
 
@@ -402,7 +371,7 @@ export function RemoteDesktopPage() {
   }
 
   if (step === 'viewer') {
-    if (mode === 'vnc' && session) {
+    if (session) {
       return (
         <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', bgcolor: bgColor }}>
           <VncViewer key={session.id} wsUrl={session.wsUrl} vncPassword={vncPassword || undefined} onClose={handleClose} />
@@ -410,34 +379,11 @@ export function RemoteDesktopPage() {
       );
     }
 
+    // session 尚未就绪（createRemoteDesktop 进行中）：停留在连接中占位，
+    // handleConnectVnc 完成后 session 落值即切入 viewer。
     return (
-      <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', bgcolor: bgColor }}>
-        <Box sx={{ px: 2, py: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid', borderColor: 'divider', bgcolor: cardBg }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <TerminalIcon size={18} weight="duotone" color={accentColor} />
-            <Typography variant="subtitle2" sx={{ fontWeight: 600, color: textColor }}>
-              {t('x11_session')} - {username}@{host}
-            </Typography>
-          </Box>
-          <Button size="small" variant="outlined" onClick={handleClose} sx={{ textTransform: 'none' }}>
-            {t('disconnect')}
-          </Button>
-        </Box>
-        <Box sx={{ flex: 1, position: 'relative' }}>
-          {x11TerminalIdRef.current && (
-            <TerminalEmulator
-              ref={terminalRef}
-              sessionId={x11TerminalIdRef.current}
-              onTitleChange={ignoreTitleChange}
-              onReady={handleSpawnReady}
-            />
-          )}
-        </Box>
-        <Box sx={{ px: 2, py: 1, borderTop: '1px solid', borderColor: 'divider', bgcolor: cardBg }}>
-          <Typography variant="caption" color="text.secondary">
-            {t('x11_hint')}
-          </Typography>
-        </Box>
+      <Box sx={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: bgColor }}>
+        <CircularProgress />
       </Box>
     );
   }
@@ -507,7 +453,7 @@ export function RemoteDesktopPage() {
                     <WarningIcon size={18} weight="fill" color="#ff9800" />
                   )}
                   <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
-                    {t('check_vnc_status', { defaultValue: 'Check VNC Status' })}
+                    {t('check_vnc_status')}
                   </Typography>
                 </Box>
                 <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.4, display: 'block', ml: 3.2 }}>
@@ -530,7 +476,7 @@ export function RemoteDesktopPage() {
                         py: 0.2,
                       }}
                     >
-                      {t('recheck', { defaultValue: 'Re-check' })}
+                      {t('recheck')}
                     </Button>
                   </Box>
                 )}
@@ -549,18 +495,18 @@ export function RemoteDesktopPage() {
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
                     <CheckCircleIcon size={18} weight="fill" color="#4caf50" />
                     <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
-                      {t('connect_to_vnc', { defaultValue: 'Connect to VNC' })}
+                      {t('connect_to_vnc')}
                     </Typography>
                   </Box>
                   <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, mb: 1 }}>
-                    {t('enter_vnc_password_to_connect', { defaultValue: 'Enter the VNC password and click Connect.' })}
+                    {vncNeedsPassword ? t('enter_vnc_password_to_connect') : t('connect_without_password')}
                   </Typography>
                   <Box sx={{ ml: 3.2, display: 'flex', flexDirection: 'column', gap: 1 }}>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                       <TextField
                         size="small"
                         type={showVncPassword ? 'text' : 'password'}
-                        placeholder={t('password_placeholder_connect', { defaultValue: 'Enter VNC password' })}
+                        placeholder={t('password_placeholder_connect')}
                         value={vncPassword}
                         onChange={(e) => setVncPassword(e.target.value)}
                         onKeyDown={(e) => {
@@ -591,7 +537,7 @@ export function RemoteDesktopPage() {
                       <Button
                         size="small"
                         variant="contained"
-                        disabled={!vncPassword}
+                        disabled={vncNeedsPassword && !vncPassword}
                         startIcon={<ArrowRight size={14} weight="bold" />}
                         onClick={handleConnectVnc}
                         sx={{
@@ -605,15 +551,16 @@ export function RemoteDesktopPage() {
                           whiteSpace: 'nowrap',
                         }}
                       >
-                        Connect Now
+                        {t('connect_now')}
                       </Button>
                     </Box>
                   </Box>
                 </Paper>
               )}
 
-              {/* VNC 未安装或未运行 → AI 助手按钮 */}
-              {vncStatus === 'not_installed' && (
+              {/* Windows 远端：无 AI 自动安装剧本（无 sudo/apt/vncserver，cmd 下 `;` 链失效），
+                  给手动安装指引，不展示 AI 按钮——避免虚假承诺。安装模式选择也只对 Linux/macOS 有意义。 */}
+              {vncStatus === 'not_installed' && remoteOs === 'windows' && (
                 <Paper
                   variant="outlined"
                   sx={{
@@ -625,12 +572,76 @@ export function RemoteDesktopPage() {
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
                     <WarningIcon size={18} weight="fill" color="#ff9800" />
                     <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
-                      {t('vnc_setup_required', { defaultValue: 'VNC Setup Required' })}
+                      {t('windows_setup_title')}
                     </Typography>
                   </Box>
-                  <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, mb: 0.5, lineHeight: 1.4 }}>
-                    {t('vnc_setup_ai_hint', { defaultValue: 'VNC is not installed or not running. Use the AI Assistant below to install and configure it on the remote server.' })}
+                  <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, lineHeight: 1.7 }}>
+                    {t('windows_setup_steps')}
                   </Typography>
+                </Paper>
+              )}
+
+              {/* 未安装 / 未运行（Linux / macOS / 未知远端）：安装模式选择 + AI 安装主入口（模式只在此场景有意义） */}
+              {vncStatus === 'not_installed' && remoteOs !== 'windows' && (
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 1.5,
+                    borderColor: '#ff9800',
+                    bgcolor: isDark ? 'rgba(255,152,0,0.05)' : 'rgba(255,152,0,0.03)',
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                    <WarningIcon size={18} weight="fill" color="#ff9800" />
+                    <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
+                      {t('vnc_setup_required')}
+                    </Typography>
+                  </Box>
+                  <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, mb: 1.2, lineHeight: 1.4 }}>
+                    {t('vnc_setup_ai_hint')}
+                  </Typography>
+                  <Box sx={{ ml: 3.2, mb: 1.2 }}>
+                    <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 0.5 }}>
+                      {t('install_mode')}
+                    </Typography>
+                    <ToggleButtonGroup
+                      exclusive
+                      size="small"
+                      value={installMode}
+                      onChange={(_, v) => { if (v) setInstallMode(v); }}
+                      sx={{
+                        '& .MuiToggleButton-root': { textTransform: 'none', fontSize: 11, px: 1.2, py: 0.3 },
+                      }}
+                    >
+                      <ToggleButton value="headless">
+                        {t('install_mode_headless')}
+                      </ToggleButton>
+                      <ToggleButton value="basic">
+                        {t('install_mode_basic')}
+                      </ToggleButton>
+                      <ToggleButton value="full">
+                        {t('install_mode_full')}
+                      </ToggleButton>
+                    </ToggleButtonGroup>
+                  </Box>
+                  <Box sx={{ ml: 3.2 }}>
+                    <Button
+                      size="small"
+                      variant="contained"
+                      startIcon={<RobotIcon size={14} weight="fill" />}
+                      onClick={handleOpenAiAssistant}
+                      sx={{
+                        bgcolor: accentColor,
+                        '&:hover': { bgcolor: '#5A52E0' },
+                        textTransform: 'none',
+                        fontWeight: 600,
+                        fontSize: 12,
+                        py: 0.3,
+                      }}
+                    >
+                      {t('open_ai_assistant')}
+                    </Button>
+                  </Box>
                 </Paper>
               )}
 
@@ -647,7 +658,7 @@ export function RemoteDesktopPage() {
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
                     <XCircleIcon size={18} weight="fill" color="#f44336" />
                     <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
-                      {t('check_failed', { defaultValue: 'Check Failed' })}
+                      {t('check_failed')}
                     </Typography>
                   </Box>
                   <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, mb: 1.5, lineHeight: 1.4 }}>
@@ -656,67 +667,47 @@ export function RemoteDesktopPage() {
                 </Paper>
               )}
 
-              {/* AI 助手：任何状态都常驻。可安装/配置 VNC，也可做其它远程维护（改密码、查端口、解释命令等）。 */}
-              <Paper
-                variant="outlined"
-                sx={{
-                  p: 1.5,
-                  borderColor: accentColor,
-                  bgcolor: isDark ? 'rgba(108,99,255,0.05)' : 'rgba(108,99,255,0.03)',
-                }}
-              >
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                  <RobotIcon size={18} weight="fill" color={accentColor} />
-                  <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
-                    {t('ai_assistant', { defaultValue: 'AI Assistant' })}
+              {/* AI 助手：其他远程维护入口（改密码、查端口、解释命令等）。
+                  安装主入口已在「未安装」卡片内，此处不重复展示，避免双按钮混淆。 */}
+              {vncStatus !== 'not_installed' && (
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 1.5,
+                    borderColor: accentColor,
+                    bgcolor: isDark ? 'rgba(108,99,255,0.05)' : 'rgba(108,99,255,0.03)',
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+                    <RobotIcon size={18} weight="fill" color={accentColor} />
+                    <Typography variant="body2" sx={{ fontWeight: 600, color: textColor, fontSize: 13 }}>
+                      {t('ai_assistant')}
+                    </Typography>
+                  </Box>
+                  <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, mb: 1.2, lineHeight: 1.4 }}>
+                    {t('ai_maintenance_hint')}
                   </Typography>
-                </Box>
-                <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', ml: 3.2, mb: 1.2, lineHeight: 1.4 }}>
-                  {t('ai_assistant_always_hint', { defaultValue: 'Install/configure VNC, change passwords, check port usage, explain commands, and more — just ask.' })}
-                </Typography>
-                <Box sx={{ ml: 3.2, mb: 1.2 }}>
-                  <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 0.5 }}>
-                    {t('install_mode', { defaultValue: 'Install Mode' })}
-                  </Typography>
-                  <ToggleButtonGroup
-                    exclusive
-                    size="small"
-                    value={installMode}
-                    onChange={(_, v) => { if (v) setInstallMode(v); }}
-                    sx={{
-                      '& .MuiToggleButton-root': { textTransform: 'none', fontSize: 11, px: 1.2, py: 0.3 },
-                    }}
-                  >
-                    <ToggleButton value="headless">
-                      {t('install_mode_headless', { defaultValue: 'Headless' })}
-                    </ToggleButton>
-                    <ToggleButton value="basic">
-                      {t('install_mode_basic', { defaultValue: 'Basic' })}
-                    </ToggleButton>
-                    <ToggleButton value="full">
-                      {t('install_mode_full', { defaultValue: 'Full' })}
-                    </ToggleButton>
-                  </ToggleButtonGroup>
-                </Box>
-                <Box sx={{ ml: 3.2 }}>
-                  <Button
-                    size="small"
-                    variant="contained"
-                    startIcon={<RobotIcon size={14} weight="fill" />}
-                    onClick={handleOpenAiAssistant}
-                    sx={{
-                      bgcolor: accentColor,
-                      '&:hover': { bgcolor: '#5A52E0' },
-                      textTransform: 'none',
-                      fontWeight: 600,
-                      fontSize: 12,
-                      py: 0.3,
-                    }}
-                  >
-                    {t('open_ai_assistant', { defaultValue: 'Open AI Assistant' })}
-                  </Button>
-                </Box>
-              </Paper>
+                  <Box sx={{ ml: 3.2 }}>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<RobotIcon size={14} weight="fill" />}
+                      onClick={handleOpenAiAssistant}
+                      sx={{
+                        color: accentColor,
+                        borderColor: accentColor,
+                        '&:hover': { borderColor: '#5A52E0', bgcolor: 'rgba(108,99,255,0.08)' },
+                        textTransform: 'none',
+                        fontWeight: 600,
+                        fontSize: 12,
+                        py: 0.3,
+                      }}
+                    >
+                      {t('ask_ai_assistant')}
+                    </Button>
+                  </Box>
+                </Paper>
+              )}
             </Box>
 
             <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider' }}>
@@ -727,7 +718,7 @@ export function RemoteDesktopPage() {
                 onClick={handleClose}
                 sx={{ textTransform: 'none' }}
               >
-                {t('cancel', { defaultValue: 'Cancel' })}
+                {t('cancel')}
               </Button>
             </Box>
           </Box>
@@ -740,7 +731,7 @@ export function RemoteDesktopPage() {
               {t('establishing_tunnel')}
             </Typography>
             <Typography variant="body2" sx={{ mt: 1, color: 'text.secondary' }}>
-              {t('establishing_tunnel_desc', { host, vncPort: mode === 'vnc' ? vncPort : 'N/A' })}
+              {t('establishing_tunnel_desc', { host, vncPort })}
             </Typography>
           </Box>
         </Box>
@@ -756,29 +747,11 @@ export function RemoteDesktopPage() {
             </Box>
 
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <ToggleButtonGroup
-                value={mode}
-                exclusive
-                onChange={(_, newMode) => newMode && setMode(newMode)}
-                size="small"
-                fullWidth
-                sx={{ mb: 1 }}
-              >
-                <ToggleButton value="x11" disabled={isWindows} sx={{ textTransform: 'none', py: 1 }}>
-                  <TerminalIcon size={16} weight="duotone" style={{ marginRight: 6 }} />
-                  {t('mode_x11')}
-                </ToggleButton>
-                <ToggleButton value="vnc" sx={{ textTransform: 'none', py: 1 }}>
-                  <DesktopIcon size={16} weight="duotone" style={{ marginRight: 6 }} />
-                  {t('mode_vnc')}
-                </ToggleButton>
-              </ToggleButtonGroup>
-
               <Paper variant="outlined" sx={{ p: 1.5, bgcolor: isDark ? 'rgba(108,99,255,0.06)' : 'rgba(108,99,255,0.04)', borderColor: `${accentColor}30` }}>
                 <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
                   <InfoIcon size={14} color={accentColor} />
                   <Typography variant="caption" sx={{ color: 'text.secondary', lineHeight: 1.5 }}>
-                    {mode === 'x11' ? t('x11_mode_hint') : t('vnc_mode_hint')}
+                    {t('vnc_mode_hint')}
                   </Typography>
                 </Box>
               </Paper>
@@ -868,27 +841,23 @@ export function RemoteDesktopPage() {
                 />
               )}
 
-              {mode === 'vnc' && (
-                <>
-                  <Box sx={{ mt: 1 }}>
-                    <Typography variant="caption" sx={{ fontWeight: 600, color: 'text.secondary', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                      {t('vnc_config')}
-                    </Typography>
-                  </Box>
+              <Box sx={{ mt: 1 }}>
+                <Typography variant="caption" sx={{ fontWeight: 600, color: 'text.secondary', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  {t('vnc_config')}
+                </Typography>
+              </Box>
 
-                  <Box sx={{ display: 'flex', gap: 1.5 }}>
-                    <TextField
-                      label={t('vnc_port')}
-                      value={vncPort}
-                      onChange={(e) => setVncPort(e.target.value)}
-                      size="small"
-                      sx={{ width: 120 }}
-                      type="number"
-                      helperText="Auto-detected if running"
-                    />
-                  </Box>
-                </>
-              )}
+              <Box sx={{ display: 'flex', gap: 1.5 }}>
+                <TextField
+                  label={t('vnc_port')}
+                  value={vncPort}
+                  onChange={(e) => setVncPort(e.target.value)}
+                  size="small"
+                  sx={{ width: 120 }}
+                  type="number"
+                  helperText={t('vnc_port_autodetect_hint')}
+                />
+              </Box>
 
               <Button
                 variant="contained"
@@ -905,6 +874,11 @@ export function RemoteDesktopPage() {
               >
                 {t('connect')}
               </Button>
+              {connectError && (
+                <Typography variant="caption" sx={{ color: 'error.main', mt: 0.75, lineHeight: 1.4 }}>
+                  {connectError}
+                </Typography>
+              )}
             </Box>
           </Paper>
         </Box>
