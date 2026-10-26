@@ -685,6 +685,13 @@ impl NativeSftp {
             }
 
             // ---- transfer ----
+            // Actual bytes that reached the far side, per file. For files that
+            // keep growing while they upload (e.g. logs this very app is
+            // writing) the wire total legitimately exceeds the plan-time
+            // snapshot — verification must judge the transfer itself, not a
+            // moving target.
+            let mut actuals: std::collections::HashMap<String, u64> =
+                std::collections::HashMap::new();
             let mut chmod_done: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
             for (f, offset) in &work {
@@ -694,7 +701,10 @@ impl NativeSftp {
                     match put_file(&sftp, &f.local, &f.remote, *offset, f.size, ctx.as_ref(), &cancel)
                         .await
                     {
-                        Ok(_) => break,
+                        Ok(actual) => {
+                            actuals.insert(f.remote.clone(), actual);
+                            break;
+                        }
                         Err(OpError::Status {
                             code: StatusCode::PermissionDenied,
                             ..
@@ -721,16 +731,30 @@ impl NativeSftp {
             }
 
             // ---- post-transfer size verification (capped) ----
+            // 判据是写侧自洽：远端大小必须等于 put_file 实际写入的字节数。
+            // 快照大小（计划时刻 stat 的本地值）不构成判据——读到 EOF 时本地
+            // 可能已追加新内容（典型：上传本应用正在写的 debug.log），差值
+            // 是文件自身在变，不是传输错误。
             for (f, _) in work.iter().take(crate::app::sftp_service::UPLOAD_VERIFY_CAP) {
+                let expected = match actuals.get(&f.remote) {
+                    Some(v) => *v,
+                    None => continue,
+                };
                 match sftp.metadata(&f.remote).await {
                     Ok(m) => {
                         let got = m.size.unwrap_or(0);
-                        if got != f.size {
+                        if got != expected {
+                            let hint = if got < expected {
+                                "写入可能被服务端截断，请重试"
+                            } else {
+                                "远端存在并发写入，请确认没有其他进程同时写这个文件"
+                            };
                             return Err(OpError::Other(format!(
-                                "上传后校验失败：{} 本地 {} 字节，远端 {} 字节，传输可能被截断，请重试。",
+                                "上传后校验失败：{} 实际写入 {} 字节，远端现为 {} 字节，{}。",
                                 crate::app::sftp_service::remote_basename(&f.remote),
-                                f.size,
-                                got
+                                expected,
+                                got,
+                                hint
                             )));
                         }
                     }
