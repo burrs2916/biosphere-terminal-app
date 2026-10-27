@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
+import Chip from '@mui/material/Chip';
 import CircularProgress from '@mui/material/CircularProgress';
 import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
@@ -14,12 +15,15 @@ import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import { useTranslation } from 'react-i18next';
-import { ArrowClockwiseIcon } from '@phosphor-icons/react';
+import { ArrowClockwiseIcon, MagnifyingGlassIcon } from '@phosphor-icons/react';
 import CodeMirror from '@uiw/react-codemirror';
+import { createTheme } from '@uiw/codemirror-themes';
+import { tags as highlightTags } from '@lezer/highlight';
 import { EditorState, Prec, type Extension } from '@codemirror/state';
-import { indentUnit, StreamLanguage } from '@codemirror/language';
-import { keymap } from '@codemirror/view';
+import { EditorView, keymap } from '@codemirror/view';
 import type { ViewUpdate } from '@codemirror/view';
+import { indentUnit, StreamLanguage } from '@codemirror/language';
+import { search, openSearchPanel } from '@codemirror/search';
 import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
 import { yaml } from '@codemirror/lang-yaml';
@@ -42,6 +46,98 @@ export interface RemoteFileEditorState {
   localPath: string;
   content: string;
 }
+
+/** Monospace stack: Windows lands on Cascadia/Consolas, macOS on SF Mono. */
+const EDITOR_FONT =
+  "'Cascadia Code', 'JetBrains Mono', Consolas, 'SF Mono', Menlo, 'Courier New', monospace";
+
+/**
+ * Full syntax palettes. The built-in `defaultHighlightStyle` (shipped via
+ * basicSetup as a *fallback*) was designed for light backgrounds only — on
+ * the dark theme comments melted into the body text and .conf files read as
+ * one flat color. These two palettes replace it with high-contrast,
+ * theme-appropriate colors for every token the config modes emit.
+ */
+const lightTheme = createTheme({
+  theme: 'light',
+  settings: {
+    background: '#ffffff',
+    foreground: '#1F2328',
+    caret: '#0969DA',
+    selection: '#B6D7FF',
+    selectionMatch: '#FFE0A3',
+    lineHighlight: '#F6F8FA',
+    gutterBackground: '#FFFFFF',
+    gutterForeground: '#8C959F',
+    fontFamily: EDITOR_FONT,
+  },
+  styles: [
+    { tag: highlightTags.comment, color: '#6E7781', fontStyle: 'italic' },
+    { tag: highlightTags.keyword, color: '#CF222E' },
+    { tag: highlightTags.string, color: '#0A3069' },
+    { tag: highlightTags.number, color: '#0550AE' },
+    { tag: highlightTags.atom, color: '#0550AE' },
+    { tag: highlightTags.bool, color: '#0550AE' },
+    { tag: highlightTags.definition(highlightTags.variableName), color: '#953800' },
+    { tag: highlightTags.variableName, color: '#953800' },
+    { tag: highlightTags.propertyName, color: '#0550AE' },
+    { tag: highlightTags.heading, color: '#8250DF', fontWeight: '600' },
+    { tag: highlightTags.tagName, color: '#116329' },
+    { tag: highlightTags.link, color: '#0A3069', textDecoration: 'underline' },
+    { tag: highlightTags.invalid, color: '#F85149' },
+  ],
+});
+
+/** Chrome beyond tokens: search panel, match highlight, rhythm and gutters. */
+const lightPanelTheme = EditorView.theme({
+  '.cm-panels': { backgroundColor: '#F6F8FA', color: '#1F2328', borderBottom: '1px solid #D0D7DE' },
+  '.cm-panels.cm-panels-top': { borderTop: 'none' },
+  '.cm-searchMatch': { backgroundColor: '#FFF8C5', outline: '1px solid #D4A72C' },
+  '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: '#FFD786' },
+  '.cm-content': { lineHeight: '1.65', paddingBottom: '12px' },
+  '.cm-gutters': { borderRight: '1px solid #EAEEF2' },
+  '.cm-activeLineGutter': { backgroundColor: '#F6F8FA' },
+});
+
+const darkTheme = createTheme({
+  theme: 'dark',
+  settings: {
+    background: '#282C34',
+    foreground: '#ABB2BF',
+    caret: '#61AFEF',
+    selection: '#3E4451',
+    selectionMatch: '#4B5263',
+    lineHighlight: '#2C313A',
+    gutterBackground: '#282C34',
+    gutterForeground: '#636D83',
+    fontFamily: EDITOR_FONT,
+  },
+  styles: [
+    { tag: highlightTags.comment, color: '#7F848E', fontStyle: 'italic' },
+    { tag: highlightTags.keyword, color: '#C678DD' },
+    { tag: highlightTags.string, color: '#98C379' },
+    { tag: highlightTags.number, color: '#D19A66' },
+    { tag: highlightTags.atom, color: '#D19A66' },
+    { tag: highlightTags.bool, color: '#D19A66' },
+    { tag: highlightTags.definition(highlightTags.variableName), color: '#E06C75' },
+    { tag: highlightTags.variableName, color: '#E06C75' },
+    { tag: highlightTags.propertyName, color: '#61AFEF' },
+    { tag: highlightTags.heading, color: '#61AFEF', fontWeight: '600' },
+    { tag: highlightTags.tagName, color: '#E06C75' },
+    { tag: highlightTags.link, color: '#61AFEF', textDecoration: 'underline' },
+    { tag: highlightTags.invalid, color: '#F44747' },
+  ],
+});
+
+const darkPanelTheme = EditorView.theme({
+  '.cm-panels': { backgroundColor: '#21252B', color: '#ABB2BF', borderBottom: '1px solid #181A1F' },
+  '.cm-panels.cm-panels-top': { borderTop: 'none' },
+  '.cm-searchMatch': { backgroundColor: '#5A4A1F', outline: '1px solid #B0853C' },
+  '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: '#7A6428' },
+  '.cm-content': { lineHeight: '1.65', paddingBottom: '12px' },
+  '.cm-gutters': { borderRight: '1px solid #21252B' },
+  '.cm-activeLineGutter': { backgroundColor: '#2C313A' },
+});
 
 /** Manually picked highlight language; `auto` derives it from the file name. */
 type SyntaxId =
@@ -242,9 +338,11 @@ interface Props {
  * pinning `EditorState.lineSeparator` when the content uses CRLF — without
  * that CodeMirror normalises to LF and every line would show as modified.
  *
- * Toolbar: language picker, line-ending indicator, reload-from-remote, save.
- * Status bar: cursor position, selection, line count, encoding, line ending.
- * Ctrl/Cmd+S saves; closing with unsaved edits asks first.
+ * Toolbar: language picker, search, line-ending indicator, reload, save.
+ * The search panel itself is provided by the explicit `search({ top: true })`
+ * extension — @uiw's basicSetup ships only the search keymap, without the
+ * panel extension Ctrl+F did nothing. Status bar: cursor, selection, lines,
+ * encoding. Ctrl/Cmd+S saves; closing with unsaved edits asks first.
  */
 export function RemoteFileEditor({
   state,
@@ -263,6 +361,8 @@ export function RemoteFileEditor({
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [syntax, setSyntax] = useState<SyntaxId>('auto');
   const [cursor, setCursor] = useState({ line: 1, col: 1, sel: 0, lines: 1 });
+  /** Live EditorView, needed to open the search panel from the toolbar. */
+  const [cmView, setCmView] = useState<EditorView | null>(null);
   /** Latest draft, readable from the Ctrl+S keymap without re-creating it. */
   const draftRef = useRef('');
   draftRef.current = draft;
@@ -304,12 +404,17 @@ export function RemoteFileEditor({
         },
       ]),
     ]);
-    return [...lang, ...sep, ...indent, saveKey];
-    // `state.name`/`state.content`/`usesCrlf` fully determine the language,
-    // separator and indent; onSave is reached through the ref so the keymap
-    // never needs to be rebuilt.
+    // `search({ top: true })` is what actually provides the search panel;
+    // without it Ctrl+F only had a keymap pointing at nothing.
+    const searchPanel: Extension = search({ top: true });
+    const palette: Extension[] = isDark
+      ? [darkTheme, darkPanelTheme]
+      : [lightTheme, lightPanelTheme];
+    return [...lang, ...sep, ...indent, searchPanel, ...palette, saveKey];
+    // The palette rides on isDark; everything else is determined by the
+    // inputs below. onSave/saving reach the keymap through onSaveRef.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state?.name, state?.content, syntax, usesCrlf]);
+  }, [state?.name, state?.content, syntax, usesCrlf, isDark]);
 
   /** Cheap per-keystroke status: cursor, selection width, total lines. */
   const handleUpdate = useCallback((vu: ViewUpdate) => {
@@ -323,6 +428,10 @@ export function RemoteFileEditor({
       lines: vu.state.doc.lines,
     });
   }, []);
+
+  const openSearch = useCallback(() => {
+    if (cmView) openSearchPanel(cmView);
+  }, [cmView]);
 
   const requestClose = useCallback(() => {
     // An in-flight save is reading the scratch file right now — closing the
@@ -343,43 +452,72 @@ export function RemoteFileEditor({
         }}
         fullWidth
         maxWidth="lg"
-        slotProps={{ paper: { sx: { height: '85vh' } } }}
+        slotProps={{
+          paper: {
+            sx: {
+              height: '85vh',
+              borderRadius: 2,
+              overflow: 'hidden',
+            },
+          },
+        }}
       >
-        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, pb: 1 }}>
-          <Typography variant="subtitle1" component="span" sx={{ fontWeight: 600 }}>
+        <DialogTitle
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1.5,
+            py: 1.25,
+            borderBottom: 1,
+            borderColor: 'divider',
+          }}
+        >
+          <Typography
+            variant="subtitle1"
+            component="span"
+            sx={{ fontWeight: 600, flexShrink: 0 }}
+          >
             {state.name}
           </Typography>
-          <Typography variant="caption" component="span" color="text.secondary" noWrap>
+          <Typography
+            variant="caption"
+            component="span"
+            color="text.secondary"
+            noWrap
+            sx={{ flex: 1, minWidth: 0 }}
+          >
             {state.remotePath}
           </Typography>
           {dirty && (
-            <Typography
-              variant="caption"
-              component="span"
-              sx={{ color: 'warning.main', whiteSpace: 'nowrap' }}
-            >
-              ● {t('editor_unsaved')}
-            </Typography>
+            <Chip
+              size="small"
+              variant="outlined"
+              color="warning"
+              label={t('editor_unsaved')}
+              sx={{ height: 20, flexShrink: 0 }}
+            />
           )}
         </DialogTitle>
 
-        {/* Toolbar: language, line endings, reload, save */}
+        {/* Toolbar: language, search, line endings, reload, save */}
         <Box
           sx={{
             px: 2,
-            pb: 1,
+            py: 1,
             display: 'flex',
             alignItems: 'center',
             gap: 1,
             borderBottom: 1,
             borderColor: 'divider',
+            bgcolor: (th) =>
+              th.palette.mode === 'dark' ? 'rgba(255,255,255,0.03)' : 'grey.50',
           }}
         >
           <Select
             size="small"
             value={syntax}
             onChange={(e) => setSyntax(e.target.value as SyntaxId)}
-            sx={{ fontSize: 13, height: 32, minWidth: 140 }}
+            sx={{ fontSize: 13, height: 30, minWidth: 140 }}
           >
             {SYNTAX_OPTIONS.map((id) => (
               <MenuItem key={id} value={id} sx={{ fontSize: 13 }}>
@@ -391,10 +529,26 @@ export function RemoteFileEditor({
               </MenuItem>
             ))}
           </Select>
+          <Tooltip title={t('editor_search')}>
+            <span>
+              <IconButton size="small" onClick={openSearch} aria-label={t('editor_search')}>
+                <MagnifyingGlassIcon size={16} />
+              </IconButton>
+            </span>
+          </Tooltip>
           <Typography
             variant="caption"
             color="text.secondary"
-            sx={{ whiteSpace: 'nowrap', px: 0.5 }}
+            sx={{
+              whiteSpace: 'nowrap',
+              px: 1,
+              height: 22,
+              display: 'inline-flex',
+              alignItems: 'center',
+              borderRadius: 1,
+              border: 1,
+              borderColor: 'divider',
+            }}
           >
             {usesCrlf ? 'CRLF' : 'LF'}
           </Typography>
@@ -410,7 +564,7 @@ export function RemoteFileEditor({
                 {reloading ? (
                   <CircularProgress size={15} color="inherit" />
                 ) : (
-                  <ArrowClockwiseIcon size={15} />
+                  <ArrowClockwiseIcon size={16} />
                 )}
               </IconButton>
             </span>
@@ -432,10 +586,11 @@ export function RemoteFileEditor({
               value={draft}
               onChange={setDraft}
               onUpdate={handleUpdate}
+              onCreateEditor={setCmView}
               theme={isDark ? 'dark' : 'light'}
               extensions={extensions}
               height="100%"
-              style={{ height: '100%' }}
+              style={{ height: '100%', fontSize: 13 }}
               basicSetup={{
                 lineNumbers: true,
                 foldGutter: true,
@@ -455,16 +610,20 @@ export function RemoteFileEditor({
             borderColor: 'divider',
             display: 'flex',
             alignItems: 'center',
-            gap: 2,
-            typography: 'caption',
+            gap: 2.5,
+            fontSize: 12,
             color: 'text.secondary',
+            bgcolor: (th) =>
+              th.palette.mode === 'dark' ? 'rgba(255,255,255,0.03)' : 'grey.50',
             userSelect: 'none',
           }}
         >
           <Box component="span">
             Ln {cursor.line}, Col {cursor.col}
           </Box>
-          {cursor.sel > 0 && <Box component="span">{t('editor_selected', { count: cursor.sel })}</Box>}
+          {cursor.sel > 0 && (
+            <Box component="span">{t('editor_selected', { count: cursor.sel })}</Box>
+          )}
           <Box component="span">{t('editor_lines', { count: cursor.lines })}</Box>
           <Box component="span">UTF-8</Box>
           <Box component="span">{usesCrlf ? 'CRLF' : 'LF'}</Box>
