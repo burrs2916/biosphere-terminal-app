@@ -159,6 +159,7 @@
   "editor_discard": "放弃",
   "editor_reload": "从服务器重新加载",
   "editor_search": "在文件中查找（Ctrl+F）",
+  "editor_eol_toggle": "行尾符 — 点击切换 LF / CRLF",
   "editor_syntax_auto": "自动检测",
   "editor_syntax_plain": "纯文本",
   "editor_selected": "已选 {{count}} 字符",

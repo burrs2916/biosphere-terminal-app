@@ -88,10 +88,61 @@ const lightTheme = createTheme({
   ],
 });
 
-/** Chrome beyond tokens: search panel, match highlight, rhythm and gutters. */
+/** Chrome beyond tokens: search panel, match highlight, rhythm and gutters.
+ * The search panel is fully re-laid-out — CodeMirror's default is a loose
+ * stack of unstyled browser widgets with nothing aligned. */
 const lightPanelTheme = EditorView.theme({
   '.cm-panels': { backgroundColor: '#F6F8FA', color: '#1F2328', borderBottom: '1px solid #D0D7DE' },
   '.cm-panels.cm-panels-top': { borderTop: 'none' },
+  '.cm-panel.cm-search': {
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '8px 12px',
+    fontFamily:
+      "-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+    fontSize: '13px',
+  },
+  '.cm-panel.cm-search input.cm-textfield': {
+    height: '26px',
+    padding: '0 8px',
+    borderRadius: '4px',
+    border: '1px solid #D0D7DE',
+    background: '#FFFFFF',
+    color: '#1F2328',
+    fontSize: '13px',
+  },
+  '.cm-panel.cm-search button[name=close]': {
+    background: 'none',
+    border: 'none',
+    color: '#57606A',
+    fontSize: '18px',
+    lineHeight: 1,
+    cursor: 'pointer',
+    padding: '0 2px',
+  },
+  '.cm-panel.cm-search button.cm-button': {
+    height: '26px',
+    padding: '0 10px',
+    borderRadius: '4px',
+    border: '1px solid #D0D7DE',
+    background: '#F6F8FA',
+    color: '#1F2328',
+    fontSize: '13px',
+    cursor: 'pointer',
+  },
+  '.cm-panel.cm-search button.cm-button:hover': { background: '#EAEEF2' },
+  '.cm-panel.cm-search label': {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+    fontSize: '12px',
+    color: '#57606A',
+    cursor: 'pointer',
+    margin: 0,
+  },
+  '.cm-panel.cm-search label input': { margin: 0, accentColor: '#0969DA' },
   '.cm-searchMatch': { backgroundColor: '#FFF8C5', outline: '1px solid #D4A72C' },
   '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: '#FFD786' },
   '.cm-content': { lineHeight: '1.65', paddingBottom: '12px' },
@@ -132,6 +183,55 @@ const darkTheme = createTheme({
 const darkPanelTheme = EditorView.theme({
   '.cm-panels': { backgroundColor: '#21252B', color: '#ABB2BF', borderBottom: '1px solid #181A1F' },
   '.cm-panels.cm-panels-top': { borderTop: 'none' },
+  '.cm-panel.cm-search': {
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '8px 12px',
+    fontFamily:
+      "-apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+    fontSize: '13px',
+  },
+  '.cm-panel.cm-search input.cm-textfield': {
+    height: '26px',
+    padding: '0 8px',
+    borderRadius: '4px',
+    border: '1px solid #3E4451',
+    background: '#1D1F23',
+    color: '#ABB2BF',
+    fontSize: '13px',
+  },
+  '.cm-panel.cm-search button[name=close]': {
+    background: 'none',
+    border: 'none',
+    color: '#9DA5B4',
+    fontSize: '18px',
+    lineHeight: 1,
+    cursor: 'pointer',
+    padding: '0 2px',
+  },
+  '.cm-panel.cm-search button.cm-button': {
+    height: '26px',
+    padding: '0 10px',
+    borderRadius: '4px',
+    border: '1px solid #3E4451',
+    background: '#2C313A',
+    color: '#ABB2BF',
+    fontSize: '13px',
+    cursor: 'pointer',
+  },
+  '.cm-panel.cm-search button.cm-button:hover': { background: '#3A404B' },
+  '.cm-panel.cm-search label': {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+    fontSize: '12px',
+    color: '#9DA5B4',
+    cursor: 'pointer',
+    margin: 0,
+  },
+  '.cm-panel.cm-search label input': { margin: 0, accentColor: '#61AFEF' },
   '.cm-searchMatch': { backgroundColor: '#5A4A1F', outline: '1px solid #B0853C' },
   '.cm-searchMatch.cm-searchMatch-selected': { backgroundColor: '#7A6428' },
   '.cm-content': { lineHeight: '1.65', paddingBottom: '12px' },
@@ -219,6 +319,67 @@ function languageById(id: SyntaxId, name: string): Extension[] {
   }
 }
 
+/**
+ * Purpose-built grammar for server config files (nginx/sshd/sysctl style).
+ *
+ * The legacy `properties` mode is a poor fit for `.conf`: it was designed for
+ * `key=value` INI files — the *value* half of a line returns no token at all,
+ * so a whole nginx directive line reads as one flat color and values are
+ * indistinguishable from comments. This parser understands the shapes config
+ * files actually use: `#` comments, `[sections]`, `key = value`, and nginx's
+ * `directive value;` / `name { ... }` blocks. Only standard token names are
+ * emitted, so the palettes above style them without a custom tokenTable.
+ */
+interface ConfState {
+  inValue: boolean;
+}
+
+const confLanguage = StreamLanguage.define({
+  name: 'conf',
+  startState: (): ConfState => ({ inValue: false }),
+  token(stream, state: ConfState) {
+    if (stream.sol()) {
+      state.inValue = false;
+      stream.eatSpace();
+      if (stream.eat('#')) {
+        stream.skipToEnd();
+        return 'comment';
+      }
+      if (stream.eat('[')) {
+        stream.skipTo(']');
+        stream.eat(']');
+        return 'heading';
+      }
+    }
+    if (stream.eatSpace()) return null;
+    if (stream.peek() === '#') {
+      // Trailing comment after a directive or value.
+      stream.skipToEnd();
+      return 'comment';
+    }
+    if (stream.match(/[{}]/)) return 'keyword';
+    if (stream.match(';')) return 'keyword';
+    if (!state.inValue) {
+      if (stream.match(/[\w.*\-/]+/)) {
+        state.inValue = true;
+        return 'propertyName';
+      }
+      if (stream.match('=')) {
+        state.inValue = true;
+        return 'keyword';
+      }
+      stream.next();
+      return null;
+    }
+    // Value half: quoted strings get the string token, bare words too, so
+    // values stand apart from both the directive name and the comment gray.
+    if (stream.match(/"[^"\n]*"?/) || stream.match(/'[^'\n]*'?/)) return 'string';
+    if (stream.match(/[^\s;{}#'"]+/)) return 'string';
+    stream.next();
+    return null;
+  },
+});
+
 /** Lowercase extension of `name`, without the dot. */
 function extOf(name: string): string {
   const idx = name.lastIndexOf('.');
@@ -264,9 +425,11 @@ function languageFor(name: string): Extension[] {
       return [css()];
     case 'toml':
       return [StreamLanguage.define(toml)];
+    case 'conf':
+    case 'cnf':
+      return [confLanguage];
     case 'ini':
     case 'cfg':
-    case 'conf':
     case 'env':
     case 'properties':
     // systemd unit files (nginx.service, foo.timer, …) are INI format.
@@ -360,6 +523,8 @@ export function RemoteFileEditor({
   const [draft, setDraft] = useState('');
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [syntax, setSyntax] = useState<SyntaxId>('auto');
+  /** User-picked line ending; null = follow the file as downloaded. */
+  const [eolOverride, setEolOverride] = useState<'LF' | 'CRLF' | null>(null);
   const [cursor, setCursor] = useState({ line: 1, col: 1, sel: 0, lines: 1 });
   /** Live EditorView, needed to open the search panel from the toolbar. */
   const [cmView, setCmView] = useState<EditorView | null>(null);
@@ -377,11 +542,22 @@ export function RemoteFileEditor({
     setDraft(state?.content ?? '');
     setConfirmDiscard(false);
     setSyntax('auto');
+    setEolOverride(null);
     setCursor({ line: 1, col: 1, sel: 0, lines: 1 });
   }, [state]);
 
   const dirty = state !== null && draft !== state.content;
-  const usesCrlf = (state?.content ?? '').includes('\r\n');
+  const usesCrlf = eolOverride ? eolOverride === 'CRLF' : (state?.content ?? '').includes('\r\n');
+
+  /**
+   * Toggle LF ↔ CRLF the way VS Code's status bar does: convert the whole
+   * draft and let save carry the picked ending to the server. Switching
+   * marks the buffer dirty — the change only leaves this machine on save.
+   */
+  const toggleEol = useCallback(() => {
+    setDraft((prev) => (usesCrlf ? prev.replace(/\r\n/g, '\n') : prev.replace(/\r?\n/g, '\r\n')));
+    setEolOverride(usesCrlf ? 'LF' : 'CRLF');
+  }, [usesCrlf]);
 
   useEffect(() => {
     onDirtyChange?.(dirty);
@@ -536,22 +712,30 @@ export function RemoteFileEditor({
               </IconButton>
             </span>
           </Tooltip>
-          <Typography
-            variant="caption"
-            color="text.secondary"
-            sx={{
-              whiteSpace: 'nowrap',
-              px: 1,
-              height: 22,
-              display: 'inline-flex',
-              alignItems: 'center',
-              borderRadius: 1,
-              border: 1,
-              borderColor: 'divider',
-            }}
-          >
-            {usesCrlf ? 'CRLF' : 'LF'}
-          </Typography>
+          <Tooltip title={t('editor_eol_toggle')}>
+            <Typography
+              variant="caption"
+              onClick={toggleEol}
+              sx={{
+                whiteSpace: 'nowrap',
+                px: 1,
+                height: 22,
+                display: 'inline-flex',
+                alignItems: 'center',
+                borderRadius: 1,
+                border: 1,
+                borderColor: 'divider',
+                cursor: 'pointer',
+                userSelect: 'none',
+                '&:hover': {
+                  borderColor: 'primary.main',
+                  color: 'primary.main',
+                },
+              }}
+            >
+              {usesCrlf ? 'CRLF' : 'LF'}
+            </Typography>
+          </Tooltip>
           <Box sx={{ flex: 1 }} />
           <Tooltip title={t('editor_reload')}>
             <span>

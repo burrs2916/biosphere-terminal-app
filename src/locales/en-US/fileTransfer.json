@@ -159,6 +159,7 @@
   "editor_discard": "Discard",
   "editor_reload": "Reload from server",
   "editor_search": "Find in file (Ctrl+F)",
+  "editor_eol_toggle": "Line endings — click to toggle LF / CRLF",
   "editor_syntax_auto": "Auto detect",
   "editor_syntax_plain": "Plain text",
   "editor_selected": "{{count}} selected",
